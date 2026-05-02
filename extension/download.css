@@ -1,0 +1,217 @@
+:root {
+  color-scheme: light;
+  --bg: #f7f0e5;
+  --panel: rgba(255, 251, 243, 0.95);
+  --line: rgba(33, 27, 21, 0.12);
+  --ink: #1f1a15;
+  --muted: #65584b;
+  --accent: #c86e33;
+  --accent-strong: #a14c18;
+  --success: #1f6b43;
+  --danger: #9f2f1e;
+  --shadow: 0 18px 40px rgba(77, 42, 19, 0.13);
+  font-family: "Avenir Next", "Segoe UI Variable", "IBM Plex Sans", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 420px;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top left, rgba(200, 110, 51, 0.18), transparent 24rem),
+    radial-gradient(circle at bottom right, rgba(31, 107, 67, 0.11), transparent 20rem),
+    linear-gradient(180deg, #fbf4ea 0%, #f1e7d8 100%);
+}
+
+code,
+input,
+button {
+  font-family: "Berkeley Mono", "SFMono-Regular", "IBM Plex Mono", monospace;
+}
+
+.sheet {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 22px 18px 24px;
+}
+
+.hero {
+  margin-bottom: 16px;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  color: var(--accent-strong);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+h1,
+.lead,
+.label,
+.hint {
+  margin: 0;
+}
+
+h1 {
+  font-size: 1.9rem;
+  line-height: 1.06;
+}
+
+.lead {
+  margin-top: 10px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.panel,
+.message {
+  margin-top: 16px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(8px);
+}
+
+.label {
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.hint {
+  margin-top: 4px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.target-url {
+  display: block;
+  margin-top: 10px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(33, 27, 21, 0.08);
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.form {
+  display: grid;
+  gap: 16px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field span {
+  font-weight: 600;
+}
+
+input {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid rgba(33, 27, 21, 0.14);
+  border-radius: 14px;
+  background: rgba(255, 253, 249, 0.96);
+  color: var(--ink);
+  font-size: 0.96rem;
+}
+
+input:focus {
+  outline: 2px solid rgba(200, 110, 51, 0.24);
+  outline-offset: 1px;
+  border-color: rgba(200, 110, 51, 0.36);
+}
+
+.button-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.button,
+.recent-button {
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: transform 120ms ease, filter 120ms ease;
+}
+
+.button {
+  min-width: 140px;
+  padding: 12px 18px;
+  background: linear-gradient(135deg, var(--accent) 0%, #e18d50 100%);
+  color: white;
+  font-size: 0.92rem;
+}
+
+.button:hover,
+.recent-button:hover {
+  filter: brightness(1.04);
+  transform: translateY(-1px);
+}
+
+.button-muted {
+  background: #eadfce;
+  color: var(--ink);
+}
+
+.recent-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.recent-button {
+  width: 100%;
+  padding: 12px 14px;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.68);
+  color: var(--ink);
+  border: 1px solid rgba(33, 27, 21, 0.1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.empty-state {
+  padding: 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.56);
+  border: 1px dashed rgba(33, 27, 21, 0.14);
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.message {
+  line-height: 1.5;
+}
+
+.message.error {
+  background: rgba(255, 240, 235, 0.96);
+  border-color: rgba(159, 47, 30, 0.2);
+  color: var(--danger);
+}
+
+.message.success {
+  background: rgba(240, 250, 243, 0.96);
+  border-color: rgba(31, 107, 67, 0.22);
+  color: var(--success);
+}
+
+.hidden {
+  display: none;
+}

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>yt-dlp Bridge Settings</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero">
+        <p class="eyebrow">Local Chrome Bridge</p>
+        <h1>yt-dlp Native Host Settings</h1>
+        <p class="lead">
+          This extension forwards page or share URLs to a local Python host,
+          which then runs <code>yt-dlp</code> with your browser cookies.
+        </p>
+        <div class="meta-grid">
+          <article class="meta-card">
+            <span class="meta-label">Extension ID</span>
+            <code id="extension-id"></code>
+          </article>
+          <article class="meta-card">
+            <span class="meta-label">Native Host</span>
+            <code>dev.arda.ytdlp_host</code>
+          </article>
+        </div>
+      </section>
+
+      <section id="message" class="message hidden"></section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Install</h2>
+            <p>
+              Run the installer once if the extension cannot reach the native
+              host.
+            </p>
+          </div>
+          <code>./scripts/install_native_host.py --browser chrome</code>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Config</h2>
+            <p>Adjust how the local host invokes <code>yt-dlp</code>.</p>
+          </div>
+          <div class="button-row">
+            <button id="reload-button" type="button" class="button button-muted">
+              Reload
+            </button>
+            <button id="save-button" type="button" class="button">
+              Save
+            </button>
+          </div>
+        </div>
+
+        <form id="config-form" class="form">
+          <label class="field">
+            <span>Download directory</span>
+            <input id="download-dir" name="downloadDir" type="text" placeholder="~/Downloads">
+          </label>
+
+          <div class="field-grid">
+            <label class="field">
+              <span>Cookies browser</span>
+              <select id="browser" name="browser">
+                <option value="chrome">chrome</option>
+                <option value="chromium">chromium</option>
+                <option value="brave">brave</option>
+                <option value="edge">edge</option>
+                <option value="firefox">firefox</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Profile</span>
+              <input id="profile" name="profile" type="text" placeholder="Default or Profile 1">
+            </label>
+          </div>
+
+          <label class="field">
+            <span><code>yt-dlp</code> path</span>
+            <input id="yt-dlp-path" name="ytDlpPath" type="text" placeholder="yt-dlp">
+          </label>
+
+          <label class="field">
+            <span>Extra arguments</span>
+            <textarea
+              id="extra-args"
+              name="extraArgs"
+              rows="6"
+              placeholder="One argument per line, for example:
+--embed-metadata
+--restrict-filenames"
+            ></textarea>
+          </label>
+        </form>
+      </section>
+
+      <section class="panel panel-small">
+        <h2>Runtime paths</h2>
+        <dl class="paths">
+          <div>
+            <dt>Config file</dt>
+            <dd><code id="config-path">Not loaded yet</code></dd>
+          </div>
+          <div>
+            <dt>Log file</dt>
+            <dd><code id="log-path">Not loaded yet</code></dd>
+          </div>
+        </dl>
+      </section>
+    </main>
+
+    <script src="options.js"></script>
+  </body>
+</html>

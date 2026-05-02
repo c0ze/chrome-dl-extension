@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Choose Download Folder</title>
+    <link rel="stylesheet" href="download.css">
+  </head>
+  <body>
+    <main class="sheet">
+      <section class="hero">
+        <p class="eyebrow">yt-dlp Bridge</p>
+        <h1>Choose Download Folder</h1>
+        <p class="lead">
+          Pick where this video should go. Your last 10 folders stay here for
+          quick reuse.
+        </p>
+      </section>
+
+      <section id="message" class="message hidden"></section>
+
+      <section class="panel">
+        <p class="label">Target URL</p>
+        <code id="target-url" class="target-url">Loading…</code>
+      </section>
+
+      <section class="panel">
+        <form id="download-form" class="form">
+          <label class="field">
+            <span>Folder path</span>
+            <input
+              id="download-dir"
+              type="text"
+              placeholder="~/Downloads/Twitter"
+              autocomplete="off"
+              spellcheck="false"
+            >
+          </label>
+
+          <div class="button-row">
+            <button id="download-button" type="submit" class="button">
+              Start Download
+            </button>
+            <button id="default-button" type="button" class="button button-muted">
+              Use Default
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <p class="label">Recent Folders</p>
+            <p class="hint">Click any recent folder to download there instantly.</p>
+          </div>
+        </div>
+        <div id="recent-list" class="recent-list"></div>
+      </section>
+    </main>
+
+    <script src="download.js"></script>
+  </body>
+</html>
