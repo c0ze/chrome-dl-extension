@@ -22,6 +22,8 @@ The default download directory is `~/Downloads`.
 ## Setup
 
 1. Make sure `yt-dlp` is installed and available in your `PATH`.
+   Install `zenity` or `kdialog` if you want the download page's folder
+   picker button to open a native directory chooser.
 2. Run the installer:
 
 ```bash

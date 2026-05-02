@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -89,6 +90,55 @@ def notify(summary: str, body: str) -> None:
         )
     except FileNotFoundError:
         return
+
+
+def choose_download_dir(initial_dir: str | None = None) -> dict[str, Any]:
+    initial_path = os.path.expanduser((initial_dir or "").strip())
+    commands = []
+
+    if shutil.which("zenity"):
+        command = ["zenity", "--file-selection", "--directory", "--title", "Choose Download Folder"]
+        if initial_path:
+            command.extend(["--filename", initial_path])
+        commands.append(command)
+
+    if shutil.which("kdialog"):
+        command = ["kdialog", "--title", "Choose Download Folder", "--getexistingdirectory"]
+        if initial_path:
+            command.append(initial_path)
+        commands.append(command)
+
+    if not commands:
+        raise RuntimeError("No folder picker found. Install zenity or kdialog.")
+
+    last_error = None
+    for command in commands:
+        try:
+            result = subprocess.run(
+                command,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except OSError as error:
+            last_error = error
+            continue
+
+        error_output = result.stderr.strip()
+        if result.returncode == 0:
+            path = result.stdout.strip()
+            if path:
+                return {"ok": True, "path": path}
+            return {"ok": True, "path": None}
+
+        if result.returncode == 1 and not error_output:
+            return {"ok": True, "path": None}
+
+        last_error = error_output or f"{command[0]} exited with {result.returncode}"
+
+    raise RuntimeError(f"Could not open folder picker: {last_error}")
 
 
 def normalize_url(raw_url: str) -> str:
@@ -330,6 +380,12 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
             "config_path": str(CONFIG_PATH),
             "log_path": str(LOG_PATH),
         }
+
+    if message_type == "choose_download_dir":
+        initial_dir = message.get("initial_dir")
+        if initial_dir is not None and not isinstance(initial_dir, str):
+            raise ValueError("initial_dir must be a string when provided.")
+        return choose_download_dir(initial_dir)
 
     if message_type == "save_config":
         candidate = message.get("config")

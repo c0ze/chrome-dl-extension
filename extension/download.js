@@ -3,6 +3,7 @@ const RECENT_DIRECTORIES_KEY = "recentDownloadDirectories";
 const MAX_RECENT_DIRECTORIES = 10;
 
 const elements = {
+  browseButton: document.getElementById("browse-button"),
   defaultButton: document.getElementById("default-button"),
   downloadButton: document.getElementById("download-button"),
   downloadDir: document.getElementById("download-dir"),
@@ -92,6 +93,7 @@ function renderRecentDirectories(directories) {
 function setBusy(isBusy) {
   elements.downloadButton.disabled = isBusy;
   elements.defaultButton.disabled = isBusy;
+  elements.browseButton.disabled = isBusy;
   elements.downloadDir.disabled = isBusy;
 }
 
@@ -179,6 +181,33 @@ elements.downloadForm.addEventListener("submit", (event) => {
 elements.defaultButton.addEventListener("click", () => {
   elements.downloadDir.value = state.defaultDirectory;
   void startDownload(state.defaultDirectory);
+});
+
+elements.browseButton.addEventListener("click", async () => {
+  hideMessage();
+  elements.browseButton.disabled = true;
+
+  try {
+    const response = await callHost({
+      type: "choose_download_dir",
+      initial_dir: elements.downloadDir.value.trim(),
+    });
+
+    if (!response?.ok) {
+      throw new Error(response?.error || "The native host could not open the folder picker.");
+    }
+
+    if (response.path) {
+      elements.downloadDir.value = response.path;
+    }
+  } catch (error) {
+    showMessage(
+      "error",
+      `Could not choose a folder. ${error.message || "Please check the native host setup."}`
+    );
+  } finally {
+    elements.browseButton.disabled = false;
+  }
 });
 
 void initialize();

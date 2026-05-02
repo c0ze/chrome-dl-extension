@@ -26,8 +26,8 @@
 
       <section class="panel">
         <form id="download-form" class="form">
-          <label class="field">
-            <span>Folder path</span>
+          <label class="field-label" for="download-dir">Folder path</label>
+          <div class="folder-row">
             <input
               id="download-dir"
               type="text"
@@ -35,7 +35,10 @@
               autocomplete="off"
               spellcheck="false"
             >
-          </label>
+            <button id="browse-button" type="button" class="button button-small">
+              Choose Folder…
+            </button>
+          </div>
 
           <div class="button-row">
             <button id="download-button" type="submit" class="button">
