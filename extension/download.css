@@ -210,6 +210,13 @@ input:disabled {
   align-items: flex-start;
 }
 
+.dashboard-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 .icon-button {
   min-width: 64px;
   height: 36px;
@@ -300,6 +307,15 @@ input:disabled {
 
 .download-action-button:hover {
   filter: brightness(1.04);
+}
+
+.button-danger {
+  background: var(--danger);
+}
+
+.button-muted-small {
+  background: #eadfce;
+  color: var(--ink);
 }
 
 .progress-track {

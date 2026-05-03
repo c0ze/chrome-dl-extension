@@ -6,6 +6,7 @@ const MAX_VISIBLE_DOWNLOADS = 8;
 
 const elements = {
   browseButton: document.getElementById("browse-button"),
+  clearButton: document.getElementById("clear-button"),
   dashboardSummary: document.getElementById("dashboard-summary"),
   defaultButton: document.getElementById("default-button"),
   downloadList: document.getElementById("download-list"),
@@ -124,6 +125,13 @@ function makeMetaItem(text) {
   return item;
 }
 
+function duplicatePromptText(duplicateJob) {
+  const title = duplicateJob ? formatJobTitle(duplicateJob) : "this video";
+  const status = duplicateJob?.status || "existing";
+  const location = duplicateJob?.download_dir ? `\n\nFolder: ${duplicateJob.download_dir}` : "";
+  return `This video is already ${status}:\n\n${title}${location}\n\nDownload a duplicate video anyway?`;
+}
+
 async function startDashboardJob(jobId) {
   try {
     const response = await callHost({ type: "start_download_job", job_id: jobId });
@@ -134,6 +142,46 @@ async function startDashboardJob(jobId) {
     void refreshDownloads();
   } catch (error) {
     showMessage("error", error.message || "Could not start the queued download.");
+  }
+}
+
+async function removeDashboardJob(jobId) {
+  try {
+    const response = await callHost({ type: "remove_download_job", job_id: jobId });
+    if (!response?.ok) {
+      throw new Error(response?.error || "Could not remove this download.");
+    }
+
+    void refreshDownloads();
+  } catch (error) {
+    showMessage("error", error.message || "Could not remove this download.");
+  }
+}
+
+async function clearDashboardJobs() {
+  try {
+    const response = await callHost({ type: "clear_download_jobs" });
+    if (!response?.ok) {
+      throw new Error(response?.error || "Could not clear the download list.");
+    }
+
+    showMessage("success", `Removed ${response.removed || 0} downloads from the dashboard.`);
+    void refreshDownloads();
+  } catch (error) {
+    showMessage("error", error.message || "Could not clear the download list.");
+  }
+}
+
+async function openDashboardFolder(jobId) {
+  try {
+    const response = await callHost({ type: "open_download_folder", job_id: jobId });
+    if (!response?.ok) {
+      throw new Error(response?.error || "Could not open the containing folder.");
+    }
+
+    showMessage("success", `Opened ${response.path || "the containing folder"}.`);
+  } catch (error) {
+    showMessage("error", error.message || "Could not open the containing folder.");
   }
 }
 
@@ -191,6 +239,30 @@ function renderDownloads(jobs, activeCount, queuedCount) {
         void startDashboardJob(job.id);
       });
       actions.append(startButton);
+    }
+
+    if (job.filename || job.download_dir) {
+      const folderButton = document.createElement("button");
+      folderButton.type = "button";
+      folderButton.className = "download-action-button button-muted-small";
+      folderButton.textContent = "Folder";
+      folderButton.title = "Open the containing folder";
+      folderButton.addEventListener("click", () => {
+        void openDashboardFolder(job.id);
+      });
+      actions.append(folderButton);
+    }
+
+    if (job.status !== "running") {
+      const removeButton = document.createElement("button");
+      removeButton.type = "button";
+      removeButton.className = "download-action-button button-danger";
+      removeButton.textContent = "Remove";
+      removeButton.title = "Remove this item from the dashboard";
+      removeButton.addEventListener("click", () => {
+        void removeDashboardJob(job.id);
+      });
+      actions.append(removeButton);
     }
 
     main.append(titleGroup, actions);
@@ -274,7 +346,7 @@ function setBusy(isBusy) {
   elements.downloadDir.disabled = isBusy;
 }
 
-async function startDownload(directory) {
+async function startDownload(directory, allowDuplicate = false) {
   const selectedDirectory = directory.trim();
   if (!selectedDirectory) {
     showMessage("error", "Enter a folder path first.");
@@ -291,7 +363,19 @@ async function startDownload(directory) {
       download_dir: selectedDirectory,
       source: state.source,
       url: state.targetUrl,
+      allow_duplicate: allowDuplicate,
     });
+
+    if (response?.duplicate) {
+      void refreshDownloads();
+      const shouldDownloadDuplicate = window.confirm(duplicatePromptText(response.duplicate_job));
+      if (shouldDownloadDuplicate) {
+        await startDownload(selectedDirectory, true);
+      } else {
+        showMessage("error", "Duplicate download was not queued.");
+      }
+      return;
+    }
 
     if (!response?.ok) {
       throw new Error(response?.error || "The native host rejected the request.");
@@ -389,6 +473,10 @@ elements.browseButton.addEventListener("click", async () => {
 
 elements.refreshButton.addEventListener("click", () => {
   void refreshDownloads();
+});
+
+elements.clearButton.addEventListener("click", () => {
+  void clearDashboardJobs();
 });
 
 window.addEventListener("beforeunload", () => {

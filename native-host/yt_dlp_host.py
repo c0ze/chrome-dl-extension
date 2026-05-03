@@ -176,6 +176,15 @@ def get_jobs() -> dict[str, Any]:
     }
 
 
+def duplicate_download_for_url(state: dict[str, Any], url: str) -> dict[str, Any] | None:
+    duplicate_statuses = {"queued", "running", "complete"}
+    for job in state["jobs"]:
+        if job.get("url") == url and job.get("status") in duplicate_statuses:
+            return normalize_job(job)
+
+    return None
+
+
 def read_message() -> dict[str, Any] | None:
     raw_length = sys.stdin.buffer.read(4)
     if not raw_length:
@@ -562,6 +571,93 @@ def force_download_job(job_id: str) -> dict[str, Any]:
     }
 
 
+def remove_download_job(job_id: str) -> dict[str, Any]:
+    def mutator(state: dict[str, Any]) -> dict[str, Any]:
+        for job in state["jobs"]:
+            if job.get("id") != job_id:
+                continue
+
+            if job.get("status") == "running":
+                return {"ok": False, "error": "Running downloads cannot be removed."}
+
+            state["jobs"] = [existing for existing in state["jobs"] if existing.get("id") != job_id]
+            return {"ok": True, "removed": 1}
+
+        return {"ok": False, "error": "Download job not found."}
+
+    return mutate_jobs(mutator)
+
+
+def clear_download_jobs() -> dict[str, Any]:
+    def mutator(state: dict[str, Any]) -> dict[str, Any]:
+        original_count = len(state["jobs"])
+        state["jobs"] = [job for job in state["jobs"] if job.get("status") == "running"]
+        return {"ok": True, "removed": original_count - len(state["jobs"])}
+
+    return mutate_jobs(mutator)
+
+
+def get_download_job(job_id: str) -> dict[str, Any] | None:
+    ensure_state()
+    with JOBS_LOCK_PATH.open("w", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_SH)
+        state = read_jobs_unlocked()
+        fcntl.flock(lock_handle, fcntl.LOCK_UN)
+
+    for job in state["jobs"]:
+        if job.get("id") == job_id:
+            return normalize_job(job)
+
+    return None
+
+
+def containing_folder_for_job(job: dict[str, Any]) -> Path:
+    filename = str(job.get("filename") or "").strip().strip('"')
+    if filename:
+        return Path(os.path.expanduser(filename)).parent
+
+    download_dir = str(job.get("download_dir") or "").strip()
+    if download_dir:
+        return Path(os.path.expanduser(download_dir))
+
+    raise RuntimeError("This download does not have a known folder yet.")
+
+
+def open_folder(path: Path) -> None:
+    for opener in ("xdg-open", "gio", "kde-open", "kde-open5"):
+        executable = shutil.which(opener)
+        if not executable:
+            continue
+
+        command = [executable, str(path)]
+        if opener == "gio":
+            command = [executable, "open", str(path)]
+
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return
+
+    raise RuntimeError("No file explorer opener found. Install xdg-open or gio.")
+
+
+def open_download_folder(job_id: str) -> dict[str, Any]:
+    job = get_download_job(job_id)
+    if not job:
+        return {"ok": False, "error": "Download job not found."}
+
+    folder = containing_folder_for_job(job)
+    if not folder.is_dir():
+        return {"ok": False, "error": f"Folder does not exist: {folder}"}
+
+    open_folder(folder)
+    return {"ok": True, "path": str(folder)}
+
+
 def run_download_worker(encoded_payload: str) -> int:
     try:
         payload = json.loads(
@@ -701,6 +797,7 @@ def start_download_job(
     raw_url: str,
     source: str,
     download_dir_override: str | None = None,
+    allow_duplicate: bool = False,
 ) -> dict[str, Any]:
     normalized_url = normalize_url(raw_url)
     job_id = uuid.uuid4().hex
@@ -711,20 +808,36 @@ def start_download_job(
             raise ValueError("download_dir must be a non-empty string when provided.")
 
     started_at = timestamp()
-    upsert_job(
-        {
-            "id": job_id,
-            "url": normalized_url,
-            "source": source,
-            "download_dir": normalized_download_dir,
-            "status": "queued",
-            "status_detail": "Queued",
-            "progress": 0,
-            "started_at": started_at,
-            "queued_at": started_at,
-            "updated_at": started_at,
-        }
-    )
+    new_job = {
+        "id": job_id,
+        "url": normalized_url,
+        "source": source,
+        "download_dir": normalized_download_dir,
+        "status": "queued",
+        "status_detail": "Queued",
+        "progress": 0,
+        "started_at": started_at,
+        "queued_at": started_at,
+        "updated_at": started_at,
+    }
+
+    def mutator(state: dict[str, Any]) -> dict[str, Any]:
+        if not allow_duplicate:
+            duplicate = duplicate_download_for_url(state, normalized_url)
+            if duplicate:
+                return {
+                    "ok": False,
+                    "duplicate": True,
+                    "duplicate_job": duplicate,
+                    "error": "This video is already queued, running, or completed.",
+                }
+
+        state["jobs"].insert(0, normalize_job(new_job))
+        return {"ok": True}
+
+    response = mutate_jobs(mutator)
+    if not response.get("ok"):
+        return response
 
     launch_result = launch_next_queued_job(job_id)
 
@@ -748,7 +861,8 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
         download_dir = message.get("download_dir")
         if download_dir is not None and not isinstance(download_dir, str):
             raise ValueError("download_dir must be a string when provided.")
-        return start_download_job(url, source, download_dir)
+        allow_duplicate = bool(message.get("allow_duplicate", False))
+        return start_download_job(url, source, download_dir, allow_duplicate)
 
     if message_type == "get_config":
         config = load_config()
@@ -767,6 +881,21 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
         if not job_id:
             raise ValueError("Missing job_id field.")
         return force_download_job(job_id)
+
+    if message_type == "remove_download_job":
+        job_id = str(message.get("job_id", "")).strip()
+        if not job_id:
+            raise ValueError("Missing job_id field.")
+        return remove_download_job(job_id)
+
+    if message_type == "clear_download_jobs":
+        return clear_download_jobs()
+
+    if message_type == "open_download_folder":
+        job_id = str(message.get("job_id", "")).strip()
+        if not job_id:
+            raise ValueError("Missing job_id field.")
+        return open_download_folder(job_id)
 
     if message_type == "choose_download_dir":
         initial_dir = message.get("initial_dir")
