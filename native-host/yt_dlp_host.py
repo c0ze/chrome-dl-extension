@@ -23,6 +23,8 @@ CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = STATE_DIR / "host.log"
 JOBS_PATH = STATE_DIR / "downloads.json"
 JOBS_LOCK_PATH = STATE_DIR / "downloads.lock"
+MAX_LOG_BYTES = 5 * 1024 * 1024
+LOG_BACKUP_PATH = STATE_DIR / "host.log.1"
 DEFAULT_CONFIG = {
     "browser": "chrome",
     "profile": "",
@@ -60,8 +62,22 @@ def ensure_state() -> None:
         pass
 
 
+def rotate_log_if_needed() -> None:
+    try:
+        if not LOG_PATH.exists() or LOG_PATH.stat().st_size < MAX_LOG_BYTES:
+            return
+        try:
+            LOG_BACKUP_PATH.unlink()
+        except FileNotFoundError:
+            pass
+        LOG_PATH.replace(LOG_BACKUP_PATH)
+    except OSError:
+        pass
+
+
 def log_line(message: str) -> None:
     ensure_state()
+    rotate_log_if_needed()
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     try:
         with LOG_PATH.open("a", encoding="utf-8") as handle:
@@ -685,6 +701,7 @@ def run_download_worker(encoded_payload: str) -> int:
         )
 
         try:
+            rotate_log_if_needed()
             try:
                 handle = LOG_PATH.open("a", encoding="utf-8")
             except OSError:

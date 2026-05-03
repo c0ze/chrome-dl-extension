@@ -51,6 +51,17 @@ is loaded.
   URL to a small folder picker, then start `yt-dlp`.
 - Or right-click a page or link and choose `Download with yt-dlp`, then pick a
   folder.
+- The download page shows a dashboard with queued, running, completed, and
+  failed downloads. Downloads are processed one at a time.
+- Use `Start` or `Retry` on a dashboard item to force it to the front of the
+  queue when no other download is running.
+- Use `Folder` on a dashboard item to open the containing folder. Completed
+  downloads use the final filename reported by `yt-dlp`; otherwise the selected
+  download folder is opened.
+- Use `Remove` or `Remove All` to clear completed and failed items from the
+  dashboard. Running downloads are kept.
+- If a URL is already queued, running, or completed in the dashboard, the
+  extension asks before queueing a duplicate.
 - The native host uses `notify-send` to show start and finish notifications.
 - The picker remembers your last 10 folder paths in Chrome extension storage for
   quick reuse.
@@ -83,8 +94,19 @@ You can edit that file manually or use the extension options page.
   `~/.local/share/yt-dlp-browser-host/yt_dlp_host.py`
 - Installed native messaging manifest for Chrome:
   `~/.config/google-chrome/NativeMessagingHosts/dev.arda.ytdlp_host.json`
+- Dashboard queue/history:
+  `~/.local/state/yt-dlp-browser-host/downloads.json`
+- Queue lock file:
+  `~/.local/state/yt-dlp-browser-host/downloads.lock`
 - Log file:
   `~/.local/state/yt-dlp-browser-host/host.log`
+- Rotated previous log:
+  `~/.local/state/yt-dlp-browser-host/host.log.1`
+
+The dashboard history is capped at 40 jobs. The log is rotated when it reaches
+5 MB, keeping one previous backup, so regular use should stay around 10 MB of
+native-host logs. The extension also stores only the last 10 folder paths in
+Chrome local extension storage.
 
 ## Notes
 
