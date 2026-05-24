@@ -49,6 +49,11 @@ is loaded.
 
 - Open an X/Twitter post and click the extension button to send the current tab
   URL to a small folder picker, then start `yt-dlp`.
+- Open an X/Twitter profile media URL, such as `https://x.com/username/media`,
+  and click the extension button to scan the loaded page for video post links.
+  The host queues those videos one by one and downloads them into a `username/`
+  folder inside the selected target folder. Scroll the media page first if you
+  want older posts included in the scan.
 - Or right-click a page or link and choose `Download with yt-dlp`, then pick a
   folder.
 - The download page shows a dashboard with queued, running, completed, and
@@ -61,7 +66,8 @@ is loaded.
 - Use `Remove` or `Remove All` to clear completed and failed items from the
   dashboard. Running downloads are kept.
 - If a URL is already queued, running, or completed in the dashboard, the
-  extension asks before queueing a duplicate.
+  extension asks before queueing a duplicate. Profile media scans use the same
+  duplicate check for every discovered video URL.
 - The native host uses `notify-send` to show start and finish notifications.
 - The picker remembers your last 10 folder paths in Chrome extension storage for
   quick reuse.
@@ -103,10 +109,11 @@ You can edit that file manually or use the extension options page.
 - Rotated previous log:
   `~/.local/state/yt-dlp-browser-host/host.log.1`
 
-The dashboard history is capped at 40 jobs. The log is rotated when it reaches
-5 MB, keeping one previous backup, so regular use should stay around 10 MB of
-native-host logs. The extension also stores only the last 10 folder paths in
-Chrome local extension storage.
+Queued and running jobs are always retained. Finished dashboard history is
+capped at 40 jobs. The log is rotated when it reaches 5 MB, keeping one previous
+backup, so regular use should stay around 10 MB of native-host logs. The
+extension also stores only the last 10 folder paths in Chrome local extension
+storage.
 
 ## Notes
 

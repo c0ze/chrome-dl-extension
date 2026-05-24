@@ -21,6 +21,8 @@ const elements = {
 
 const state = {
   defaultDirectory: "~/Downloads",
+  profileScanError: "",
+  profileUrls: null,
   source: "extension",
   targetUrl: "",
 };
@@ -125,11 +127,42 @@ function makeMetaItem(text) {
   return item;
 }
 
-function duplicatePromptText(duplicateJob) {
+function duplicatePromptText(duplicateJob, duplicateCount) {
   const title = duplicateJob ? formatJobTitle(duplicateJob) : "this video";
   const status = duplicateJob?.status || "existing";
   const location = duplicateJob?.download_dir ? `\n\nFolder: ${duplicateJob.download_dir}` : "";
-  return `This video is already ${status}:\n\n${title}${location}\n\nDownload a duplicate video anyway?`;
+  const intro =
+    typeof duplicateCount === "number" && duplicateCount > 1
+      ? `${duplicateCount} videos from this profile are already queued, running, or complete.`
+      : `This video is already ${status}:`;
+  return `${intro}\n\n${title}${location}\n\nDownload duplicate video files anyway?`;
+}
+
+function isTwitterProfileMediaUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    const hosts = ["twitter.com", "www.twitter.com", "mobile.twitter.com", "x.com", "www.x.com"];
+    const parts = url.pathname.split("/").filter(Boolean);
+    return hosts.includes(url.hostname) && parts.length >= 2 && parts[1].toLowerCase() === "media";
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function loadProfileBatch(batchKey) {
+  if (!batchKey) {
+    return null;
+  }
+
+  const result = await chrome.storage.session.get([batchKey]);
+  const batch = result[batchKey];
+  await chrome.storage.session.remove([batchKey]);
+
+  if (!batch || !Array.isArray(batch.urls)) {
+    return null;
+  }
+
+  return batch.urls.filter((url) => typeof url === "string" && url.startsWith("https://"));
 }
 
 async function startDashboardJob(jobId) {
@@ -354,6 +387,15 @@ async function startDownload(directory, allowDuplicate = false) {
     return;
   }
 
+  if (isTwitterProfileMediaUrl(state.targetUrl) && !state.profileUrls?.length) {
+    showMessage(
+      "error",
+      state.profileScanError ||
+        "No profile video links were found. Scroll the profile media page to load videos, then try again."
+    );
+    return;
+  }
+
   hideMessage();
   setBusy(true);
 
@@ -364,11 +406,14 @@ async function startDownload(directory, allowDuplicate = false) {
       source: state.source,
       url: state.targetUrl,
       allow_duplicate: allowDuplicate,
+      profile_urls: state.profileUrls,
     });
 
     if (response?.duplicate) {
       void refreshDownloads();
-      const shouldDownloadDuplicate = window.confirm(duplicatePromptText(response.duplicate_job));
+      const shouldDownloadDuplicate = window.confirm(
+        duplicatePromptText(response.duplicate_job, response.duplicate_count)
+      );
       if (shouldDownloadDuplicate) {
         await startDownload(selectedDirectory, true);
       } else {
@@ -383,7 +428,18 @@ async function startDownload(directory, allowDuplicate = false) {
 
     const recentDirectories = await saveRecentDirectory(selectedDirectory);
     renderRecentDirectories(recentDirectories);
-    showMessage("success", `Download queued in ${selectedDirectory}`);
+    if (response.profile) {
+      const count = response.queued_count || 0;
+      const skipped = response.skipped_count || 0;
+      const label = count === 1 ? "download" : "downloads";
+      const suffix = skipped > 0 ? ` (skipped ${skipped} already queued or downloaded)` : "";
+      showMessage(
+        "success",
+        `Queued ${count} profile ${label} in ${response.download_dir}${suffix}`
+      );
+    } else {
+      showMessage("success", `Download queued in ${selectedDirectory}`);
+    }
     void refreshDownloads();
   } catch (error) {
     showMessage(
@@ -408,6 +464,7 @@ async function initialize() {
   const params = new URLSearchParams(window.location.search);
   state.targetUrl = params.get("url") || "";
   state.source = params.get("source") || "extension";
+  state.profileScanError = params.get("profileScanError") || "";
   elements.targetUrl.textContent = state.targetUrl || "Missing URL";
 
   if (!state.targetUrl) {
@@ -417,14 +474,30 @@ async function initialize() {
   }
 
   try {
-    const [defaultDirectory, recentDirectories] = await Promise.all([
+    const [defaultDirectory, recentDirectories, profileUrls] = await Promise.all([
       loadDefaultDirectory(),
       getRecentDirectories(),
+      loadProfileBatch(params.get("profileBatchKey")),
     ]);
 
     state.defaultDirectory = defaultDirectory;
+    state.profileUrls = profileUrls;
     elements.downloadDir.value = recentDirectories[0] || defaultDirectory;
     renderRecentDirectories(recentDirectories);
+
+    if (state.profileScanError) {
+      showMessage("error", state.profileScanError);
+    } else if (isTwitterProfileMediaUrl(state.targetUrl)) {
+      const count = state.profileUrls?.length || 0;
+      if (count > 0) {
+        showMessage("success", `Found ${count} video links on this profile page.`);
+      } else {
+        showMessage(
+          "error",
+          "No video links were found. Scroll the profile media page to load videos, then try again."
+        );
+      }
+    }
   } catch (error) {
     showMessage(
       "error",

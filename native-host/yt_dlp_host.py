@@ -41,7 +41,7 @@ TWITTER_HOSTS = {
     "www.x.com",
 }
 TWITTER_OUTPUT_TEMPLATE = "%(uploader_id,uploader|unknown-account)S-%(id)s.%(ext)s"
-MAX_REMEMBERED_JOBS = 40
+MAX_REMEMBERED_FINISHED_JOBS = 40
 PROGRESS_RE = re.compile(r"\[download\]\s+(?P<percent>\d+(?:\.\d+)?)%")
 SPEED_RE = re.compile(r"\sat\s+(?P<speed>\S+/s)")
 ETA_RE = re.compile(r"\sETA\s+(?P<eta>\S+)")
@@ -136,7 +136,9 @@ def read_jobs_unlocked() -> dict[str, Any]:
 def write_jobs_unlocked(state: dict[str, Any]) -> None:
     jobs = [normalize_job(job) for job in state.get("jobs", []) if isinstance(job, dict)]
     jobs.sort(key=lambda job: job.get("started_at") or "", reverse=True)
-    trimmed = jobs[:MAX_REMEMBERED_JOBS]
+    active_jobs = [job for job in jobs if job.get("status") in {"queued", "running"}]
+    finished_jobs = [job for job in jobs if job.get("status") not in {"queued", "running"}]
+    trimmed = active_jobs + finished_jobs[:MAX_REMEMBERED_FINISHED_JOBS]
     temp_path = JOBS_PATH.with_suffix(".json.tmp")
     with temp_path.open("w", encoding="utf-8") as handle:
         json.dump({"jobs": trimmed}, handle, indent=2)
@@ -192,10 +194,18 @@ def get_jobs() -> dict[str, Any]:
     }
 
 
+def normalized_url_key(raw_url: Any) -> str:
+    try:
+        return normalize_url(str(raw_url))
+    except (TypeError, ValueError):
+        return str(raw_url or "")
+
+
 def duplicate_download_for_url(state: dict[str, Any], url: str) -> dict[str, Any] | None:
     duplicate_statuses = {"queued", "running", "complete"}
+    target_url = normalized_url_key(url)
     for job in state["jobs"]:
-        if job.get("url") == url and job.get("status") in duplicate_statuses:
+        if normalized_url_key(job.get("url")) == target_url and job.get("status") in duplicate_statuses:
             return normalize_job(job)
 
     return None
@@ -293,7 +303,7 @@ def normalize_url(raw_url: str) -> str:
     hostname = (parsed.hostname or "").lower()
     parsed = parsed._replace(fragment="")
     if hostname in TWITTER_HOSTS:
-        parsed = parsed._replace(query="")
+        parsed = parsed._replace(netloc="x.com", query="")
 
     return urlunparse(parsed)
 
@@ -301,6 +311,29 @@ def normalize_url(raw_url: str) -> str:
 def is_twitter_url(raw_url: str) -> bool:
     parsed = urlparse(raw_url)
     return (parsed.hostname or "").lower() in TWITTER_HOSTS
+
+
+def twitter_profile_media_username(raw_url: str) -> str | None:
+    parsed = urlparse(raw_url)
+    if (parsed.hostname or "").lower() not in TWITTER_HOSTS:
+        return None
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 2 or parts[1].lower() != "media":
+        return None
+
+    username = parts[0]
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,15}", username):
+        return None
+    if username.lower() in {"home", "explore", "notifications", "messages", "i", "settings"}:
+        return None
+
+    return username
+
+
+def safe_path_part(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
+    return cleaned or "twitter-profile"
 
 
 def config_for_response(config: dict[str, Any]) -> dict[str, Any]:
@@ -867,6 +900,110 @@ def start_download_job(
     }
 
 
+def start_profile_download_jobs(
+    raw_url: str,
+    source: str,
+    download_dir_override: str | None,
+    profile_video_urls: list[str],
+    allow_duplicate: bool = False,
+) -> dict[str, Any]:
+    normalized_profile_url = normalize_url(raw_url)
+    username = twitter_profile_media_username(normalized_profile_url)
+    if not username:
+        raise ValueError("Profile media downloads require a Twitter/X /media URL.")
+
+    if download_dir_override is None:
+        config = load_config()
+        base_download_dir = str(config["download_dir"]).strip()
+    else:
+        base_download_dir = str(download_dir_override).strip()
+
+    if not base_download_dir:
+        raise ValueError("download_dir must be a non-empty string when provided.")
+
+    video_urls = []
+    seen_urls: set[str] = set()
+    for profile_video_url in profile_video_urls:
+        normalized_video_url = normalize_url(profile_video_url)
+        if normalized_video_url in seen_urls:
+            continue
+        seen_urls.add(normalized_video_url)
+        video_urls.append(normalized_video_url)
+
+    if not video_urls:
+        raise ValueError(
+            "No profile video links were provided. Open the profile media page in Chrome and try again."
+        )
+
+    profile_dir = Path(os.path.expanduser(base_download_dir)) / safe_path_part(username)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    started_at = timestamp()
+
+    def make_job(video_url: str, index: int) -> dict[str, Any]:
+        queued_at = f"{started_at}.{index:04d}"
+        return {
+            "id": uuid.uuid4().hex,
+            "url": video_url,
+            "source": source,
+            "download_dir": str(profile_dir),
+            "status": "queued",
+            "status_detail": "Queued",
+            "progress": 0,
+            "started_at": queued_at,
+            "queued_at": queued_at,
+            "updated_at": started_at,
+        }
+
+    new_jobs = [normalize_job(make_job(video_url, index)) for index, video_url in enumerate(video_urls)]
+
+    def mutator(state: dict[str, Any]) -> dict[str, Any]:
+        if allow_duplicate:
+            queued_jobs = list(new_jobs)
+            skipped = 0
+        else:
+            queued_jobs = []
+            duplicates: list[dict[str, Any]] = []
+            for job in new_jobs:
+                duplicate = duplicate_download_for_url(state, job["url"])
+                if duplicate:
+                    duplicates.append(duplicate)
+                else:
+                    queued_jobs.append(job)
+
+            if not queued_jobs:
+                return {
+                    "ok": False,
+                    "duplicate": True,
+                    "duplicate_job": duplicates[0],
+                    "duplicate_count": len(duplicates),
+                    "discovered_count": len(new_jobs),
+                    "error": "All profile videos are already queued, running, or completed.",
+                }
+
+            skipped = len(duplicates)
+
+        state["jobs"] = queued_jobs + state["jobs"]
+        return {"ok": True, "queued_jobs": queued_jobs, "skipped_count": skipped}
+
+    response = mutate_jobs(mutator)
+    if not response.get("ok"):
+        return response
+
+    queued_jobs = response["queued_jobs"]
+    launch_result = launch_next_queued_job(queued_jobs[0]["id"])
+    return {
+        "ok": True,
+        "profile": True,
+        "username": username,
+        "status": "started" if launch_result.get("started") else "queued",
+        "queued_count": len(queued_jobs),
+        "discovered_count": len(new_jobs),
+        "skipped_count": response.get("skipped_count", 0),
+        "download_dir": str(profile_dir),
+        "log_path": str(LOG_PATH),
+    }
+
+
 def handle_message(message: dict[str, Any]) -> dict[str, Any]:
     message_type = message.get("type")
 
@@ -879,6 +1016,19 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
         if download_dir is not None and not isinstance(download_dir, str):
             raise ValueError("download_dir must be a string when provided.")
         allow_duplicate = bool(message.get("allow_duplicate", False))
+        if twitter_profile_media_username(url):
+            raw_profile_urls = message.get("profile_urls")
+            if not isinstance(raw_profile_urls, list):
+                raw_profile_urls = []
+            profile_urls = [str(profile_url).strip() for profile_url in raw_profile_urls]
+            profile_urls = [profile_url for profile_url in profile_urls if profile_url]
+            return start_profile_download_jobs(
+                url,
+                source,
+                download_dir,
+                profile_urls,
+                allow_duplicate,
+            )
         return start_download_job(url, source, download_dir, allow_duplicate)
 
     if message_type == "get_config":
