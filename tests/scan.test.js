@@ -241,6 +241,136 @@ test("a scraped page name still wins over the decoded /people/ URL segment", asy
   assert.equal(result.profileName, "Real Scraped Name");
 });
 
+// --- Trailing tab-name-token stripping (Facebook appends the active tab's
+// name to og:title, e.g. og:title "鈴木 Reels" on a reels page for a profile
+// actually named "鈴木") ---
+
+test("og:title of '鈴木 Reels' on a reels page yields profile name '鈴木'", async () => {
+  withPage(
+    `<html><head>
+       <meta property="og:title" content="鈴木 Reels">
+     </head><body><div role="main"><a href="/reel/1">x</a></div></body></html>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["www.facebook.com"],
+    expectedUsername: "somepage",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+  assert.equal(result.profileName, "鈴木");
+});
+
+test("og:title of 'Some Creator Videos' yields 'Some Creator'", async () => {
+  withPage(
+    `<html><head>
+       <meta property="og:title" content="Some Creator Videos">
+     </head><body><div role="main"><a href="/reel/1">x</a></div></body></html>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["www.facebook.com"],
+    expectedUsername: "somepage",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+  assert.equal(result.profileName, "Some Creator");
+});
+
+test("a page legitimately named exactly 'Reels' is not reduced to an empty name", async () => {
+  withPage(
+    `<html><head>
+       <meta property="og:title" content="Reels">
+     </head><body><div role="main"><a href="/reel/1">x</a></div></body></html>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["www.facebook.com"],
+    expectedUsername: "somepage",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+  assert.equal(result.profileName, "Reels");
+});
+
+test("a name ending in a word that merely contains a tab token (e.g. 'Prereels') is not mangled", async () => {
+  withPage(
+    `<html><head>
+       <meta property="og:title" content="Prereels">
+     </head><body><div role="main"><a href="/reel/1">x</a></div></body></html>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["www.facebook.com"],
+    expectedUsername: "somepage",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+  assert.equal(result.profileName, "Prereels");
+});
+
+test("og:title of 'Some Creator | Facebook' yields 'Some Creator'", async () => {
+  withPage(
+    `<html><head>
+       <meta property="og:title" content="Some Creator | Facebook">
+     </head><body><div role="main"><a href="/reel/1">x</a></div></body></html>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["www.facebook.com"],
+    expectedUsername: "somepage",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+  assert.equal(result.profileName, "Some Creator");
+});
+
+test("the /people/<name>/<id> case: URL name '佐藤', scraped '佐藤 Reels' yields '佐藤'", async () => {
+  withPage(
+    `<html><head>
+       <meta property="og:title" content="佐藤 Reels">
+     </head><body><div role="main"><a href="/reel/1">x</a></div></body></html>`,
+    "https://www.facebook.com/people/%E4%BD%90%E8%97%A4/100000000000002/?sk=reels_tab"
+  );
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["www.facebook.com"],
+    expectedUsername: "100000000000002",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+  assert.equal(result.profileName, "佐藤");
+});
+
+test("a scraped name unrelated to the URL name still wins over the URL name", async () => {
+  withPage(
+    `<html><head>
+       <meta property="og:title" content="Totally Different Name">
+     </head><body><div role="main"><a href="/reel/1">x</a></div></body></html>`,
+    "https://www.facebook.com/people/%E4%BD%90%E8%97%A4/100000000000002/?sk=reels_tab"
+  );
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["www.facebook.com"],
+    expectedUsername: "100000000000002",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+  assert.equal(result.profileName, "Totally Different Name");
+});
+
 async function scanFacebookFixture(html, url) {
   withPage(html, url);
   return profileScanChunk({
