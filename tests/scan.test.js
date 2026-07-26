@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
-import { batchTargetForUrl, profileScanChunk } from "../extension/providers.js";
+import {
+  batchTargetForUrl,
+  profileScanChunk,
+  facebookPeopleUrlName,
+} from "../extension/providers.js";
 
 function withPage(html, url) {
   const dom = new JSDOM(html, { url });
@@ -73,6 +77,81 @@ test("batchTargetForUrl matches both Facebook reels URL forms", () => {
   assert.equal(batchTargetForUrl("https://www.facebook.com/somepage/videos"), null);
 });
 
+// --- /people/<name>/<digits> profile reels URL form ---
+
+test("batchTargetForUrl matches the /people/<name>/<digits> reels URL form, keyed on the numeric id", () => {
+  assert.deepEqual(
+    batchTargetForUrl(
+      "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+    ),
+    { provider: "facebook", key: "61590939736806" }
+  );
+});
+
+test("the same profile via profile.php?id=... and via /people/<name>/<id> produces the same key", () => {
+  const viaProfilePhp = batchTargetForUrl(
+    "https://www.facebook.com/profile.php?id=61590939736806&sk=reels_tab"
+  );
+  const viaPeople = batchTargetForUrl(
+    "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+  );
+  assert.deepEqual(viaProfilePhp, viaPeople);
+  assert.equal(viaPeople.key, "61590939736806");
+});
+
+test("/people/<name>/<digits> without sk=reels_tab does not match", () => {
+  assert.equal(
+    batchTargetForUrl("https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/"),
+    null
+  );
+});
+
+test("/people/reels (two segments) still does not match — the reserved rule is intact", () => {
+  assert.equal(batchTargetForUrl("https://www.facebook.com/people/reels"), null);
+});
+
+test("a non-numeric third segment in a /people/ URL does not match", () => {
+  assert.equal(
+    batchTargetForUrl(
+      "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/not-a-number/?sk=reels_tab"
+    ),
+    null
+  );
+});
+
+test("facebookPeopleUrlName decodes the percent-encoded name segment", () => {
+  assert.equal(
+    facebookPeopleUrlName(
+      "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+    ),
+    "小妮"
+  );
+});
+
+test("facebookPeopleUrlName returns null for non-/people/ URLs", () => {
+  assert.equal(facebookPeopleUrlName("https://www.facebook.com/somepage/reels"), null);
+});
+
+test("the inline collector in profileScanChunk accepts a /people/<name>/<id> reels page", async () => {
+  withPage(
+    `<div role="main"><a href="/reel/1001">own reel</a></div>`,
+    "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+  );
+
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com"],
+    expectedUsername: "61590939736806",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+
+  assert.notEqual(result.error, "Open a Facebook profile reels page first.");
+  assert.equal(result.ok, true);
+  assert.equal(result.username, "61590939736806");
+});
+
 test("Facebook scan collects grid reels and excludes suggestions", async () => {
   withPage(
     `<html><head>
@@ -125,6 +204,41 @@ test("Facebook display name falls back through og:title, h1, then title", async 
     progress: {},
   });
   assert.equal(result.profileName, "Some Creator");
+});
+
+test("Facebook display name falls back to the decoded /people/ URL segment when the page scrape yields nothing", async () => {
+  withPage(
+    `<html><head><title>Facebook</title></head>
+     <body><div role="main"><a href="/reel/1">x</a></div></body></html>`,
+    "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+  );
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["www.facebook.com"],
+    expectedUsername: "61590939736806",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+  assert.equal(result.profileName, "小妮");
+});
+
+test("a scraped page name still wins over the decoded /people/ URL segment", async () => {
+  withPage(
+    `<html><head>
+       <meta property="og:title" content="Real Scraped Name">
+     </head><body><div role="main"><a href="/reel/1">x</a></div></body></html>`,
+    "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+  );
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["www.facebook.com"],
+    expectedUsername: "61590939736806",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+  assert.equal(result.profileName, "Real Scraped Name");
 });
 
 async function scanFacebookFixture(html, url) {

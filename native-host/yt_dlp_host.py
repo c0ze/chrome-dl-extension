@@ -17,7 +17,7 @@ import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any, TextIO
-from urllib.parse import parse_qsl, parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, parse_qs, unquote, urlencode, urlparse, urlunparse
 
 APP_DIR = Path.home() / ".local" / "share" / "yt-dlp-browser-host"
 STATE_DIR = Path.home() / ".local" / "state" / "yt-dlp-browser-host"
@@ -892,6 +892,17 @@ def facebook_profile_reels_key(raw_url: str) -> str | None:
         candidate = (query.get("id") or [""])[0]
         return candidate if candidate.isdigit() else None
 
+    # /people/<name-segment>/<digits> — the numeric id is the key, matching
+    # profile.php?id=<digits> so the same profile keys the same batch however
+    # it is reached. Checked before the two-segment vanity rule below since it
+    # is a structurally different (three-segment) form.
+    if len(parts) == 3 and parts[0].lower() == "people":
+        query = parse_qs(parsed.query)
+        if "reels_tab" not in query.get("sk", []):
+            return None
+        candidate = parts[2]
+        return candidate if candidate.isdigit() else None
+
     if len(parts) == 2 and parts[1].lower() == "reels":
         candidate = parts[0]
         if candidate.lower() in FACEBOOK_RESERVED_SEGMENTS:
@@ -899,6 +910,29 @@ def facebook_profile_reels_key(raw_url: str) -> str | None:
         return candidate if FACEBOOK_VANITY_RE.match(candidate) else None
 
     return None
+
+
+def facebook_people_url_name(raw_url: str) -> str | None:
+    """The percent-decoded name segment from a /people/<name>/<digits> URL.
+
+    Returns None for any other URL shape, and never raises on malformed
+    percent-encoding — the caller falls back to the numeric id in that case.
+    """
+    parsed = urlparse(raw_url)
+    if (parsed.hostname or "").lower() not in FACEBOOK_HOSTS:
+        return None
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) != 3 or parts[0].lower() != "people":
+        return None
+
+    try:
+        decoded = unquote(parts[1], errors="strict")
+    except (UnicodeDecodeError, ValueError):
+        return None
+
+    decoded = decoded.strip()
+    return decoded or None
 
 
 FORBIDDEN_PATH_CHARS = set('/\\:*?"<>|')
@@ -1797,8 +1831,15 @@ def start_profile_download_jobs(
             "No profile video links were provided. Open the profile media page in Chrome and try again."
         )
 
+    # Preference order: scraped page name (most authoritative, handles renames),
+    # then the name segment decoded from the URL itself, then the numeric/vanity
+    # key. safe_path_part sanitises whichever wins, so this is not a new trust
+    # boundary.
     profile_name_stripped = (profile_name or "").strip() if profile_name else ""
-    folder_name = safe_path_part(profile_name_stripped or target["key"], fallback=target["key"])
+    url_decoded_name = facebook_people_url_name(normalized_profile_url) or ""
+    folder_name = safe_path_part(
+        profile_name_stripped or url_decoded_name or target["key"], fallback=target["key"]
+    )
     profile_dir = Path(os.path.expanduser(base_download_dir)) / folder_name
     started_at = timestamp()
 

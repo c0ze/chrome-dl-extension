@@ -160,6 +160,85 @@ class FacebookBatchMatchingTests(unittest.TestCase):
         self.assertIsNone(host.batch_target_for_url("https://www.facebook.com/reel/123"))
 
 
+class FacebookPeopleUrlBatchMatchingTests(unittest.TestCase):
+    """The third profile URL shape: /people/<name-segment>/<digits>?sk=reels_tab."""
+
+    PEOPLE_URL = (
+        "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+    )
+
+    def test_matches_people_url_keyed_on_numeric_id(self) -> None:
+        target = host.batch_target_for_url(self.PEOPLE_URL)
+        self.assertEqual(target, {"provider": "facebook", "key": "61590939736806"})
+
+    def test_same_profile_via_profile_php_and_people_url_produces_same_key(self) -> None:
+        via_profile_php = host.batch_target_for_url(
+            "https://www.facebook.com/profile.php?id=61590939736806&sk=reels_tab"
+        )
+        via_people = host.batch_target_for_url(self.PEOPLE_URL)
+        self.assertEqual(via_profile_php, via_people)
+        self.assertEqual(via_people["key"], "61590939736806")
+
+    def test_rejects_people_url_without_reels_tab(self) -> None:
+        self.assertIsNone(
+            host.batch_target_for_url(
+                "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/"
+            )
+        )
+
+    def test_two_segment_people_reels_still_does_not_match(self) -> None:
+        """The reserved-segment rule for /people/reels must stay intact."""
+        self.assertIsNone(host.batch_target_for_url("https://www.facebook.com/people/reels"))
+
+    def test_rejects_non_numeric_third_segment(self) -> None:
+        self.assertIsNone(
+            host.batch_target_for_url(
+                "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/not-a-number/?sk=reels_tab"
+            )
+        )
+
+    def test_people_still_in_reserved_segments(self) -> None:
+        """people must stay reserved so the two-segment vanity form /people/reels
+        cannot match — this rule is orthogonal to (and must survive alongside)
+        the new three-segment form."""
+        self.assertIn("people", host.FACEBOOK_RESERVED_SEGMENTS)
+
+
+class FacebookPeopleUrlNameTests(unittest.TestCase):
+    def test_decodes_percent_encoded_cjk_name(self) -> None:
+        self.assertEqual(
+            host.facebook_people_url_name(
+                "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+            ),
+            "小妮",
+        )
+
+    def test_decoded_name_survives_safe_path_part_intact(self) -> None:
+        name = host.facebook_people_url_name(
+            "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+        )
+        self.assertEqual(host.safe_path_part(name), "小妮")
+
+    def test_returns_none_for_non_people_urls(self) -> None:
+        self.assertIsNone(
+            host.facebook_people_url_name("https://www.facebook.com/somepage/reels")
+        )
+        self.assertIsNone(
+            host.facebook_people_url_name(
+                "https://www.facebook.com/profile.php?id=123&sk=reels_tab"
+            )
+        )
+
+    def test_malformed_percent_encoding_falls_back_rather_than_raising(self) -> None:
+        # "%E5%B0" alone is a truncated/invalid UTF-8 sequence.
+        malformed_url = "https://www.facebook.com/people/%E5%B0/61590939736806/?sk=reels_tab"
+        try:
+            result = host.facebook_people_url_name(malformed_url)
+        except Exception as error:  # noqa: BLE001
+            self.fail(f"facebook_people_url_name raised instead of falling back: {error}")
+        self.assertIsNone(result)
+
+
 class FacebookUrlCanonicalisationTests(unittest.TestCase):
     def test_strips_tracking_parameters_so_duplicates_collapse(self) -> None:
         variants = [
@@ -288,6 +367,36 @@ class StartProfileDownloadJobsProfileNameTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
         self.assertTrue(result["download_dir"].endswith("somepage"))
+
+    def test_people_url_folder_falls_back_to_url_decoded_name_without_scraped_name(self) -> None:
+        """Preference order: scraped name > URL-decoded /people/ segment > numeric id.
+
+        With no scraped profile_name, the URL's own percent-encoded name
+        segment (小妮) must be used instead of falling straight to the numeric id.
+        """
+        result = host.start_profile_download_jobs(
+            "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab",
+            "extension",
+            None,
+            ["https://www.facebook.com/reel/123"],
+            False,
+            None,
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["download_dir"].endswith("小妮"))
+        self.assertEqual(result["username"], "61590939736806")
+
+    def test_people_url_scraped_name_still_wins_over_url_decoded_name(self) -> None:
+        result = host.start_profile_download_jobs(
+            "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab",
+            "extension",
+            None,
+            ["https://www.facebook.com/reel/123"],
+            False,
+            "Scraped Display Name",
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["download_dir"].endswith("Scraped Display Name"))
 
     def test_hostile_profile_name_cannot_escape_the_base_download_directory(self) -> None:
         """End-to-end trust-boundary test: a scraped profile name is untrusted
