@@ -64,6 +64,18 @@ export function facebookProfileReelsKey(rawUrl) {
       return /^\d+$/.test(id) ? id : null;
     }
 
+    // /people/<name-segment>/<digits> — the numeric id is the key, matching
+    // profile.php?id=<digits> so the same profile keys the same batch however
+    // it is reached. Checked before the two-segment vanity rule below since it
+    // is a structurally different (three-segment) form.
+    if (parts.length === 3 && parts[0].toLowerCase() === "people") {
+      if (url.searchParams.get("sk") !== "reels_tab") {
+        return null;
+      }
+      const id = parts[2];
+      return /^\d+$/.test(id) ? id : null;
+    }
+
     if (parts.length === 2 && parts[1].toLowerCase() === "reels") {
       const candidate = parts[0];
       if (FACEBOOK_RESERVED_SEGMENTS.includes(candidate.toLowerCase())) {
@@ -75,6 +87,28 @@ export function facebookProfileReelsKey(rawUrl) {
     }
 
     return null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+/**
+ * The percent-decoded name segment from a /people/<name>/<digits> URL, or
+ * null for any other URL shape. Never throws on malformed percent-encoding —
+ * callers fall back to the numeric id in that case.
+ */
+export function facebookPeopleUrlName(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    if (!FACEBOOK_HOSTS.includes(url.hostname)) {
+      return null;
+    }
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (parts.length !== 3 || parts[0].toLowerCase() !== "people") {
+      return null;
+    }
+    const decoded = decodeURIComponent(parts[1]).trim();
+    return decoded || null;
   } catch (_error) {
     return null;
   }
@@ -118,6 +152,20 @@ export async function profileScanChunk(options) {
             return null;
           }
           const id = url.searchParams.get("id") || "";
+          return /^\d+$/.test(id) ? id : null;
+        }
+
+        // /people/<name-segment>/<digits> — the numeric id is the key, matching
+        // profile.php?id=<digits> so the same profile keys the same batch
+        // however it is reached. Checked before the two-segment vanity rule
+        // below since it is a structurally different (three-segment) form.
+        // Kept in exact behavioural agreement with facebookProfileReelsKey and
+        // its host-side counterpart facebook_profile_reels_key.
+        if (parts.length === 3 && parts[0].toLowerCase() === "people") {
+          if (url.searchParams.get("sk") !== "reels_tab") {
+            return null;
+          }
+          const id = parts[2];
           return /^\d+$/.test(id) ? id : null;
         }
 
@@ -296,6 +344,23 @@ export async function profileScanChunk(options) {
       return name.toLowerCase() !== "facebook";
     }
 
+    // Percent-decoded name segment from a /people/<name>/<digits> URL, or ""
+    // for any other URL shape or on malformed percent-encoding. Kept in exact
+    // behavioural agreement with the module-level facebookPeopleUrlName.
+    function facebookPeopleUrlNameFromLocation() {
+      try {
+        const url = new URL(window.location.href);
+        const parts = url.pathname.split("/").filter(Boolean);
+        if (parts.length !== 3 || parts[0].toLowerCase() !== "people") {
+          return "";
+        }
+        const decoded = decodeURIComponent(parts[1]).trim();
+        return decoded;
+      } catch (_error) {
+        return "";
+      }
+    }
+
     function facebookProfileName() {
       const og = document.querySelector("meta[property='og:title']");
       const ogName = (og?.content || "").replace(/\s+/g, " ").trim();
@@ -312,7 +377,11 @@ export async function profileScanChunk(options) {
         .replace(/\s*\|\s*Facebook\s*$/i, "")
         .replace(/\s+/g, " ")
         .trim();
-      return isPlausibleProfileName(title) ? title : "";
+      if (isPlausibleProfileName(title)) {
+        return title;
+      }
+      const urlName = facebookPeopleUrlNameFromLocation();
+      return isPlausibleProfileName(urlName) ? urlName : "";
     }
 
     const fbSleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
