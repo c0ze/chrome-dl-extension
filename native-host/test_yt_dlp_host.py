@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import unittest
+import unittest.mock
+from typing import Any
 
 import yt_dlp_host as host
 
@@ -221,6 +223,164 @@ class FacebookVanityRegexTraversalTests(unittest.TestCase):
 
     def test_rejects_dot_as_a_batch_target(self) -> None:
         self.assertIsNone(host.batch_target_for_url("https://www.facebook.com/./reels"))
+
+
+class ProfileItemValidationTests(unittest.TestCase):
+    def test_facebook_batch_accepts_only_reel_urls(self) -> None:
+        target = {"provider": "facebook", "key": "61590939736806"}
+        self.assertTrue(host.valid_batch_item("https://www.facebook.com/reel/123", target))
+        self.assertFalse(
+            host.valid_batch_item("https://www.facebook.com/somepage/posts/9", target)
+        )
+        self.assertFalse(host.valid_batch_item("https://x.com/alice/status/1", target))
+
+    def test_twitter_batch_still_enforces_ownership(self) -> None:
+        target = {"provider": "twitter", "key": "alice"}
+        self.assertTrue(host.valid_batch_item("https://x.com/alice/status/1", target))
+        self.assertFalse(host.valid_batch_item("https://x.com/bob/status/1", target))
+
+
+class StartProfileDownloadJobsProfileNameTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._config_patch = unittest.mock.patch.object(
+            host, "load_config", return_value=dict(host.DEFAULT_CONFIG)
+        )
+        self._config_patch.start()
+        self.addCleanup(self._config_patch.stop)
+
+        self._mutate_patch = unittest.mock.patch.object(host, "mutate_jobs")
+        mock_mutate_jobs = self._mutate_patch.start()
+        self.addCleanup(self._mutate_patch.stop)
+
+        def fake_mutate(mutator):
+            state: dict[str, Any] = {"jobs": []}
+            return mutator(state)
+
+        mock_mutate_jobs.side_effect = fake_mutate
+
+        self._launch_patch = unittest.mock.patch.object(
+            host, "launch_next_queued_job", return_value={"started": True}
+        )
+        self._launch_patch.start()
+        self.addCleanup(self._launch_patch.stop)
+
+        self._mkdir_patch = unittest.mock.patch.object(host.Path, "mkdir")
+        self._mkdir_patch.start()
+        self.addCleanup(self._mkdir_patch.stop)
+
+    def test_facebook_folder_uses_scraped_profile_name_when_present(self) -> None:
+        result = host.start_profile_download_jobs(
+            "https://www.facebook.com/somepage/reels",
+            "extension",
+            None,
+            ["https://www.facebook.com/reel/123"],
+            False,
+            "My Cool Page",
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["download_dir"].endswith("My Cool Page"))
+        self.assertEqual(result["username"], "somepage")
+
+    def test_facebook_folder_falls_back_to_key_without_profile_name(self) -> None:
+        result = host.start_profile_download_jobs(
+            "https://www.facebook.com/somepage/reels",
+            "extension",
+            None,
+            ["https://www.facebook.com/reel/123"],
+            False,
+            None,
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["download_dir"].endswith("somepage"))
+
+    def test_twitter_profile_download_still_works_without_profile_name(self) -> None:
+        result = host.start_profile_download_jobs(
+            "https://x.com/alice/media",
+            "extension",
+            None,
+            ["https://x.com/alice/status/1", "https://x.com/bob/status/2"],
+            False,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["username"], "alice")
+        self.assertEqual(result["rejected_count"], 1)
+        self.assertTrue(result["download_dir"].endswith("alice"))
+
+    def test_non_batch_url_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            host.start_profile_download_jobs(
+                "https://example.com/somepage",
+                "extension",
+                None,
+                [],
+                False,
+            )
+
+
+class HandleMessageProfileNameTests(unittest.TestCase):
+    def test_rejects_non_string_profile_name(self) -> None:
+        with self.assertRaises(ValueError):
+            host.handle_message(
+                {
+                    "type": "download",
+                    "url": "https://www.facebook.com/somepage/reels",
+                    "profile_urls": ["https://www.facebook.com/reel/123"],
+                    "profile_name": 12345,
+                }
+            )
+
+    def test_forwards_profile_name_to_facebook_batch(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def fake_start_profile_download_jobs(
+            raw_url, source, download_dir_override, profile_video_urls,
+            allow_duplicate=False, profile_name=None,
+        ):
+            captured["profile_name"] = profile_name
+            captured["raw_url"] = raw_url
+            return {"ok": True}
+
+        with unittest.mock.patch.object(
+            host,
+            "start_profile_download_jobs",
+            side_effect=fake_start_profile_download_jobs,
+        ):
+            result = host.handle_message(
+                {
+                    "type": "download",
+                    "url": "https://www.facebook.com/somepage/reels",
+                    "profile_urls": ["https://www.facebook.com/reel/123"],
+                    "profile_name": "My Cool Page",
+                }
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(captured["profile_name"], "My Cool Page")
+
+    def test_absent_profile_name_forwards_none(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def fake_start_profile_download_jobs(
+            raw_url, source, download_dir_override, profile_video_urls,
+            allow_duplicate=False, profile_name=None,
+        ):
+            captured["profile_name"] = profile_name
+            return {"ok": True}
+
+        with unittest.mock.patch.object(
+            host,
+            "start_profile_download_jobs",
+            side_effect=fake_start_profile_download_jobs,
+        ):
+            host.handle_message(
+                {
+                    "type": "download",
+                    "url": "https://x.com/alice/media",
+                    "profile_urls": ["https://x.com/alice/status/1"],
+                }
+            )
+
+        self.assertIsNone(captured["profile_name"])
 
 
 if __name__ == "__main__":
