@@ -839,14 +839,19 @@ MAX_PATH_PART_BYTES = 255
 
 def safe_path_part(value: str, fallback: str = "download") -> str:
     normalized = unicodedata.normalize("NFC", str(value or ""))
+    # Bound the work before character sanitisation to prevent DoS on multi-megabyte inputs
+    if len(normalized) > MAX_PATH_PART_BYTES * 4:
+        normalized = normalized[: MAX_PATH_PART_BYTES * 4]
     cleaned = "".join(
         "_" if character in FORBIDDEN_PATH_CHARS or ord(character) < 32 else character
         for character in normalized
     )
     cleaned = re.sub(r"_{2,}", "_", cleaned).strip(" ._")
 
-    while len(cleaned.encode("utf-8")) > MAX_PATH_PART_BYTES:
-        cleaned = cleaned[:-1]
+    # Single-pass truncation: encode once, slice at byte cap, decode safely
+    encoded = cleaned.encode("utf-8")
+    if len(encoded) > MAX_PATH_PART_BYTES:
+        cleaned = encoded[:MAX_PATH_PART_BYTES].decode("utf-8", errors="ignore")
     cleaned = cleaned.strip(" ._")
 
     if not cleaned or cleaned in {".", ".."}:

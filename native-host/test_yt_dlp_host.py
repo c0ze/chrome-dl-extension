@@ -103,8 +103,10 @@ class SafePathPartUnicodeTests(unittest.TestCase):
     def test_caps_at_255_utf8_bytes_on_a_character_boundary(self) -> None:
         result = host.safe_path_part("動" * 200)
         self.assertLessEqual(len(result.encode("utf-8")), 255)
-        # Must not have split a multi-byte sequence.
-        result.encode("utf-8").decode("utf-8")
+        # Must not have split a multi-byte sequence and land on a boundary.
+        # "動" is 3 bytes in UTF-8, so 255 // 3 == 85 characters.
+        self.assertEqual(len(result), 85)
+        self.assertEqual(len(result.encode("utf-8")), 255)
 
     def test_uses_supplied_fallback_when_empty(self) -> None:
         self.assertEqual(host.safe_path_part("///", fallback="61590939736806"), "61590939736806")
