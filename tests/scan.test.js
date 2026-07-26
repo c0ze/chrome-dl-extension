@@ -288,3 +288,144 @@ test("Facebook display name normalises internal whitespace from a nested-markup 
   });
   assert.equal(result.profileName, "Some Creator");
 });
+
+// --- Finding 1 regression: page-identity check on the Facebook collector ---
+
+test("Facebook scan run against a non-Facebook page returns ok:false and collects nothing (finding-1 exploit fixture)", async () => {
+  withPage(
+    `<html><head>
+       <meta property="og:title" content="../../../../etc">
+     </head><body>
+       <div role="main">
+         <a href="/reel/999888">local-looking reel</a>
+         <a href="https://attacker.example/reel/777">cross-host reel</a>
+       </div>
+     </body></html>`,
+    "https://evil.example/somepage/reels"
+  );
+
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com"],
+    expectedUsername: "somepage",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(!("urls" in result) || result.urls === undefined, "no urls must be surfaced on failure");
+});
+
+test("a cross-host anchor inside a legitimate Facebook page is not collected", async () => {
+  const result = await scanFacebookFixture(
+    `<div role="main">
+       <a href="/reel/1001">own reel</a>
+       <a href="https://attacker.example/reel/777">cross-host reel</a>
+     </div>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  assert.deepEqual(result.urls.sort(), ["https://www.facebook.com/reel/1001"]);
+  assert.ok(!result.urls.some((u) => u.includes("777")), "cross-host reel must not leak");
+});
+
+test("a Facebook page whose derived key does not match expectedUsername is rejected", async () => {
+  withPage(
+    `<div role="main"><a href="/reel/1001">own reel</a></div>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com"],
+    expectedUsername: "someoneelse",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+
+  assert.equal(result.ok, false);
+});
+
+// --- Finding 3 regression: Facebook scan shares the scroll/round loop ---
+
+// Mirrors background.js's runProfileScan: repeatedly invokes profileScanChunk,
+// threading `progress` from one call into the next, until either the chunk
+// reports `done` or the round budget (PROFILE_SCAN_MAX_ROUNDS in production)
+// is exhausted — at which point the caller, not profileScanChunk itself, is
+// responsible for declaring the result partial.
+async function runRoundedFacebookScan(options, maxRounds) {
+  let progress;
+  let lastResult = null;
+  for (let round = 0; round < maxRounds; round += 1) {
+    lastResult = await profileScanChunk({ ...options, progress });
+    if (!lastResult.ok) {
+      return lastResult;
+    }
+    progress = lastResult.progress;
+    if (lastResult.done) {
+      return lastResult;
+    }
+  }
+  return { ...lastResult, partial: true };
+}
+
+test("a multi-round Facebook scan accumulates across rounds and reports partial when it hits the round limit", async () => {
+  withPage(
+    `<div role="main">
+       <a href="/reel/1001">round one reel</a>
+     </div>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+
+  const scanOptions = {
+    provider: "facebook",
+    hosts: ["facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com"],
+    expectedUsername: "somepage",
+    // A budget shorter than one scroll-sleep cycle (~900ms) guarantees each
+    // chunk call returns after exactly one collection pass, so the loop must
+    // span multiple profileScanChunk invocations to make further progress —
+    // exactly like production's ~4s PROFILE_SCAN_CHUNK_MS chunking, scaled down.
+    budgetMs: 50,
+    maxPasses: 36,
+  };
+
+  // Round one: collects what's already in the DOM, then the budget expires
+  // before the stability/pass ceiling, so the scan is not "done" yet.
+  const roundOne = await profileScanChunk({ ...scanOptions, progress: {} });
+  assert.equal(roundOne.ok, true);
+  assert.equal(roundOne.done, false);
+  assert.deepEqual(roundOne.urls, ["https://www.facebook.com/reel/1001"]);
+  assert.ok(roundOne.progress, "progress must be returned for threading into round two");
+
+  // Simulate new content having loaded (as continued scrolling would surface)
+  // before round two, and thread progress through exactly as background.js's
+  // runProfileScan does via its `progress` argument.
+  document.querySelector("[role='main']").innerHTML +=
+    '<a href="/reel/1002">round two reel</a>';
+
+  const roundTwo = await profileScanChunk({ ...scanOptions, progress: roundOne.progress });
+  assert.equal(roundTwo.ok, true);
+  assert.deepEqual(roundTwo.urls.sort(), [
+    "https://www.facebook.com/reel/1001",
+    "https://www.facebook.com/reel/1002",
+  ]);
+  assert.ok(
+    roundTwo.urls.includes("https://www.facebook.com/reel/1001"),
+    "round one's finds must survive into round two's accumulated result"
+  );
+
+  // Drive the same loop background.js runs, capped at a small round budget so
+  // it never reaches the stability/pass ceiling — demonstrating the caller's
+  // own partial-reporting responsibility independent of whether
+  // profileScanChunk itself would eventually stabilise. Both reels found
+  // above (round/reel 1001 and 1002) are still present in the DOM, so a
+  // fresh rounded scan must still accumulate both.
+  const rounded = await runRoundedFacebookScan(scanOptions, 3);
+  assert.equal(rounded.ok, true);
+  assert.equal(rounded.partial, true, "hitting the round limit must be reported as partial");
+  assert.deepEqual(rounded.urls.sort(), [
+    "https://www.facebook.com/reel/1001",
+    "https://www.facebook.com/reel/1002",
+  ]);
+});

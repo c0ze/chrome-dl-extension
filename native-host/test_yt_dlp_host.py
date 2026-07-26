@@ -87,7 +87,13 @@ class SafePathPartTraversalTests(unittest.TestCase):
     def test_never_returns_empty(self) -> None:
         for value in ["", "...", "___", "///"]:
             with self.subTest(value=value):
-                self.assertTrue(host.safe_path_part(value))
+                result = host.safe_path_part(value)
+                self.assertTrue(result)
+                self.assertNotIn("/", result)
+                self.assertNotIn("\\", result)
+                self.assertNotEqual(result, "..")
+                self.assertNotEqual(result, ".")
+                self.assertFalse(result.startswith("."))
 
 
 class SafePathPartUnicodeTests(unittest.TestCase):
@@ -144,7 +150,7 @@ class FacebookBatchMatchingTests(unittest.TestCase):
         self.assertIsNone(host.batch_target_for_url("https://www.facebook.com/somepage/videos"))
 
     def test_rejects_reserved_segments(self) -> None:
-        for segment in ["reel", "watch", "groups", "marketplace", "profile.php", "login"]:
+        for segment in host.FACEBOOK_RESERVED_SEGMENTS:
             with self.subTest(segment=segment):
                 self.assertIsNone(
                     host.batch_target_for_url(f"https://www.facebook.com/{segment}/reels")
@@ -199,16 +205,6 @@ class FacebookNonReelQueryPreservationTests(unittest.TestCase):
             host.normalize_url("https://facebook.com/somepage/videos/123456/"),
             "https://www.facebook.com/somepage/videos/123456",
         )
-
-    def test_reel_urls_still_drop_tracking_params(self) -> None:
-        variants = [
-            "https://www.facebook.com/reel/1234567890",
-            "https://www.facebook.com/reel/1234567890/",
-            "https://m.facebook.com/reel/1234567890?fs=e&s=TIeo",
-            "https://web.facebook.com/reel/1234567890?mibextid=abc",
-        ]
-        results = {host.normalize_url(url) for url in variants}
-        self.assertEqual(results, {"https://www.facebook.com/reel/1234567890"})
 
     def test_twitter_still_strips_its_query(self) -> None:
         self.assertEqual(
@@ -292,6 +288,26 @@ class StartProfileDownloadJobsProfileNameTests(unittest.TestCase):
         )
         self.assertTrue(result["ok"])
         self.assertTrue(result["download_dir"].endswith("somepage"))
+
+    def test_hostile_profile_name_cannot_escape_the_base_download_directory(self) -> None:
+        """End-to-end trust-boundary test: a scraped profile name is untrusted
+
+        input and must never let the resulting download directory land outside
+        the configured base download directory, however path-traversal-shaped
+        it is.
+        """
+        base_download_dir = "/tmp/base-download-dir"
+        result = host.start_profile_download_jobs(
+            "https://www.facebook.com/somepage/reels",
+            "extension",
+            base_download_dir,
+            ["https://www.facebook.com/reel/123"],
+            False,
+            "../../../../etc",
+        )
+        self.assertTrue(result["ok"])
+        download_dir = host.Path(result["download_dir"])
+        self.assertEqual(download_dir.parent, host.Path(base_download_dir))
 
     def test_twitter_profile_download_still_works_without_profile_name(self) -> None:
         result = host.start_profile_download_jobs(

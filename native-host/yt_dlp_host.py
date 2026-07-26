@@ -914,7 +914,7 @@ def safe_path_part(value: str, fallback: str = "download") -> str:
         "_" if character in FORBIDDEN_PATH_CHARS or ord(character) < 32 else character
         for character in normalized
     )
-    cleaned = re.sub(r"_{2,}", "_", cleaned).strip(" ._")
+    cleaned = cleaned.strip(" ._")
 
     # Single-pass truncation: encode once, slice at byte cap, decode safely
     encoded = cleaned.encode("utf-8")

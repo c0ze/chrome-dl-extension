@@ -416,6 +416,7 @@ async function requestRescan() {
       key: state.scanKey,
       tabId: state.rescanTabId,
       username: batchTargetForUrl(state.targetUrl)?.key,
+      url: state.targetUrl,
     });
 
     if (!response?.ok) {

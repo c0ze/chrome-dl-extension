@@ -139,6 +139,7 @@ async function runProfileScan(tabId, provider, expectedUsername, key) {
       if (!result.ok) {
         await writeScanRecord(key, {
           status: "error",
+          provider,
           username: expectedUsername,
           error: result.error || "Could not scan the profile media page.",
         });
@@ -154,6 +155,7 @@ async function runProfileScan(tabId, provider, expectedUsername, key) {
       if (result.done) {
         await writeScanRecord(key, {
           status: "done",
+          provider,
           username: result.username || expectedUsername,
           urls,
           found: urls.length,
@@ -164,6 +166,7 @@ async function runProfileScan(tabId, provider, expectedUsername, key) {
 
       await writeScanRecord(key, {
         status: "scanning",
+        provider,
         username: result.username || expectedUsername,
         found: urls.length,
         profileName,
@@ -173,6 +176,7 @@ async function runProfileScan(tabId, provider, expectedUsername, key) {
     const urls = Array.isArray(progress?.urls) ? progress.urls : [];
     await writeScanRecord(key, {
       status: "done",
+      provider,
       username: expectedUsername,
       urls,
       found: urls.length,
@@ -182,6 +186,7 @@ async function runProfileScan(tabId, provider, expectedUsername, key) {
   } catch (error) {
     await writeScanRecord(key, {
       status: "error",
+      provider,
       username: expectedUsername,
       error: error?.message || "Could not scan the profile media page. Try reloading it first.",
     });
@@ -195,28 +200,28 @@ async function runProfileScan(tabId, provider, expectedUsername, key) {
  * Restarts a scan whose worker was terminated mid-run. The popup's watchdog is
  * the only thing that can notice that, so it drives this.
  *
- * The provider isn't re-derived from a hand-rolled pattern here: the original
- * scan record (written by openDownloadPicker from a real batchTargetForUrl
- * lookup) is the source of truth for which provider and key this batch key
- * belongs to, and the message's username must match it.
+ * Validation is stateless: the provider and key are re-derived from the page
+ * URL via the shared batchTargetForUrl validator (the same one used when the
+ * scan was first started), not read back from a scan record. Session storage
+ * deletes that record on every settled outcome (see releaseScanRecord), so it
+ * can't be relied on as the source of truth here.
  */
 async function restartProfileScan(message) {
   const key = typeof message?.key === "string" ? message.key : "";
   const tabId = message?.tabId;
   const username = typeof message?.username === "string" ? message.username : "";
+  const url = typeof message?.url === "string" ? message.url : "";
 
-  if (!key.startsWith(PROFILE_BATCH_PREFIX) || typeof tabId !== "number" || !username) {
+  if (!key.startsWith(PROFILE_BATCH_PREFIX) || typeof tabId !== "number" || !username || !url) {
     return { ok: false, error: "This profile scan cannot be restarted." };
   }
 
-  const stored = await chrome.storage.session.get([key]);
-  const record = stored[key];
-  const provider = record?.provider === "facebook" ? "facebook" : "twitter";
-  const usable = record && record.username === username;
-
-  if (!usable) {
+  const target = batchTargetForUrl(url);
+  if (!target || target.key !== username) {
     return { ok: false, error: "This profile scan cannot be restarted." };
   }
+
+  const provider = target.provider;
 
   // A watchdog can fire while the scan is in fact still alive; let it finish
   // rather than racing a second writer against it.
@@ -224,7 +229,7 @@ async function restartProfileScan(message) {
     return { ok: true, alreadyRunning: true };
   }
 
-  await writeScanRecord(key, { status: "scanning", username, provider });
+  await writeScanRecord(key, { status: "scanning", provider, username });
   void runProfileScan(tabId, provider, username, key);
   return { ok: true };
 }
