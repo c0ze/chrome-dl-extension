@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any, TextIO
@@ -832,9 +833,25 @@ def twitter_status_username(raw_url: str) -> str | None:
     return valid_twitter_username(parts[0])
 
 
-def safe_path_part(value: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
-    return cleaned or "twitter-profile"
+FORBIDDEN_PATH_CHARS = set('/\\:*?"<>|')
+MAX_PATH_PART_BYTES = 255
+
+
+def safe_path_part(value: str, fallback: str = "download") -> str:
+    normalized = unicodedata.normalize("NFC", str(value or ""))
+    cleaned = "".join(
+        "_" if character in FORBIDDEN_PATH_CHARS or ord(character) < 32 else character
+        for character in normalized
+    )
+    cleaned = re.sub(r"_{2,}", "_", cleaned).strip(" ._")
+
+    while len(cleaned.encode("utf-8")) > MAX_PATH_PART_BYTES:
+        cleaned = cleaned[:-1]
+    cleaned = cleaned.strip(" ._")
+
+    if not cleaned or cleaned in {".", ".."}:
+        return safe_path_part(fallback) if fallback and fallback != value else "download"
+    return cleaned
 
 
 def config_for_response(config: dict[str, Any]) -> dict[str, Any]:
@@ -1703,7 +1720,9 @@ def start_profile_download_jobs(
             "No profile video links were provided. Open the profile media page in Chrome and try again."
         )
 
-    profile_dir = Path(os.path.expanduser(base_download_dir)) / safe_path_part(username)
+    profile_dir = Path(os.path.expanduser(base_download_dir)) / safe_path_part(
+        username, fallback=username
+    )
     started_at = timestamp()
 
     def make_job(video_url: str, index: int) -> dict[str, Any]:
