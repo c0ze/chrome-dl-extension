@@ -101,11 +101,21 @@ def batch_target_for_url(raw_url: str) -> dict[str, Any] | None:
     return {"provider": provider["name"], "key": key} if key else None
 
 
+def valid_batch_item(raw_url: str, target: dict[str, Any]) -> bool:
+    if target["provider"] == "facebook":
+        return facebook_reel_id(raw_url) is not None
+    if target["provider"] == "twitter":
+        owner = twitter_status_username(raw_url)
+        return bool(owner) and owner.lower() == str(target["key"]).lower()
+    return False
+
+
 MAX_REMEMBERED_FINISHED_JOBS = 40
 MAX_JOBS_IN_RESPONSE = 300
 MAX_RESPONSE_BYTES = 768 * 1024
 MAX_PROFILE_BATCH_JOBS = 500
 MAX_QUEUED_JOBS = 1000
+MAX_PROFILE_NAME_CHARS = 512
 ACTIVE_STATUSES = {"queued", "running"}
 DUPLICATE_BLOCKING_STATUSES = {"queued", "running", "complete"}
 RESTARTABLE_STATUSES = {"queued", "failed", "cancelled"}
@@ -1735,11 +1745,14 @@ def start_profile_download_jobs(
     download_dir_override: str | None,
     profile_video_urls: list[str],
     allow_duplicate: bool = False,
+    profile_name: str | None = None,
 ) -> dict[str, Any]:
     normalized_profile_url = normalize_url(raw_url)
-    username = twitter_profile_media_username(normalized_profile_url)
-    if not username:
-        raise ValueError("Profile media downloads require a Twitter/X /media URL.")
+    target = batch_target_for_url(normalized_profile_url)
+    if not target:
+        raise ValueError(
+            "Profile downloads require an X/Twitter /media URL or a Facebook reels URL."
+        )
 
     if download_dir_override is None:
         config = load_config()
@@ -1760,8 +1773,7 @@ def start_profile_download_jobs(
             rejected_count += 1
             continue
 
-        status_username = twitter_status_username(normalized_video_url)
-        if not status_username or status_username.lower() != username.lower():
+        if not valid_batch_item(normalized_video_url, target):
             rejected_count += 1
             continue
 
@@ -1776,16 +1788,15 @@ def start_profile_download_jobs(
     if not video_urls:
         if rejected_count:
             raise ValueError(
-                f"None of the {rejected_count} scraped links are posts by @{username}. "
+                f"None of the {rejected_count} scraped links are posts by @{target['key']}. "
                 "Reload the profile media page and try again."
             )
         raise ValueError(
             "No profile video links were provided. Open the profile media page in Chrome and try again."
         )
 
-    profile_dir = Path(os.path.expanduser(base_download_dir)) / safe_path_part(
-        username, fallback=username
-    )
+    folder_name = safe_path_part(profile_name or target["key"], fallback=target["key"])
+    profile_dir = Path(os.path.expanduser(base_download_dir)) / folder_name
     started_at = timestamp()
 
     def make_job(video_url: str, index: int) -> dict[str, Any]:
@@ -1858,7 +1869,7 @@ def start_profile_download_jobs(
     return {
         "ok": True,
         "profile": True,
-        "username": username,
+        "username": target["key"],
         "status": "started" if launch_result.get("started") else "queued",
         "queued_count": len(queued_jobs),
         "discovered_count": len(new_jobs),
@@ -1882,7 +1893,12 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
         if download_dir is not None and not isinstance(download_dir, str):
             raise ValueError("download_dir must be a string when provided.")
         allow_duplicate = bool(message.get("allow_duplicate", False))
-        if twitter_profile_media_username(url):
+        profile_name = message.get("profile_name")
+        if profile_name is not None and not isinstance(profile_name, str):
+            raise ValueError("profile_name must be a string when provided.")
+        if profile_name is not None and len(profile_name) > MAX_PROFILE_NAME_CHARS:
+            profile_name = profile_name[:MAX_PROFILE_NAME_CHARS]
+        if batch_target_for_url(url):
             raw_profile_urls = message.get("profile_urls")
             if not isinstance(raw_profile_urls, list):
                 raw_profile_urls = []
@@ -1894,6 +1910,7 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
                 download_dir,
                 profile_urls,
                 allow_duplicate,
+                profile_name,
             )
         return start_download_job(url, source, download_dir, allow_duplicate)
 
