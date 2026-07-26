@@ -3,6 +3,7 @@ import {
   RESERVED_PROFILE_USERNAMES,
   batchTargetForUrl,
   profileScanChunk,
+  twitterProfileMediaUsername,
 } from "./providers.js";
 
 const MENU_ID = "download-with-ytdlp";
@@ -44,28 +45,6 @@ function normalizeUrl(rawUrl) {
   }
 }
 
-function twitterProfileMediaUsername(rawUrl) {
-  try {
-    const url = new URL(rawUrl);
-    if (!isTwitterHost(url.hostname)) {
-      return null;
-    }
-
-    const parts = url.pathname.split("/").filter(Boolean);
-    if (parts.length < 2 || parts[1].toLowerCase() !== "media") {
-      return null;
-    }
-
-    const username = parts[0];
-    if (!USERNAME_PATTERN.test(username)) {
-      return null;
-    }
-
-    return RESERVED_PROFILE_USERNAMES.includes(username.toLowerCase()) ? null : username;
-  } catch (_error) {
-    return null;
-  }
-}
 
 function openHelpPage(reason) {
   const url = chrome.runtime.getURL(`options.html?reason=${encodeURIComponent(reason)}`);

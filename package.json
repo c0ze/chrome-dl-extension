@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Test-only tooling. The extension itself requires no build step.",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test \"tests/**/*.test.js\""
   },
   "devDependencies": {
     "jsdom": "^29.1.1"
