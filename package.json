@@ -1,0 +1,12 @@
+{
+  "name": "chrome-dl-plugin-tests",
+  "private": true,
+  "type": "module",
+  "description": "Test-only tooling. The extension itself requires no build step.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}
