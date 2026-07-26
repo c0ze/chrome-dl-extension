@@ -322,11 +322,13 @@ import {
 } from "./providers.js";
 ```
 
-At the top of `extension/download.js`, replace its duplicated `TWITTER_HOSTS`, `RESERVED_PROFILE_USERNAMES` and `twitterProfileMediaUsername` with:
+At the top of `extension/download.js`, delete its duplicated `TWITTER_HOSTS`, `RESERVED_PROFILE_USERNAMES` and `twitterProfileMediaUsername` (they now live in `providers.js`) and import only what it still uses:
 
 ```javascript
-import { batchTargetForUrl, twitterProfileMediaUsername } from "./providers.js";
+import { batchTargetForUrl } from "./providers.js";
 ```
+
+Do not import `twitterProfileMediaUsername` here — the next change makes `isTwitterProfileMediaUrl` delegate to `batchTargetForUrl`, leaving nothing in `download.js` that calls it.
 
 Update `isTwitterProfileMediaUrl` in `download.js` to delegate:
 
