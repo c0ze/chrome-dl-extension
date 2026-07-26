@@ -69,12 +69,17 @@ class SafePathPartTraversalTests(unittest.TestCase):
             "/etc/passwd",
             "a/b/c",
             "a\\b",
+            "....//" ,
+            "..././..",
+            "....///...." ,
+            "..%2F..%2Fetc",
         ]:
             with self.subTest(hostile=hostile):
                 result = host.safe_path_part(hostile)
                 self.assertNotIn("/", result)
                 self.assertNotIn("\\", result)
                 self.assertNotEqual(result, "..")
+                self.assertNotEqual(result, ".")
                 self.assertFalse(result.startswith("."))
 
     def test_never_returns_empty(self) -> None:
