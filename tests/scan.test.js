@@ -126,3 +126,165 @@ test("Facebook display name falls back through og:title, h1, then title", async 
   });
   assert.equal(result.profileName, "Some Creator");
 });
+
+async function scanFacebookFixture(html, url) {
+  withPage(html, url);
+  return profileScanChunk({
+    provider: "facebook",
+    hosts: ["facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com"],
+    expectedUsername: "somepage",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+}
+
+test("Facebook scan excludes a suggestion heading in a sibling sub-container", async () => {
+  const result = await scanFacebookFixture(
+    `<div role="main">
+       <a href="/reel/1001">own reel</a>
+       <section>
+         <div class="heading-slot"><h2>Reels for you</h2></div>
+         <div class="items-slot"><a href="/reel/8001">suggested</a></div>
+       </section>
+     </div>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  assert.deepEqual(result.urls.sort(), ["https://www.facebook.com/reel/1001"]);
+});
+
+test("Facebook scan excludes a suggestion region labelled via aria-label with no heading", async () => {
+  const result = await scanFacebookFixture(
+    `<div role="main">
+       <a href="/reel/1001">own reel</a>
+       <div role="region" aria-label="Reels for you">
+         <a href="/reel/8001">suggested</a>
+       </div>
+     </div>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  assert.deepEqual(result.urls.sort(), ["https://www.facebook.com/reel/1001"]);
+});
+
+test("Facebook scan excludes a suggestion heading localised to Japanese", async () => {
+  const result = await scanFacebookFixture(
+    `<div role="main">
+       <a href="/reel/1001">own reel</a>
+       <section>
+         <h2>あなたへのおすすめ</h2>
+         <a href="/reel/8001">suggested</a>
+       </section>
+     </div>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  assert.deepEqual(result.urls.sort(), ["https://www.facebook.com/reel/1001"]);
+});
+
+test("Facebook scan excludes a reel inside an embedded/shared-post wrapper", async () => {
+  const result = await scanFacebookFixture(
+    `<div role="main">
+       <a href="/reel/1001">own reel</a>
+       <div data-testid="story-attachment">
+         <a href="/reel/8001">embedded</a>
+       </div>
+       <div data-testid="quoted-post-container">
+         <a href="/reel/8002">quoted</a>
+       </div>
+     </div>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  assert.deepEqual(result.urls.sort(), ["https://www.facebook.com/reel/1001"]);
+});
+
+test("Facebook scan excludes a suggestion heading wrapped an extra div deeper", async () => {
+  const result = await scanFacebookFixture(
+    `<div role="main">
+       <a href="/reel/1001">own reel</a>
+       <section>
+         <div><div><h2>Reels for you</h2></div></div>
+         <a href="/reel/8001">suggested</a>
+       </section>
+     </div>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  assert.deepEqual(result.urls.sort(), ["https://www.facebook.com/reel/1001"]);
+});
+
+test("Facebook scan still collects a reel anchor directly under role=main with no section wrapper", async () => {
+  const result = await scanFacebookFixture(
+    `<div role="main">
+       <a href="/reel/1001">own reel</a>
+       <a href="/reel/1002">another own reel</a>
+     </div>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  assert.deepEqual(result.urls.sort(), [
+    "https://www.facebook.com/reel/1001",
+    "https://www.facebook.com/reel/1002",
+  ]);
+});
+
+test("result.urls is a non-empty array for both Twitter and Facebook fixtures", async () => {
+  withPage(
+    `<div role="main">
+       <article>
+         <video></video>
+         <a href="/alice/status/1001"><time></time></a>
+       </article>
+     </div>`,
+    "https://x.com/alice/media"
+  );
+  const twitterResult = await profileScanChunk({
+    provider: "twitter",
+    hosts: ["x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"],
+    reserved: ["home", "explore", "notifications", "messages", "i", "settings"],
+    expectedUsername: "alice",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+  assert.ok(Array.isArray(twitterResult.urls), "Twitter result.urls must be an array");
+  assert.ok(twitterResult.urls.length > 0, "Twitter result.urls must be non-empty");
+  assert.deepEqual(twitterResult.urls, ["https://x.com/alice/status/1001"]);
+
+  const facebookResult = await scanFacebookFixture(
+    `<div role="main"><a href="/reel/1001">own reel</a></div>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  assert.ok(Array.isArray(facebookResult.urls), "Facebook result.urls must be an array");
+  assert.ok(facebookResult.urls.length > 0, "Facebook result.urls must be non-empty");
+});
+
+test("Facebook display name is empty (not the literal 'Facebook') when the title has no derivable name", async () => {
+  withPage(
+    `<html><head><title>Facebook</title></head>
+     <body><div role="main"><a href="/reel/1">x</a></div></body></html>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["www.facebook.com"],
+    expectedUsername: "somepage",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+  assert.equal(result.profileName, "");
+});
+
+test("Facebook display name normalises internal whitespace from a nested-markup h1", async () => {
+  withPage(
+    `<html><head><title>Facebook</title></head>
+     <body><div role="main"><h1>Some  <b>Creator</b></h1><a href="/reel/1">x</a></div></body></html>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["www.facebook.com"],
+    expectedUsername: "somepage",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+  assert.equal(result.profileName, "Some Creator");
+});
