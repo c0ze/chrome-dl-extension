@@ -294,6 +294,12 @@ input:disabled {
   color: var(--danger);
 }
 
+.download-status.cancelled {
+  background: rgba(33, 27, 21, 0.08);
+  border: 1px solid rgba(33, 27, 21, 0.22);
+  color: var(--muted);
+}
+
 .download-action-button {
   padding: 6px 10px;
   border: 0;
@@ -352,6 +358,14 @@ input:disabled {
   overflow-wrap: anywhere;
 }
 
+.download-more {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  text-align: center;
+}
+
 .empty-state {
   padding: 14px;
   border-radius: 8px;
@@ -375,6 +389,21 @@ input:disabled {
   background: rgba(240, 250, 243, 0.96);
   border-color: rgba(31, 107, 67, 0.22);
   color: var(--success);
+}
+
+.message.info {
+  background: rgba(255, 248, 238, 0.96);
+  border-color: rgba(200, 110, 51, 0.26);
+  color: var(--accent-strong);
+}
+
+/* Not an error, but must not read as a clean success either. */
+.message.warning {
+  background: rgba(255, 243, 222, 0.98);
+  border-color: rgba(200, 110, 51, 0.42);
+  border-left: 4px solid var(--accent);
+  color: var(--accent-strong);
+  font-weight: 600;
 }
 
 .hidden {

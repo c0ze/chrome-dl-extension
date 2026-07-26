@@ -1,8 +1,43 @@
 const HOST_NAME = "dev.arda.ytdlp_host";
 const RECENT_DIRECTORIES_KEY = "recentDownloadDirectories";
 const MAX_RECENT_DIRECTORIES = 10;
-const DASHBOARD_POLL_MS = 1600;
 const MAX_VISIBLE_DOWNLOADS = 8;
+
+// Completion-scheduled polling: a new native host process is spawned per poll,
+// so idle windows must not keep paying for it. Progress bars still read as live
+// at 2.5s while an active download is running.
+const POLL_RUNNING_MS = 2500;
+const POLL_IDLE_MS = 6000;
+const POLL_HIDDEN_MS = 30000;
+
+// The service worker rewrites the scan record after every ~4s scan chunk, so a
+// much longer silence means it was terminated mid-scan and nothing else will
+// ever arrive. The watchdog therefore measures the gap since the last progress
+// update, never total elapsed time: a full scan legitimately runs for tens of
+// seconds.
+const SCAN_WATCHDOG_MS = 20000;
+
+const TWITTER_HOSTS = [
+  "twitter.com",
+  "www.twitter.com",
+  "mobile.twitter.com",
+  "x.com",
+  "www.x.com",
+];
+
+// Kept in sync with twitter_profile_media_username() in native-host/yt_dlp_host.py.
+const RESERVED_PROFILE_USERNAMES = [
+  "home",
+  "explore",
+  "notifications",
+  "messages",
+  "i",
+  "settings",
+];
+
+const USERNAME_PATTERN = /^[A-Za-z0-9_]{1,15}$/;
+
+const TOTAL_JOB_COUNT_KEYS = ["total_count", "total_jobs", "job_count", "total"];
 
 const elements = {
   browseButton: document.getElementById("browse-button"),
@@ -16,18 +51,31 @@ const elements = {
   message: document.getElementById("message"),
   recentList: document.getElementById("recent-list"),
   refreshButton: document.getElementById("refresh-button"),
+  rescanButton: document.getElementById("rescan-button"),
   targetUrl: document.getElementById("target-url"),
 };
 
 const state = {
   defaultDirectory: "~/Downloads",
+  partialAcknowledged: false,
   profileScanError: "",
   profileUrls: null,
+  rescanTabId: null,
+  scanKey: "",
+  scanPartial: false,
+  scanSeenAt: 0,
+  scanSettled: false,
+  scanStatus: "none",
   source: "extension",
   targetUrl: "",
 };
 
-let dashboardTimer = null;
+let downloadBusy = false;
+let pollTimer = null;
+let pollInFlight = false;
+let pollPending = false;
+let pollStopped = false;
+let scanWatchdogTimer = null;
 
 function showMessage(kind, text) {
   elements.message.className = `message ${kind}`;
@@ -98,6 +146,8 @@ function renderRecentDirectories(directories) {
     });
     elements.recentList.append(button);
   });
+
+  applyBusyState();
 }
 
 function formatJobTitle(job) {
@@ -118,7 +168,14 @@ function formatProgress(job) {
     return `${Math.round(job.progress)}%`;
   }
 
-  return job.status === "complete" ? "100%" : "Waiting";
+  if (job.status === "complete") {
+    return "100%";
+  }
+  if (job.status === "cancelled") {
+    return "Cancelled";
+  }
+
+  return "Waiting";
 }
 
 function makeMetaItem(text) {
@@ -138,31 +195,277 @@ function duplicatePromptText(duplicateJob, duplicateCount) {
   return `${intro}\n\n${title}${location}\n\nDownload duplicate video files anyway?`;
 }
 
-function isTwitterProfileMediaUrl(rawUrl) {
+function partialScanMessage(count) {
+  const label = count === 1 ? "video link" : "video links";
+  return (
+    `The scan stopped early, so this is only part of the profile: ${count} ${label} found so far. ` +
+    "Scroll further down the profile media page and scan again to pick up older posts."
+  );
+}
+
+function partialScanPromptText(count) {
+  const label = count === 1 ? "video" : "videos";
+  return (
+    "The profile scan stopped early before it reached the end of this profile.\n\n" +
+    `Only ${count} ${label} were found so far. Scrolling further down the profile media ` +
+    "page and scanning again would find more.\n\n" +
+    `Queue these ${count} ${label} now anyway?`
+  );
+}
+
+function twitterProfileMediaUsername(rawUrl) {
   try {
     const url = new URL(rawUrl);
-    const hosts = ["twitter.com", "www.twitter.com", "mobile.twitter.com", "x.com", "www.x.com"];
+    if (!TWITTER_HOSTS.includes(url.hostname)) {
+      return null;
+    }
+
     const parts = url.pathname.split("/").filter(Boolean);
-    return hosts.includes(url.hostname) && parts.length >= 2 && parts[1].toLowerCase() === "media";
+    if (parts.length < 2 || parts[1].toLowerCase() !== "media") {
+      return null;
+    }
+
+    const username = parts[0];
+    if (!USERNAME_PATTERN.test(username)) {
+      return null;
+    }
+
+    return RESERVED_PROFILE_USERNAMES.includes(username.toLowerCase()) ? null : username;
   } catch (_error) {
-    return false;
+    return null;
   }
 }
 
-async function loadProfileBatch(batchKey) {
-  if (!batchKey) {
+function isTwitterProfileMediaUrl(rawUrl) {
+  return Boolean(twitterProfileMediaUsername(rawUrl));
+}
+
+function isScanning() {
+  return state.scanStatus === "scanning";
+}
+
+function applyBusyState() {
+  const blocked = downloadBusy || isScanning();
+  elements.downloadButton.disabled = blocked;
+  elements.defaultButton.disabled = blocked;
+  elements.browseButton.disabled = downloadBusy;
+  elements.downloadDir.disabled = downloadBusy;
+  elements.rescanButton.disabled = blocked;
+  elements.recentList.querySelectorAll("button").forEach((button) => {
+    button.disabled = blocked;
+  });
+}
+
+function setBusy(isBusy) {
+  downloadBusy = isBusy;
+  applyBusyState();
+}
+
+function releaseScanRecord() {
+  if (!state.scanKey) {
+    return;
+  }
+
+  const key = state.scanKey;
+  void chrome.storage.session.remove([key]).catch(() => {});
+}
+
+function canRescan() {
+  return (
+    Boolean(state.scanKey) &&
+    state.rescanTabId !== null &&
+    Boolean(twitterProfileMediaUsername(state.targetUrl))
+  );
+}
+
+function setRescanVisible(visible) {
+  elements.rescanButton.classList.toggle("hidden", !visible);
+}
+
+function clearScanWatchdog() {
+  if (scanWatchdogTimer !== null) {
+    window.clearTimeout(scanWatchdogTimer);
+    scanWatchdogTimer = null;
+  }
+}
+
+// Restarted on every progress update, so a long-but-healthy scan is never
+// interrupted; only silence trips it.
+function armScanWatchdog() {
+  clearScanWatchdog();
+  if (!state.scanKey || state.scanSettled) {
+    return;
+  }
+
+  scanWatchdogTimer = window.setTimeout(() => {
+    scanWatchdogTimer = null;
+    void handleScanStall();
+  }, SCAN_WATCHDOG_MS);
+}
+
+/**
+ * Applies a profile scan record written by the service worker.
+ * Record shape: { status: "scanning" | "done" | "error", username, urls, found, error, partial }
+ */
+function applyScanRecord(record) {
+  if (state.scanSettled || !record) {
+    return;
+  }
+
+  if (record.status === "scanning") {
+    state.scanStatus = "scanning";
+    state.profileUrls = null;
+    state.scanSeenAt = typeof record.updatedAt === "number" ? record.updatedAt : Date.now();
+    const found = typeof record.found === "number" ? record.found : 0;
+    showMessage(
+      "info",
+      found > 0
+        ? `Scanning this profile page for videos… ${found} found so far.`
+        : "Scanning this profile page for videos…"
+    );
+    setRescanVisible(false);
+    armScanWatchdog();
+    applyBusyState();
+    return;
+  }
+
+  if (record.status !== "done" && record.status !== "error") {
+    return;
+  }
+
+  clearScanWatchdog();
+
+  if (record.status === "error") {
+    state.scanSettled = true;
+    state.scanStatus = "error";
+    state.profileUrls = [];
+    state.profileScanError = record.error || "Could not scan the profile media page.";
+    showMessage("error", state.profileScanError);
+    setRescanVisible(canRescan());
+    releaseScanRecord();
+    applyBusyState();
+    return;
+  }
+
+  state.scanSettled = true;
+  state.scanStatus = "done";
+  const urls = Array.isArray(record.urls)
+    ? record.urls.filter((url) => typeof url === "string" && url.startsWith("https://"))
+    : [];
+  state.profileUrls = urls;
+  state.scanPartial = Boolean(record.partial) && urls.length > 0;
+  state.partialAcknowledged = false;
+
+  if (state.scanPartial) {
+    // Downloading a partial set stays allowed, but the popup must not present it
+    // as the whole profile: startDownload() asks for an explicit confirmation.
+    showMessage("warning", partialScanMessage(urls.length));
+    setRescanVisible(canRescan());
+  } else if (urls.length) {
+    showMessage("success", `Found ${urls.length} video links on this profile page.`);
+    setRescanVisible(false);
+  } else {
+    state.profileScanError =
+      "No video links were found. Scroll the profile media page to load videos, then try again.";
+    showMessage("error", state.profileScanError);
+    setRescanVisible(canRescan());
+  }
+
+  releaseScanRecord();
+  applyBusyState();
+}
+
+async function readScanRecord() {
+  if (!state.scanKey) {
     return null;
   }
 
-  const result = await chrome.storage.session.get([batchKey]);
-  const batch = result[batchKey];
-  await chrome.storage.session.remove([batchKey]);
-
-  if (!batch || !Array.isArray(batch.urls)) {
+  try {
+    const result = await chrome.storage.session.get([state.scanKey]);
+    return result[state.scanKey] || null;
+  } catch (_error) {
+    // The onChanged listener still delivers the result once it lands.
     return null;
   }
+}
 
-  return batch.urls.filter((url) => typeof url === "string" && url.startsWith("https://"));
+async function loadScanRecord() {
+  const record = await readScanRecord();
+  if (record) {
+    applyScanRecord(record);
+  }
+}
+
+/**
+ * The MV3 service worker can be terminated mid-scan, in which case no further
+ * storage change ever arrives. Fail the scan open instead of blocking the popup
+ * forever.
+ */
+async function handleScanStall() {
+  if (state.scanSettled || !isScanning()) {
+    return;
+  }
+
+  // A change event can be missed; only give up when storage holds nothing newer
+  // than the update the popup already applied.
+  const record = await readScanRecord();
+  const updatedAt = typeof record?.updatedAt === "number" ? record.updatedAt : 0;
+  if (record && (record.status !== "scanning" || updatedAt > state.scanSeenAt)) {
+    applyScanRecord(record);
+    return;
+  }
+
+  state.scanStatus = "stalled";
+  state.profileUrls = [];
+  state.profileScanError =
+    "The profile scan stopped responding — Chrome may have shut down the extension's " +
+    "background worker. " +
+    (canRescan()
+      ? "Use Scan Again to restart it."
+      : "Reload the profile media page and start the download again.");
+  showMessage("error", state.profileScanError);
+  setRescanVisible(canRescan());
+  applyBusyState();
+}
+
+async function requestRescan() {
+  if (!canRescan()) {
+    return;
+  }
+
+  clearScanWatchdog();
+  setRescanVisible(false);
+  state.scanSettled = false;
+  state.scanStatus = "scanning";
+  state.scanSeenAt = 0;
+  state.scanPartial = false;
+  state.partialAcknowledged = false;
+  state.profileScanError = "";
+  state.profileUrls = null;
+  showMessage("info", "Scanning this profile page for videos…");
+  armScanWatchdog();
+  applyBusyState();
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "rescan-profile",
+      key: state.scanKey,
+      tabId: state.rescanTabId,
+      username: twitterProfileMediaUsername(state.targetUrl),
+    });
+
+    if (!response?.ok) {
+      throw new Error(response?.error || "Could not restart the profile scan.");
+    }
+  } catch (error) {
+    clearScanWatchdog();
+    state.scanStatus = "stalled";
+    state.profileUrls = [];
+    state.profileScanError = error.message || "Could not restart the profile scan.";
+    showMessage("error", state.profileScanError);
+    setRescanVisible(canRescan());
+    applyBusyState();
+  }
 }
 
 async function startDashboardJob(jobId) {
@@ -172,9 +475,23 @@ async function startDashboardJob(jobId) {
       throw new Error(response?.error || "Could not start the queued download.");
     }
 
-    void refreshDownloads();
+    void pollDownloads();
   } catch (error) {
     showMessage("error", error.message || "Could not start the queued download.");
+  }
+}
+
+async function cancelDashboardJob(jobId) {
+  try {
+    const response = await callHost({ type: "cancel_download_job", job_id: jobId });
+    if (!response?.ok) {
+      throw new Error(response?.error || "Could not cancel this download.");
+    }
+
+    showMessage("success", "Download cancelled.");
+    void pollDownloads();
+  } catch (error) {
+    showMessage("error", error.message || "Could not cancel this download.");
   }
 }
 
@@ -185,7 +502,7 @@ async function removeDashboardJob(jobId) {
       throw new Error(response?.error || "Could not remove this download.");
     }
 
-    void refreshDownloads();
+    void pollDownloads();
   } catch (error) {
     showMessage("error", error.message || "Could not remove this download.");
   }
@@ -199,7 +516,7 @@ async function clearDashboardJobs() {
     }
 
     showMessage("success", `Removed ${response.removed || 0} downloads from the dashboard.`);
-    void refreshDownloads();
+    void pollDownloads();
   } catch (error) {
     showMessage("error", error.message || "Could not clear the download list.");
   }
@@ -218,13 +535,148 @@ async function openDashboardFolder(jobId) {
   }
 }
 
-function renderDownloads(jobs, activeCount, queuedCount) {
+function pickCount(response, keys) {
+  for (const key of keys) {
+    const value = response?.[key];
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function makeActionButton(label, title, extraClass, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = extraClass
+    ? `download-action-button ${extraClass}`
+    : "download-action-button";
+  button.textContent = label;
+  button.title = title;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function makeJobActions(job) {
+  const actions = document.createElement("div");
+  actions.className = "download-actions";
+
+  const status = document.createElement("span");
+  status.className = `download-status ${job.status || "queued"}`;
+  status.textContent = job.status_detail || job.status || "Queued";
+  actions.append(status);
+
+  if (["queued", "failed", "cancelled"].includes(job.status)) {
+    const isRetry = job.status !== "queued";
+    actions.append(
+      makeActionButton(
+        isRetry ? "Retry" : "Start",
+        isRetry ? `Retry this ${job.status} download` : "Start this queued download next",
+        "",
+        () => {
+          void startDashboardJob(job.id);
+        }
+      )
+    );
+  }
+
+  if (job.status === "running") {
+    actions.append(
+      makeActionButton("Cancel", "Stop this running download", "button-danger", () => {
+        void cancelDashboardJob(job.id);
+      })
+    );
+  }
+
+  if (job.filename || job.download_dir) {
+    actions.append(
+      makeActionButton("Folder", "Open the containing folder", "button-muted-small", () => {
+        void openDashboardFolder(job.id);
+      })
+    );
+  }
+
+  if (job.status !== "running") {
+    actions.append(
+      makeActionButton("Remove", "Remove this item from the dashboard", "button-danger", () => {
+        void removeDashboardJob(job.id);
+      })
+    );
+  }
+
+  return actions;
+}
+
+function makeJobMeta(job) {
+  const meta = document.createElement("div");
+  meta.className = "download-meta";
+  meta.append(makeMetaItem(formatProgress(job)));
+
+  if (job.speed && job.status === "running") {
+    meta.append(makeMetaItem(job.speed));
+  }
+  if (job.eta && job.status === "running") {
+    meta.append(makeMetaItem(`ETA ${job.eta}`));
+  }
+  if (job.fragment && job.status === "running") {
+    meta.append(makeMetaItem(`Fragment ${job.fragment}`));
+  }
+  if (job.download_dir) {
+    meta.append(makeMetaItem(job.download_dir));
+  }
+
+  return meta;
+}
+
+function makeDownloadItem(job) {
+  const item = document.createElement("article");
+  item.className = "download-item";
+
+  const main = document.createElement("div");
+  main.className = "download-main";
+
+  const titleGroup = document.createElement("div");
+  titleGroup.className = "download-title-group";
+
+  const title = document.createElement("p");
+  title.className = "download-title";
+  title.textContent = formatJobTitle(job);
+  title.title = job.url || "";
+  titleGroup.append(title);
+
+  main.append(titleGroup, makeJobActions(job));
+
+  const track = document.createElement("div");
+  track.className = "progress-track";
+
+  const fill = document.createElement("div");
+  fill.className = "progress-fill";
+  const progress = typeof job.progress === "number" ? job.progress : 0;
+  fill.style.width = `${Math.max(0, Math.min(100, progress))}%`;
+  track.append(fill);
+
+  item.append(main, track, makeJobMeta(job));
+
+  if (job.error) {
+    const error = document.createElement("p");
+    error.className = "download-error";
+    error.textContent = job.error;
+    item.append(error);
+  }
+
+  return item;
+}
+
+function renderDownloads(jobs, totals) {
   elements.downloadList.textContent = "";
   const visibleJobs = jobs.slice(0, MAX_VISIBLE_DOWNLOADS);
+  const totalJobs = Math.max(totals.total, jobs.length);
 
-  const runningLabel = activeCount === 1 ? "1 running" : `${activeCount} running`;
-  const queuedLabel = queuedCount === 1 ? "1 queued" : `${queuedCount} queued`;
-  elements.dashboardSummary.textContent = `${runningLabel}, ${queuedLabel}`;
+  const runningLabel = totals.active === 1 ? "1 running" : `${totals.active} running`;
+  const queuedLabel = totals.queued === 1 ? "1 queued" : `${totals.queued} queued`;
+  const totalLabel = totalJobs ? `, ${totalJobs} total` : "";
+  elements.dashboardSummary.textContent = `${runningLabel}, ${queuedLabel}${totalLabel}`;
 
   if (!visibleJobs.length) {
     const emptyState = document.createElement("div");
@@ -235,108 +687,15 @@ function renderDownloads(jobs, activeCount, queuedCount) {
   }
 
   visibleJobs.forEach((job) => {
-    const item = document.createElement("article");
-    item.className = "download-item";
-
-    const main = document.createElement("div");
-    main.className = "download-main";
-
-    const titleGroup = document.createElement("div");
-    titleGroup.className = "download-title-group";
-
-    const title = document.createElement("p");
-    title.className = "download-title";
-    title.textContent = formatJobTitle(job);
-    title.title = job.url || "";
-
-    titleGroup.append(title);
-
-    const status = document.createElement("span");
-    status.className = `download-status ${job.status || "queued"}`;
-    status.textContent = job.status_detail || job.status || "Queued";
-
-    const actions = document.createElement("div");
-    actions.className = "download-actions";
-    actions.append(status);
-
-    if (["queued", "failed"].includes(job.status)) {
-      const startButton = document.createElement("button");
-      startButton.type = "button";
-      startButton.className = "download-action-button";
-      startButton.textContent = job.status === "failed" ? "Retry" : "Start";
-      startButton.title =
-        job.status === "failed"
-          ? "Retry this failed download"
-          : "Start this queued download next";
-      startButton.addEventListener("click", () => {
-        void startDashboardJob(job.id);
-      });
-      actions.append(startButton);
-    }
-
-    if (job.filename || job.download_dir) {
-      const folderButton = document.createElement("button");
-      folderButton.type = "button";
-      folderButton.className = "download-action-button button-muted-small";
-      folderButton.textContent = "Folder";
-      folderButton.title = "Open the containing folder";
-      folderButton.addEventListener("click", () => {
-        void openDashboardFolder(job.id);
-      });
-      actions.append(folderButton);
-    }
-
-    if (job.status !== "running") {
-      const removeButton = document.createElement("button");
-      removeButton.type = "button";
-      removeButton.className = "download-action-button button-danger";
-      removeButton.textContent = "Remove";
-      removeButton.title = "Remove this item from the dashboard";
-      removeButton.addEventListener("click", () => {
-        void removeDashboardJob(job.id);
-      });
-      actions.append(removeButton);
-    }
-
-    main.append(titleGroup, actions);
-
-    const track = document.createElement("div");
-    track.className = "progress-track";
-
-    const fill = document.createElement("div");
-    fill.className = "progress-fill";
-    const progress = typeof job.progress === "number" ? job.progress : 0;
-    fill.style.width = `${Math.max(0, Math.min(100, progress))}%`;
-    track.append(fill);
-
-    const meta = document.createElement("div");
-    meta.className = "download-meta";
-    meta.append(makeMetaItem(formatProgress(job)));
-
-    if (job.speed && job.status === "running") {
-      meta.append(makeMetaItem(job.speed));
-    }
-    if (job.eta && job.status === "running") {
-      meta.append(makeMetaItem(`ETA ${job.eta}`));
-    }
-    if (job.fragment && job.status === "running") {
-      meta.append(makeMetaItem(`Fragment ${job.fragment}`));
-    }
-    if (job.download_dir) {
-      meta.append(makeMetaItem(job.download_dir));
-    }
-
-    item.append(main, track, meta);
-
-    if (job.error) {
-      const error = document.createElement("p");
-      error.className = "download-error";
-      error.textContent = job.error;
-      item.append(error);
-    }
-
-    elements.downloadList.append(item);
+    elements.downloadList.append(makeDownloadItem(job));
   });
+
+  if (totalJobs > visibleJobs.length) {
+    const note = document.createElement("p");
+    note.className = "download-more";
+    note.textContent = `Showing ${visibleJobs.length} of ${totalJobs} downloads.`;
+    elements.downloadList.append(note);
+  }
 }
 
 async function refreshDownloads() {
@@ -346,11 +705,15 @@ async function refreshDownloads() {
       throw new Error(response?.error || "Could not load download status.");
     }
 
-    renderDownloads(
-      response.jobs || [],
-      response.active_count || 0,
-      response.queued_count || 0
-    );
+    const jobs = Array.isArray(response.jobs) ? response.jobs : [];
+    const totals = {
+      active: pickCount(response, ["active_count"]) ?? 0,
+      queued: pickCount(response, ["queued_count"]) ?? 0,
+      total: pickCount(response, TOTAL_JOB_COUNT_KEYS) ?? jobs.length,
+    };
+
+    renderDownloads(jobs, totals);
+    return totals;
   } catch (error) {
     elements.dashboardSummary.textContent = "Download status unavailable";
     elements.downloadList.textContent = "";
@@ -358,25 +721,69 @@ async function refreshDownloads() {
     emptyState.className = "empty-state";
     emptyState.textContent = error.message || "Could not reach the native host.";
     elements.downloadList.append(emptyState);
+    return null;
   }
 }
 
-function startDashboardPolling() {
-  if (dashboardTimer !== null) {
-    window.clearInterval(dashboardTimer);
+function nextPollDelay(activeCount) {
+  if (document.hidden) {
+    return POLL_HIDDEN_MS;
   }
 
-  void refreshDownloads();
-  dashboardTimer = window.setInterval(() => {
-    void refreshDownloads();
-  }, DASHBOARD_POLL_MS);
+  return activeCount > 0 ? POLL_RUNNING_MS : POLL_IDLE_MS;
 }
 
-function setBusy(isBusy) {
-  elements.downloadButton.disabled = isBusy;
-  elements.defaultButton.disabled = isBusy;
-  elements.browseButton.disabled = isBusy;
-  elements.downloadDir.disabled = isBusy;
+function clearPollTimer() {
+  if (pollTimer !== null) {
+    window.clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function scheduleNextPoll(activeCount) {
+  clearPollTimer();
+  if (pollStopped) {
+    return;
+  }
+
+  pollTimer = window.setTimeout(() => {
+    pollTimer = null;
+    void pollDownloads();
+  }, nextPollDelay(activeCount));
+}
+
+async function pollDownloads() {
+  if (pollStopped) {
+    return;
+  }
+
+  // One native host process at a time: never let slow responses overlap.
+  if (pollInFlight) {
+    pollPending = true;
+    return;
+  }
+
+  clearPollTimer();
+  pollInFlight = true;
+  let activeCount = 0;
+
+  try {
+    const totals = await refreshDownloads();
+    activeCount = totals?.active || 0;
+  } finally {
+    pollInFlight = false;
+    if (pollPending) {
+      pollPending = false;
+      void pollDownloads();
+    } else {
+      scheduleNextPoll(activeCount);
+    }
+  }
+}
+
+function stopDashboardPolling() {
+  pollStopped = true;
+  clearPollTimer();
 }
 
 async function startDownload(directory, allowDuplicate = false) {
@@ -387,6 +794,14 @@ async function startDownload(directory, allowDuplicate = false) {
     return;
   }
 
+  if (isScanning()) {
+    showMessage(
+      "info",
+      "Still scanning this profile page for videos. Start the download once the scan finishes."
+    );
+    return;
+  }
+
   if (isTwitterProfileMediaUrl(state.targetUrl) && !state.profileUrls?.length) {
     showMessage(
       "error",
@@ -394,6 +809,17 @@ async function startDownload(directory, allowDuplicate = false) {
         "No profile video links were found. Scroll the profile media page to load videos, then try again."
     );
     return;
+  }
+
+  // Queueing a truncated profile is a legitimate choice, but never a silent one.
+  if (state.scanPartial && !state.partialAcknowledged) {
+    const found = state.profileUrls?.length || 0;
+    if (!window.confirm(partialScanPromptText(found))) {
+      showMessage("warning", partialScanMessage(found));
+      return;
+    }
+
+    state.partialAcknowledged = true;
   }
 
   hideMessage();
@@ -410,7 +836,7 @@ async function startDownload(directory, allowDuplicate = false) {
     });
 
     if (response?.duplicate) {
-      void refreshDownloads();
+      void pollDownloads();
       const shouldDownloadDuplicate = window.confirm(
         duplicatePromptText(response.duplicate_job, response.duplicate_count)
       );
@@ -433,14 +859,17 @@ async function startDownload(directory, allowDuplicate = false) {
       const skipped = response.skipped_count || 0;
       const label = count === 1 ? "download" : "downloads";
       const suffix = skipped > 0 ? ` (skipped ${skipped} already queued or downloaded)` : "";
+      const partialNote = state.scanPartial
+        ? " This was a partial scan — scroll the profile media page further and scan again for older posts."
+        : "";
       showMessage(
-        "success",
-        `Queued ${count} profile ${label} in ${response.download_dir}${suffix}`
+        state.scanPartial ? "warning" : "success",
+        `Queued ${count} profile ${label} in ${response.download_dir}${suffix}.${partialNote}`
       );
     } else {
       showMessage("success", `Download queued in ${selectedDirectory}`);
     }
-    void refreshDownloads();
+    void pollDownloads();
   } catch (error) {
     showMessage(
       "error",
@@ -461,10 +890,6 @@ async function loadDefaultDirectory() {
 }
 
 async function initialize() {
-  const params = new URLSearchParams(window.location.search);
-  state.targetUrl = params.get("url") || "";
-  state.source = params.get("source") || "extension";
-  state.profileScanError = params.get("profileScanError") || "";
   elements.targetUrl.textContent = state.targetUrl || "Missing URL";
 
   if (!state.targetUrl) {
@@ -473,31 +898,29 @@ async function initialize() {
     return;
   }
 
+  if (state.scanKey) {
+    state.scanStatus = "scanning";
+    showMessage("info", "Scanning this profile page for videos…");
+    armScanWatchdog();
+    applyBusyState();
+  } else if (isTwitterProfileMediaUrl(state.targetUrl)) {
+    state.scanSettled = true;
+    state.scanStatus = "error";
+    state.profileUrls = [];
+    state.profileScanError =
+      "Open the X/Twitter profile media page in a tab and use the toolbar button there to scan it.";
+    showMessage("error", state.profileScanError);
+  }
+
   try {
-    const [defaultDirectory, recentDirectories, profileUrls] = await Promise.all([
+    const [defaultDirectory, recentDirectories] = await Promise.all([
       loadDefaultDirectory(),
       getRecentDirectories(),
-      loadProfileBatch(params.get("profileBatchKey")),
     ]);
 
     state.defaultDirectory = defaultDirectory;
-    state.profileUrls = profileUrls;
     elements.downloadDir.value = recentDirectories[0] || defaultDirectory;
     renderRecentDirectories(recentDirectories);
-
-    if (state.profileScanError) {
-      showMessage("error", state.profileScanError);
-    } else if (isTwitterProfileMediaUrl(state.targetUrl)) {
-      const count = state.profileUrls?.length || 0;
-      if (count > 0) {
-        showMessage("success", `Found ${count} video links on this profile page.`);
-      } else {
-        showMessage(
-          "error",
-          "No video links were found. Scroll the profile media page to load videos, then try again."
-        );
-      }
-    }
   } catch (error) {
     showMessage(
       "error",
@@ -505,7 +928,28 @@ async function initialize() {
     );
     renderRecentDirectories([]);
   }
+
+  await loadScanRecord();
 }
+
+const params = new URLSearchParams(window.location.search);
+state.targetUrl = params.get("url") || "";
+state.source = params.get("source") || "extension";
+state.scanKey = params.get("profileBatchKey") || "";
+
+const rescanTabId = Number.parseInt(params.get("profileTabId") || "", 10);
+state.rescanTabId = Number.isInteger(rescanTabId) ? rescanTabId : null;
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "session" || !state.scanKey) {
+    return;
+  }
+
+  const change = changes[state.scanKey];
+  if (change?.newValue) {
+    applyScanRecord(change.newValue);
+  }
+});
 
 elements.downloadForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -544,19 +988,31 @@ elements.browseButton.addEventListener("click", async () => {
   }
 });
 
+elements.rescanButton.addEventListener("click", () => {
+  void requestRescan();
+});
+
 elements.refreshButton.addEventListener("click", () => {
-  void refreshDownloads();
+  void pollDownloads();
 });
 
 elements.clearButton.addEventListener("click", () => {
   void clearDashboardJobs();
 });
 
-window.addEventListener("beforeunload", () => {
-  if (dashboardTimer !== null) {
-    window.clearInterval(dashboardTimer);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    scheduleNextPoll(0);
+    return;
   }
+
+  void pollDownloads();
+});
+
+window.addEventListener("beforeunload", () => {
+  stopDashboardPolling();
+  clearScanWatchdog();
 });
 
 void initialize();
-startDashboardPolling();
+void pollDownloads();

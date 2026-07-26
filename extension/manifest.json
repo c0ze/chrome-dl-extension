@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Twitter Video Downloader Bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Send X/Twitter URLs to a local yt-dlp native host with browser cookies.",
   "minimum_chrome_version": "114",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAo/6UARFgNKiDvYj6gsjO4CDWWTJcdipR9y3psGfdN73Z5beVSbGCSHxTXlAsQ9eQd40ms9WsIsEzsJVChpMfoQI875BqOazccLxHnYVIZh0NN5MQjS8eT9NhynzMsQ2KzTahj8hCc5KZmnZvL8/9iQ3CKM242SBZHdd1sW3RZyAzsajVbFxX41sznfjsC/6H1K1nwpCZrsCuUuuDfyPYjathTNt2fHV8zaXQzZBR4XwfByFG6mTPZtnSjpongr+sqMS8J3nfXp2vUcuq1buuRMNBQPMwKHCYIiq/wIwC0B8Phy6+GGoGGrrOe6Ax3OxLNRnnlwDTon3dHtsSNTLP6QIDAQAB",
@@ -10,8 +10,7 @@
     "contextMenus",
     "nativeMessaging",
     "scripting",
-    "storage",
-    "tabs"
+    "storage"
   ],
   "background": {
     "service_worker": "background.js"
