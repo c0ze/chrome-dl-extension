@@ -344,6 +344,54 @@ export async function profileScanChunk(options) {
       return name.toLowerCase() !== "facebook";
     }
 
+    // Strips a single trailing " | Facebook" suffix (any surrounding
+    // whitespace), case-insensitive. Applied to every scraped source
+    // (og:title, h1, document.title) since Facebook appends it inconsistently
+    // across surfaces rather than only in the tab title.
+    function stripTrailingFacebookSuffix(name) {
+      return name.replace(/\s*\|\s*Facebook\s*$/i, "").trim();
+    }
+
+    // Facebook appends the active profile tab's name to the page/og title,
+    // e.g. og:title "月瑶 Reels" on a reels tab for a profile actually named
+    // "月瑶". Strip one trailing whole-word occurrence of a known tab name,
+    // case-insensitive, so a name that merely ends in a word containing one
+    // of these (e.g. "Prereels") is left untouched, and a profile legitimately
+    // named exactly one of these tokens (e.g. "Reels") is not reduced to "".
+    // English plus the languages already handled by suggestionWords above
+    // (Japanese, Spanish, Portuguese, French, German). Facebook's own
+    // multi-locale help articles keep "Reels" as an untranslated loanword in
+    // es/pt/fr/de, so no separate token is needed for those; "About" is
+    // omitted for every non-English language because Facebook's ja help
+    // content resolves it to two different, hard-to-disambiguate strings
+    // (概要 vs 基本データ) and the other locales could not be confirmed
+    // against the actual og:title/h1 label rather than a help-article title
+    // — better to under-strip than guess. "Live" has no verifiable
+    // translation for any of these locales, so it is English-only too.
+    const facebookTabNameTokens = [
+      "reels",
+      "リール",
+      "videos", "動画", "vídeos", "vidéos",
+      "photos", "写真", "fotos",
+      "about",
+      "friends", "友達", "amigos", "amis", "freunde",
+      "posts", "投稿", "publicaciones", "publicações", "publications", "beiträge",
+      "live",
+    ];
+
+    function stripTrailingTabToken(name) {
+      let result = name;
+      for (const token of facebookTabNameTokens) {
+        const pattern = new RegExp(`(^|\\s)${token}$`, "iu");
+        const match = pattern.exec(result);
+        if (match && match[1]) {
+          result = result.slice(0, match.index).trim();
+          break;
+        }
+      }
+      return result;
+    }
+
     // Percent-decoded name segment from a /people/<name>/<digits> URL, or ""
     // for any other URL shape or on malformed percent-encoding. Kept in exact
     // behavioural agreement with the module-level facebookPeopleUrlName.
@@ -362,25 +410,40 @@ export async function profileScanChunk(options) {
     }
 
     function facebookProfileName() {
+      const urlName = facebookPeopleUrlNameFromLocation();
+
+      function preferUrlNameIfItMatches(scrapedName) {
+        if (urlName && scrapedName.toLowerCase().startsWith(urlName.toLowerCase())) {
+          return urlName;
+        }
+        return scrapedName;
+      }
+
       const og = document.querySelector("meta[property='og:title']");
-      const ogName = (og?.content || "").replace(/\s+/g, " ").trim();
+      const ogName = stripTrailingTabToken(
+        stripTrailingFacebookSuffix((og?.content || "").replace(/\s+/g, " ").trim())
+      );
       if (isPlausibleProfileName(ogName)) {
-        return ogName;
+        return preferUrlNameIfItMatches(ogName);
       }
       const heading = document.querySelector("[role='main'] h1");
-      const headingName = (heading?.textContent || "").replace(/\s+/g, " ").trim();
+      const headingName = stripTrailingTabToken(
+        stripTrailingFacebookSuffix((heading?.textContent || "").replace(/\s+/g, " ").trim())
+      );
       if (isPlausibleProfileName(headingName)) {
-        return headingName;
+        return preferUrlNameIfItMatches(headingName);
       }
-      const title = (document.title || "")
-        .replace(/^\(\d+\+?\)\s*/, "")
-        .replace(/\s*\|\s*Facebook\s*$/i, "")
-        .replace(/\s+/g, " ")
-        .trim();
+      const title = stripTrailingTabToken(
+        stripTrailingFacebookSuffix(
+          (document.title || "")
+            .replace(/^\(\d+\+?\)\s*/, "")
+            .replace(/\s+/g, " ")
+            .trim()
+        )
+      );
       if (isPlausibleProfileName(title)) {
-        return title;
+        return preferUrlNameIfItMatches(title);
       }
-      const urlName = facebookPeopleUrlNameFromLocation();
       return isPlausibleProfileName(urlName) ? urlName : "";
     }
 
