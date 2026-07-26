@@ -69,7 +69,9 @@ export function facebookProfileReelsKey(rawUrl) {
       if (FACEBOOK_RESERVED_SEGMENTS.includes(candidate.toLowerCase())) {
         return null;
       }
-      return /^[A-Za-z0-9.\-]{1,60}$/.test(candidate) ? candidate : null;
+      return /^(?=[A-Za-z0-9.\-]{1,60}$)(?=.*[A-Za-z0-9])[A-Za-z0-9.\-]+$/.test(candidate)
+        ? candidate
+        : null;
     }
 
     return null;
@@ -101,6 +103,58 @@ export function batchTargetForUrl(rawUrl) {
  */
 export async function profileScanChunk(options) {
   if (options.provider === "facebook") {
+    const fbHosts = new Set(options.hosts || []);
+
+    function facebookReelsKeyFromLocation() {
+      try {
+        const url = new URL(window.location.href);
+        if (!fbHosts.has(url.hostname)) {
+          return null;
+        }
+        const parts = url.pathname.split("/").filter(Boolean);
+
+        if (parts.length === 1 && parts[0] === "profile.php") {
+          if (url.searchParams.get("sk") !== "reels_tab") {
+            return null;
+          }
+          const id = url.searchParams.get("id") || "";
+          return /^\d+$/.test(id) ? id : null;
+        }
+
+        if (parts.length === 2 && parts[1].toLowerCase() === "reels") {
+          const candidate = parts[0];
+          const reservedSegments = [
+            "reel", "reels", "watch", "groups", "marketplace", "events", "pages",
+            "profile.php", "story.php", "photo", "share", "people", "login",
+            "settings", "messages", "notifications",
+          ];
+          if (reservedSegments.includes(candidate.toLowerCase())) {
+            return null;
+          }
+          return /^(?=[A-Za-z0-9.\-]{1,60}$)(?=.*[A-Za-z0-9])[A-Za-z0-9.\-]+$/.test(candidate)
+            ? candidate
+            : null;
+        }
+
+        return null;
+      } catch (_error) {
+        return null;
+      }
+    }
+
+    const facebookKey = facebookReelsKeyFromLocation();
+    if (!facebookKey) {
+      return { ok: false, error: "Open a Facebook profile reels page first." };
+    }
+
+    const expectedFacebookUsername = options.expectedUsername || "";
+    if (expectedFacebookUsername && expectedFacebookUsername.toLowerCase() !== facebookKey.toLowerCase()) {
+      return {
+        ok: false,
+        error: "Open the matching Facebook profile reels page before starting a profile download.",
+      };
+    }
+
     // Multilingual "this is not the profile's own content" wording. Substring
     // match, case-insensitive. Facebook class names are randomised per build
     // and per locale, so wording + ARIA structure are the only signals left.
@@ -214,6 +268,10 @@ export async function profileScanChunk(options) {
       }
       const found = [];
       root.querySelectorAll("a[href*='/reel/']").forEach((anchor) => {
+        const resolved = new URL(anchor.href, window.location.href);
+        if (!fbHosts.has(resolved.hostname)) {
+          return;
+        }
         if (anchor.closest("[role='complementary']")) {
           return;
         }
@@ -223,7 +281,7 @@ export async function profileScanChunk(options) {
         if (isSuggestedOrUnscoped(anchor, root)) {
           return;
         }
-        const match = /^\/reel\/(\d+)\/?$/.exec(new URL(anchor.href, window.location.href).pathname);
+        const match = /^\/reel\/(\d+)\/?$/.exec(resolved.pathname);
         if (match) {
           found.push(`https://www.facebook.com/reel/${match[1]}`);
         }
@@ -257,8 +315,74 @@ export async function profileScanChunk(options) {
       return isPlausibleProfileName(title) ? title : "";
     }
 
-    const urls = Array.from(new Set(collectFacebookReels()));
-    return { ok: true, urls, profileName: facebookProfileName(), done: true };
+    const fbSleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+    const fbProgress = Object.assign(
+      {
+        urls: [],
+        passes: 0,
+        stablePasses: 0,
+        lastCount: 0,
+        lastScrollY: -1,
+        originalScrollY: null,
+        profileName: "",
+      },
+      options.progress || {}
+    );
+
+    if (typeof fbProgress.originalScrollY !== "number") {
+      fbProgress.originalScrollY = window.scrollY;
+    }
+
+    const fbLinks = new Map();
+    (fbProgress.urls || []).forEach((url) => fbLinks.set(url, url));
+
+    function collectFacebookRound() {
+      collectFacebookReels().forEach((url) => fbLinks.set(url, url));
+      const name = facebookProfileName();
+      if (name && !fbProgress.profileName) {
+        fbProgress.profileName = name;
+      }
+    }
+
+    const fbStartedAt = Date.now();
+    const fbMaxPasses = options.maxPasses || 36;
+    const fbBudgetMs = options.budgetMs || 4000;
+    let fbDone = false;
+
+    collectFacebookRound();
+
+    while (true) {
+      if (fbProgress.passes >= fbMaxPasses || fbProgress.stablePasses >= 4) {
+        fbDone = true;
+        break;
+      }
+      if (Date.now() - fbStartedAt >= fbBudgetMs) {
+        break;
+      }
+
+      window.scrollBy(0, Math.max(700, Math.floor(window.innerHeight * 0.86)));
+      await fbSleep(900);
+      collectFacebookRound();
+
+      fbProgress.passes += 1;
+      const didGrow = fbLinks.size > fbProgress.lastCount;
+      const didMove = window.scrollY !== fbProgress.lastScrollY;
+      fbProgress.stablePasses = didGrow || didMove ? 0 : fbProgress.stablePasses + 1;
+      fbProgress.lastCount = fbLinks.size;
+      fbProgress.lastScrollY = window.scrollY;
+    }
+
+    fbProgress.urls = Array.from(fbLinks.values());
+
+    return {
+      ok: true,
+      username: facebookKey,
+      urls: fbProgress.urls,
+      profileName: fbProgress.profileName,
+      done: fbDone,
+      progress: fbProgress,
+    };
   }
 
   const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
