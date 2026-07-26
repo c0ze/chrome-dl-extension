@@ -43,11 +43,41 @@ TWITTER_HOSTS = {
     "x.com",
     "www.x.com",
 }
-TWITTER_OUTPUT_TEMPLATE = "%(uploader_id,uploader|unknown-account)S-%(id)s.%(ext)s"
 TWITTER_STATUS_SEGMENTS = {"status", "statuses"}
 TWITTER_USERNAME_RE = re.compile(r"[A-Za-z0-9_]{1,15}")
 TWITTER_STATUS_ID_RE = re.compile(r"\d+")
 TWITTER_RESERVED_USERNAMES = {"home", "explore", "notifications", "messages", "i", "settings"}
+PROFILE_OUTPUT_TEMPLATE = "%(uploader_id,uploader|unknown-account)S-%(id)s.%(ext)s"
+
+PROVIDERS = (
+    {
+        "name": "twitter",
+        "hosts": TWITTER_HOSTS,
+        "canonical_host": "x.com",
+        "batch_key": lambda url: twitter_profile_media_username(url),
+        "canonical_path": lambda path: canonical_twitter_path(path),
+        "strip_query": True,
+        "template": PROFILE_OUTPUT_TEMPLATE,
+    },
+)
+
+
+def provider_for_url(raw_url: str) -> dict[str, Any] | None:
+    hostname = (urlparse(raw_url).hostname or "").lower()
+    for provider in PROVIDERS:
+        if hostname in provider["hosts"]:
+            return provider
+    return None
+
+
+def batch_target_for_url(raw_url: str) -> dict[str, Any] | None:
+    provider = provider_for_url(raw_url)
+    if not provider:
+        return None
+    key = provider["batch_key"](raw_url)
+    return {"provider": provider["name"], "key": key} if key else None
+
+
 MAX_REMEMBERED_FINISHED_JOBS = 40
 MAX_JOBS_IN_RESPONSE = 300
 MAX_RESPONSE_BYTES = 768 * 1024
@@ -753,19 +783,18 @@ def normalize_url(raw_url: str) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("Only http(s) URLs are supported.")
 
-    hostname = (parsed.hostname or "").lower()
     parsed = parsed._replace(fragment="")
-    if hostname in TWITTER_HOSTS:
-        parsed = parsed._replace(netloc="x.com", query="", path=canonical_twitter_path(parsed.path))
+    provider = provider_for_url(raw_url)
+    if provider:
+        parsed = parsed._replace(
+            netloc=provider["canonical_host"],
+            query="" if provider["strip_query"] else parsed.query,
+            path=provider["canonical_path"](parsed.path),
+        )
     else:
         parsed = parsed._replace(path=parsed.path.rstrip("/"))
 
     return urlunparse(parsed)
-
-
-def is_twitter_url(raw_url: str) -> bool:
-    parsed = urlparse(raw_url)
-    return (parsed.hostname or "").lower() in TWITTER_HOSTS
 
 
 def valid_twitter_username(username: str) -> str | None:
@@ -901,8 +930,9 @@ def build_command(
         "-P",
         str(download_dir),
     ]
-    if is_twitter_url(url):
-        command.extend(["-o", TWITTER_OUTPUT_TEMPLATE])
+    provider = provider_for_url(url)
+    if provider:
+        command.extend(["-o", provider["template"]])
     command.extend(config["extra_args"])
     command.append(url)
     return command
