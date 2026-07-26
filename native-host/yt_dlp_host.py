@@ -17,7 +17,7 @@ import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any, TextIO
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, parse_qs, urlencode, urlparse, urlunparse
 
 APP_DIR = Path.home() / ".local" / "share" / "yt-dlp-browser-host"
 STATE_DIR = Path.home() / ".local" / "state" / "yt-dlp-browser-host"
@@ -48,6 +48,19 @@ TWITTER_STATUS_SEGMENTS = {"status", "statuses"}
 TWITTER_USERNAME_RE = re.compile(r"[A-Za-z0-9_]{1,15}")
 TWITTER_STATUS_ID_RE = re.compile(r"\d+")
 TWITTER_RESERVED_USERNAMES = {"home", "explore", "notifications", "messages", "i", "settings"}
+FACEBOOK_HOSTS = {
+    "facebook.com",
+    "www.facebook.com",
+    "m.facebook.com",
+    "web.facebook.com",
+}
+FACEBOOK_RESERVED_SEGMENTS = {
+    "reel", "reels", "watch", "groups", "marketplace", "events", "pages",
+    "profile.php", "story.php", "photo", "share", "people", "login",
+    "settings", "messages", "notifications",
+}
+FACEBOOK_REEL_ID_RE = re.compile(r"^/reel/(\d+)/?$")
+FACEBOOK_VANITY_RE = re.compile(r"^[A-Za-z0-9.\-]{1,60}$")
 PROFILE_OUTPUT_TEMPLATE = "%(uploader_id,uploader|unknown-account)S-%(id)s.%(ext)s"
 
 PROVIDERS = (
@@ -57,6 +70,15 @@ PROVIDERS = (
         "canonical_host": "x.com",
         "batch_key": lambda url: twitter_profile_media_username(url),
         "canonical_path": lambda path: canonical_twitter_path(path),
+        "strip_query": True,
+        "template": PROFILE_OUTPUT_TEMPLATE,
+    },
+    {
+        "name": "facebook",
+        "hosts": FACEBOOK_HOSTS,
+        "canonical_host": "www.facebook.com",
+        "batch_key": lambda url: facebook_profile_reels_key(url),
+        "canonical_path": lambda path: canonical_facebook_path(path),
         "strip_query": True,
         "template": PROFILE_OUTPUT_TEMPLATE,
     },
@@ -831,6 +853,42 @@ def twitter_status_username(raw_url: str) -> str | None:
         return None
 
     return valid_twitter_username(parts[0])
+
+
+def facebook_reel_id(raw_url: str) -> str | None:
+    parsed = urlparse(raw_url)
+    if (parsed.hostname or "").lower() not in FACEBOOK_HOSTS:
+        return None
+    match = FACEBOOK_REEL_ID_RE.match(parsed.path)
+    return match.group(1) if match else None
+
+
+def canonical_facebook_path(path: str) -> str:
+    match = FACEBOOK_REEL_ID_RE.match(path)
+    return f"/reel/{match.group(1)}" if match else path.rstrip("/")
+
+
+def facebook_profile_reels_key(raw_url: str) -> str | None:
+    parsed = urlparse(raw_url)
+    if (parsed.hostname or "").lower() not in FACEBOOK_HOSTS:
+        return None
+
+    parts = [part for part in parsed.path.split("/") if part]
+
+    if parts == ["profile.php"]:
+        query = parse_qs(parsed.query)
+        if "reels_tab" not in query.get("sk", []):
+            return None
+        candidate = (query.get("id") or [""])[0]
+        return candidate if candidate.isdigit() else None
+
+    if len(parts) == 2 and parts[1].lower() == "reels":
+        candidate = parts[0]
+        if candidate.lower() in FACEBOOK_RESERVED_SEGMENTS:
+            return None
+        return candidate if FACEBOOK_VANITY_RE.match(candidate) else None
+
+    return None
 
 
 FORBIDDEN_PATH_CHARS = set('/\\:*?"<>|')
