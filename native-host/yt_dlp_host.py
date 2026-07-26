@@ -7,16 +7,17 @@ import json
 import os
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlparse, urlunparse
+from typing import Any, TextIO
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-HOST_NAME = "dev.arda.ytdlp_host"
 APP_DIR = Path.home() / ".local" / "share" / "yt-dlp-browser-host"
 STATE_DIR = Path.home() / ".local" / "state" / "yt-dlp-browser-host"
 CONFIG_PATH = APP_DIR / "config.json"
@@ -25,6 +26,8 @@ JOBS_PATH = STATE_DIR / "downloads.json"
 JOBS_LOCK_PATH = STATE_DIR / "downloads.lock"
 MAX_LOG_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_PATH = STATE_DIR / "host.log.1"
+PRIVATE_FILE_MODE = 0o600
+PRIVATE_DIR_MODE = 0o700
 DEFAULT_CONFIG = {
     "browser": "chrome",
     "profile": "",
@@ -41,7 +44,62 @@ TWITTER_HOSTS = {
     "www.x.com",
 }
 TWITTER_OUTPUT_TEMPLATE = "%(uploader_id,uploader|unknown-account)S-%(id)s.%(ext)s"
+TWITTER_STATUS_SEGMENTS = {"status", "statuses"}
+TWITTER_USERNAME_RE = re.compile(r"[A-Za-z0-9_]{1,15}")
+TWITTER_STATUS_ID_RE = re.compile(r"\d+")
+TWITTER_RESERVED_USERNAMES = {"home", "explore", "notifications", "messages", "i", "settings"}
 MAX_REMEMBERED_FINISHED_JOBS = 40
+MAX_JOBS_IN_RESPONSE = 300
+MAX_RESPONSE_BYTES = 768 * 1024
+MAX_PROFILE_BATCH_JOBS = 500
+MAX_QUEUED_JOBS = 1000
+ACTIVE_STATUSES = {"queued", "running"}
+DUPLICATE_BLOCKING_STATUSES = {"queued", "running", "complete"}
+RESTARTABLE_STATUSES = {"queued", "failed", "cancelled"}
+CANCELLABLE_STATUSES = {"queued", "running"}
+JOB_LEASE_SECONDS = 600.0
+HEARTBEAT_INTERVAL_SECONDS = 30.0
+PROGRESS_PERSIST_SECONDS = 0.5
+PROGRESS_PERSIST_PERCENT = 1.0
+PROGRESS_UPDATE_KEYS = {"status_detail", "progress", "speed", "eta", "fragment"}
+LAUNCH_ATTEMPT_LIMIT = 5
+QUEUE_KICK_ATTEMPT_LIMIT = 1
+LAUNCH_BACKOFF_BASE_SECONDS = 2.0
+LAUNCH_BACKOFF_MAX_SECONDS = 60.0
+CANCEL_GRACE_SECONDS = 3.0
+CANCEL_POLL_SECONDS = 0.1
+PROC_ROOT = Path("/proc")
+PROC_STAT_STATE_INDEX = 0
+PROC_STAT_PGRP_INDEX = 2
+PROC_STAT_START_TICKS_INDEX = 19
+REDACTED = "***"
+SENSITIVE_VALUE_FLAGS = {
+    "--add-header",
+    "--ap-password",
+    "--ap-username",
+    "--client-certificate-password",
+    "--cookies",
+    "--http-header",
+    "--netrc-cmd",
+    "--password",
+    "--username",
+    "--video-password",
+    "-p",
+    "-u",
+}
+SENSITIVE_KEY_HINTS = (
+    "auth",
+    "credential",
+    "cookie",
+    "hash",
+    "key",
+    "passwd",
+    "password",
+    "secret",
+    "session",
+    "sig",
+    "token",
+)
 PROGRESS_RE = re.compile(r"\[download\]\s+(?P<percent>\d+(?:\.\d+)?)%")
 SPEED_RE = re.compile(r"\sat\s+(?P<speed>\S+/s)")
 ETA_RE = re.compile(r"\sETA\s+(?P<eta>\S+)")
@@ -52,14 +110,22 @@ FIXUP_PREFIX = "[Fixup"
 
 
 def ensure_state() -> None:
+    for directory in (APP_DIR, STATE_DIR):
+        try:
+            directory.mkdir(mode=PRIVATE_DIR_MODE, parents=True, exist_ok=True)
+        except OSError:
+            pass
+
+
+def open_private(path: Path, mode: str) -> TextIO:
+    flags = os.O_WRONLY | os.O_CREAT
+    flags |= os.O_APPEND if "a" in mode else os.O_TRUNC
+    handle = os.fdopen(os.open(path, flags, PRIVATE_FILE_MODE), mode, encoding="utf-8")
     try:
-        APP_DIR.mkdir(parents=True, exist_ok=True)
+        os.fchmod(handle.fileno(), PRIVATE_FILE_MODE)
     except OSError:
         pass
-    try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
+    return handle
 
 
 def rotate_log_if_needed() -> None:
@@ -76,22 +142,79 @@ def rotate_log_if_needed() -> None:
 
 
 def log_line(message: str) -> None:
-    ensure_state()
-    rotate_log_if_needed()
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    handle = open_log_stream()
+    if handle is None:
+        return
+
     try:
-        with LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(f"[{timestamp}] {message}\n")
+        with handle:
+            handle.write(f"[{timestamp()}] {message}\n")
     except OSError:
         pass
+
+
+def open_log_stream() -> TextIO | None:
+    ensure_state()
+    rotate_log_if_needed()
+    try:
+        return open_private(LOG_PATH, "a")
+    except OSError:
+        return None
+
+
+def write_log_stream(handle: TextIO | None, text: str) -> TextIO | None:
+    if handle is None:
+        return None
+
+    try:
+        handle.write(text)
+        handle.flush()
+        if handle.tell() < MAX_LOG_BYTES:
+            return handle
+        handle.close()
+    except OSError:
+        return None
+
+    return open_log_stream()
 
 
 def timestamp() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def parse_timestamp(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    try:
+        return time.mktime(time.strptime(text[:19], "%Y-%m-%d %H:%M:%S"))
+    except (ValueError, OverflowError):
+        return None
+
+
+def default_launch_state() -> dict[str, Any]:
+    return {"failures": 0, "blocked_until": 0.0}
+
+
+def normalize_launch_state(candidate: Any) -> dict[str, Any]:
+    launch = default_launch_state()
+    if not isinstance(candidate, dict):
+        return launch
+
+    failures = candidate.get("failures")
+    if isinstance(failures, (int, float)) and failures > 0:
+        launch["failures"] = int(failures)
+
+    blocked_until = candidate.get("blocked_until")
+    if isinstance(blocked_until, (int, float)) and blocked_until > 0:
+        launch["blocked_until"] = float(blocked_until)
+
+    return launch
+
+
 def default_jobs_state() -> dict[str, Any]:
-    return {"jobs": []}
+    return {"jobs": [], "launch": default_launch_state()}
 
 
 def normalize_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -110,6 +233,9 @@ def normalize_job(job: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("error", None)
     normalized.setdefault("exit_code", None)
     normalized.setdefault("pid", None)
+    normalized.setdefault("worker_pid", None)
+    normalized.setdefault("worker_start_ticks", None)
+    normalized.setdefault("heartbeat", None)
     normalized.setdefault("started_at", None)
     normalized.setdefault("queued_at", normalized.get("started_at"))
     normalized.setdefault("run_started_at", None)
@@ -130,38 +256,192 @@ def read_jobs_unlocked() -> dict[str, Any]:
     if not isinstance(jobs, list):
         return default_jobs_state()
 
-    return {"jobs": [normalize_job(job) for job in jobs if isinstance(job, dict)]}
+    return {
+        "jobs": [normalize_job(job) for job in jobs if isinstance(job, dict)],
+        "launch": normalize_launch_state(data.get("launch")),
+    }
 
 
 def write_jobs_unlocked(state: dict[str, Any]) -> None:
     jobs = [normalize_job(job) for job in state.get("jobs", []) if isinstance(job, dict)]
     jobs.sort(key=lambda job: job.get("started_at") or "", reverse=True)
-    active_jobs = [job for job in jobs if job.get("status") in {"queued", "running"}]
-    finished_jobs = [job for job in jobs if job.get("status") not in {"queued", "running"}]
+    active_jobs = [job for job in jobs if job.get("status") in ACTIVE_STATUSES]
+    finished_jobs = [job for job in jobs if job.get("status") not in ACTIVE_STATUSES]
     trimmed = active_jobs + finished_jobs[:MAX_REMEMBERED_FINISHED_JOBS]
+    payload = {"jobs": trimmed, "launch": normalize_launch_state(state.get("launch"))}
     temp_path = JOBS_PATH.with_suffix(".json.tmp")
-    with temp_path.open("w", encoding="utf-8") as handle:
-        json.dump({"jobs": trimmed}, handle, indent=2)
+    with open_private(temp_path, "w") as handle:
+        json.dump(payload, handle, indent=2)
         handle.write("\n")
     temp_path.replace(JOBS_PATH)
 
 
 def mutate_jobs(mutator: Any) -> dict[str, Any]:
     ensure_state()
-    with JOBS_LOCK_PATH.open("w", encoding="utf-8") as lock_handle:
+    with open_private(JOBS_LOCK_PATH, "a") as lock_handle:
         fcntl.flock(lock_handle, fcntl.LOCK_EX)
         state = read_jobs_unlocked()
+        reap_stale_jobs(state)
         result = mutator(state)
         write_jobs_unlocked(state)
         fcntl.flock(lock_handle, fcntl.LOCK_UN)
     return result if isinstance(result, dict) else state
 
 
-def upsert_job(job: dict[str, Any]) -> None:
+def read_jobs_shared() -> dict[str, Any]:
+    ensure_state()
+    with open_private(JOBS_LOCK_PATH, "a") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_SH)
+        state = read_jobs_unlocked()
+        fcntl.flock(lock_handle, fcntl.LOCK_UN)
+    return state
+
+
+def read_proc_stat_fields(pid: Any) -> list[str]:
+    if not isinstance(pid, int) or pid <= 1:
+        return []
+
+    try:
+        with (PROC_ROOT / str(pid) / "stat").open("r", encoding="utf-8") as handle:
+            return handle.read().rsplit(")", 1)[-1].split()
+    except (OSError, ValueError):
+        return []
+
+
+def proc_stat_number(fields: list[str], index: int) -> int | None:
+    if len(fields) <= index:
+        return None
+
+    try:
+        return int(fields[index])
+    except ValueError:
+        return None
+
+
+def process_is_zombie(pid: int) -> bool:
+    fields = read_proc_stat_fields(pid)
+    return bool(fields) and fields[PROC_STAT_STATE_INDEX] == "Z"
+
+
+def process_start_ticks(pid: Any) -> int | None:
+    return proc_stat_number(read_proc_stat_fields(pid), PROC_STAT_START_TICKS_INDEX)
+
+
+def process_is_alive(pid: Any) -> bool:
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+
+    return not process_is_zombie(pid)
+
+
+def process_identity_matches(pid: Any, start_ticks: Any) -> bool:
+    """True only when pid is live and was started at the recorded time.
+
+    PIDs are recycled, so a bare "is this pid alive" test can point at an
+    unrelated process. Comparing the start time from /proc pins the identity.
+    """
+    if not isinstance(start_ticks, int) or not process_is_alive(pid):
+        return False
+
+    actual_ticks = process_start_ticks(pid)
+    return actual_ticks is not None and actual_ticks == start_ticks
+
+
+def job_worker_pid(job: dict[str, Any]) -> int | None:
+    for key in ("worker_pid", "pid"):
+        pid = job.get(key)
+        if isinstance(pid, int) and pid > 1:
+            return pid
+
+    return None
+
+
+def job_worker_is_alive(job: dict[str, Any]) -> bool | None:
+    """True if the recorded worker runs, False if it is gone, None if unknown."""
+    pid = job_worker_pid(job)
+    if pid is None:
+        return None
+
+    if not process_is_alive(pid):
+        return False
+
+    start_ticks = job.get("worker_start_ticks")
+    if isinstance(start_ticks, int):
+        actual_ticks = process_start_ticks(pid)
+        if actual_ticks is not None and actual_ticks != start_ticks:
+            return False
+
+    return True
+
+
+def job_last_seen(job: dict[str, Any]) -> float | None:
+    heartbeat = job.get("heartbeat")
+    if isinstance(heartbeat, (int, float)):
+        return float(heartbeat)
+
+    for key in ("updated_at", "run_started_at", "started_at"):
+        parsed = parse_timestamp(job.get(key))
+        if parsed is not None:
+            return parsed
+
+    return None
+
+
+def running_job_is_stale(job: dict[str, Any]) -> bool:
+    """Worker liveness decides; the lease only covers jobs with no known worker.
+
+    Reaping a job whose worker is still downloading would free the slot and let a
+    second yt-dlp write into the same directory, so a verifiably live worker is
+    never stale no matter how long its heartbeat has been silent.
+    """
+    if job.get("status") != "running":
+        return False
+
+    worker_is_alive = job_worker_is_alive(job)
+    if worker_is_alive is not None:
+        return not worker_is_alive
+
+    last_seen = job_last_seen(job)
+    if last_seen is None:
+        return True
+
+    return time.time() - last_seen > JOB_LEASE_SECONDS
+
+
+def reap_stale_jobs(state: dict[str, Any]) -> list[dict[str, Any]]:
+    now = timestamp()
+    reaped = []
+    for job in state["jobs"]:
+        if not running_job_is_stale(job):
+            continue
+
+        job.update(
+            {
+                "status": "failed",
+                "status_detail": "Interrupted",
+                "error": "Download worker is no longer running.",
+                "exit_code": 1,
+                "speed": None,
+                "eta": None,
+                "updated_at": now,
+                "finished_at": now,
+            }
+        )
+        reaped.append(job)
+
+    return reaped
+
+
+def reap_stale_jobs_now() -> None:
     def mutator(state: dict[str, Any]) -> None:
-        jobs = state["jobs"]
-        jobs[:] = [existing for existing in jobs if existing.get("id") != job["id"]]
-        jobs.insert(0, normalize_job(job))
+        return None
 
     mutate_jobs(mutator)
 
@@ -169,29 +449,109 @@ def upsert_job(job: dict[str, Any]) -> None:
 def update_job(job_id: str, updates: dict[str, Any]) -> None:
     def mutator(state: dict[str, Any]) -> None:
         for job in state["jobs"]:
-            if job.get("id") == job_id:
-                job.update(updates)
-                job["updated_at"] = timestamp()
+            if job.get("id") != job_id:
+                continue
+            if job.get("status") == "cancelled":
                 return
+
+            job.update(updates)
+            job["updated_at"] = timestamp()
+            job["heartbeat"] = time.time()
+            return
 
     mutate_jobs(mutator)
 
 
-def get_jobs() -> dict[str, Any]:
-    ensure_state()
-    with JOBS_LOCK_PATH.open("w", encoding="utf-8") as lock_handle:
-        fcntl.flock(lock_handle, fcntl.LOCK_SH)
-        state = read_jobs_unlocked()
-        fcntl.flock(lock_handle, fcntl.LOCK_UN)
+def promote_running_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    running = [job for job in jobs if job.get("status") == "running"]
+    if not running:
+        return jobs
 
-    active_count = sum(1 for job in state["jobs"] if job.get("status") == "running")
-    queued_count = sum(1 for job in state["jobs"] if job.get("status") == "queued")
-    return {
-        "ok": True,
-        "jobs": state["jobs"],
-        "active_count": active_count,
-        "queued_count": queued_count,
-    }
+    return running + [job for job in jobs if job.get("status") != "running"]
+
+
+def visible_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(jobs) <= MAX_JOBS_IN_RESPONSE:
+        return jobs
+
+    return promote_running_jobs(jobs)[:MAX_JOBS_IN_RESPONSE]
+
+
+def encoded_size(payload: dict[str, Any]) -> int:
+    return len(json.dumps(payload).encode("utf-8"))
+
+
+def jobs_within_budget(
+    jobs: list[dict[str, Any]],
+    build_response: Any,
+    budget: int = MAX_RESPONSE_BYTES,
+) -> list[dict[str, Any]]:
+    """Drop jobs from the tail until the encoded response fits the budget.
+
+    Chrome caps a native message at 1 MB of encoded bytes, and a job count says
+    nothing about how many bytes its URL, filename and error text take. Job
+    order is left alone unless the payload has to be cut, in which case running
+    jobs move to the front so truncation cannot hide them.
+    """
+    shown = jobs
+    promoted = False
+    while shown:
+        size = encoded_size(build_response(shown))
+        if size <= budget:
+            break
+
+        if not promoted:
+            shown = promote_running_jobs(shown)
+            promoted = True
+
+        estimate = int(len(shown) * budget / size)
+        shown = shown[: max(0, min(estimate, len(shown) - 1))]
+
+    return shown
+
+
+def queue_needs_kick(state: dict[str, Any]) -> bool:
+    """Whether reading the queue should also try to get it moving again.
+
+    A failed launch can leave jobs queued with nothing running and no stale
+    record to notice, so the dashboard poll doubles as the retry trigger. The
+    launch backoff keeps a permanently failing launch from spinning.
+    """
+    jobs = state["jobs"]
+    if any(running_job_is_stale(job) for job in jobs):
+        return True
+
+    if any(job.get("status") == "running" for job in jobs):
+        return False
+
+    if not any(job.get("status") == "queued" for job in jobs):
+        return False
+
+    return not launch_is_blocked(state)
+
+
+def get_jobs() -> dict[str, Any]:
+    state = read_jobs_shared()
+    if queue_needs_kick(state):
+        reap_stale_jobs_now()
+        launch_next_queued_job(attempt_limit=QUEUE_KICK_ATTEMPT_LIMIT)
+        state = read_jobs_shared()
+
+    jobs = state["jobs"]
+    active_count = sum(1 for job in jobs if job.get("status") == "running")
+    queued_count = sum(1 for job in jobs if job.get("status") == "queued")
+
+    def build_response(shown: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "jobs": shown,
+            "active_count": active_count,
+            "queued_count": queued_count,
+            "total_count": len(jobs),
+            "truncated": len(shown) < len(jobs),
+        }
+
+    return build_response(jobs_within_budget(visible_jobs(jobs), build_response))
 
 
 def normalized_url_key(raw_url: Any) -> str:
@@ -201,14 +561,39 @@ def normalized_url_key(raw_url: Any) -> str:
         return str(raw_url or "")
 
 
-def duplicate_download_for_url(state: dict[str, Any], url: str) -> dict[str, Any] | None:
-    duplicate_statuses = {"queued", "running", "complete"}
-    target_url = normalized_url_key(url)
+def duplicate_url_index(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    index: dict[str, dict[str, Any]] = {}
     for job in state["jobs"]:
-        if normalized_url_key(job.get("url")) == target_url and job.get("status") in duplicate_statuses:
-            return normalize_job(job)
+        if job.get("status") in DUPLICATE_BLOCKING_STATUSES:
+            index.setdefault(normalized_url_key(job.get("url")), job)
 
-    return None
+    return index
+
+
+def duplicate_in_index(index: dict[str, dict[str, Any]], url: str) -> dict[str, Any] | None:
+    job = index.get(normalized_url_key(url))
+    return normalize_job(job) if job else None
+
+
+def duplicate_download_for_url(state: dict[str, Any], url: str) -> dict[str, Any] | None:
+    return duplicate_in_index(duplicate_url_index(state), url)
+
+
+def queue_capacity(state: dict[str, Any]) -> int:
+    """How many more jobs may be queued before the state file is capped."""
+    queued = sum(1 for job in state["jobs"] if job.get("status") == "queued")
+    return max(0, MAX_QUEUED_JOBS - queued)
+
+
+def queue_full_response() -> dict[str, Any]:
+    return {
+        "ok": False,
+        "queue_full": True,
+        "error": (
+            f"The download queue already holds {MAX_QUEUED_JOBS} waiting jobs. "
+            "Let some finish or clear them first."
+        ),
+    }
 
 
 def read_message() -> dict[str, Any] | None:
@@ -231,6 +616,61 @@ def send_message(payload: dict[str, Any]) -> None:
     sys.stdout.buffer.write(struct.pack("<I", len(encoded)))
     sys.stdout.buffer.write(encoded)
     sys.stdout.buffer.flush()
+
+
+def is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(hint in lowered for hint in SENSITIVE_KEY_HINTS)
+
+
+def redact_url(raw_url: Any) -> str:
+    text = str(raw_url or "")
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return REDACTED
+
+    if not parsed.scheme or not parsed.netloc:
+        return text
+
+    netloc = parsed.netloc
+    if "@" in netloc:
+        netloc = f"{REDACTED}@{netloc.rsplit('@', 1)[1]}"
+
+    query = parsed.query
+    if query:
+        pairs = parse_qsl(query, keep_blank_values=True)
+        if pairs:
+            query = urlencode(
+                [(key, REDACTED if is_sensitive_key(key) else value) for key, value in pairs]
+            )
+
+    return urlunparse(parsed._replace(netloc=netloc, query=query))
+
+
+def redact_command(command: list[str]) -> str:
+    parts: list[str] = []
+    redact_next = False
+    for argument in command:
+        text = str(argument)
+        if redact_next:
+            parts.append(REDACTED)
+            redact_next = False
+            continue
+
+        if text in SENSITIVE_VALUE_FLAGS:
+            parts.append(text)
+            redact_next = True
+            continue
+
+        flag, separator, _ = text.partition("=")
+        if separator and flag in SENSITIVE_VALUE_FLAGS:
+            parts.append(f"{flag}={REDACTED}")
+            continue
+
+        parts.append(redact_url(text) if "://" in text else text)
+
+    return " ".join(parts)
 
 
 def notify(summary: str, body: str) -> None:
@@ -295,6 +735,19 @@ def choose_download_dir(initial_dir: str | None = None) -> dict[str, Any]:
     raise RuntimeError(f"Could not open folder picker: {last_error}")
 
 
+def path_segments(path: str) -> list[str]:
+    return [part for part in path.split("/") if part]
+
+
+def canonical_twitter_path(path: str) -> str:
+    parts = path_segments(path)
+    for index, part in enumerate(parts[:-1]):
+        if part.lower() in TWITTER_STATUS_SEGMENTS and TWITTER_STATUS_ID_RE.fullmatch(parts[index + 1]):
+            return "/" + "/".join(parts[:index] + ["status", parts[index + 1]])
+
+    return "/" + "/".join(parts) if parts else ""
+
+
 def normalize_url(raw_url: str) -> str:
     parsed = urlparse(raw_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -303,7 +756,9 @@ def normalize_url(raw_url: str) -> str:
     hostname = (parsed.hostname or "").lower()
     parsed = parsed._replace(fragment="")
     if hostname in TWITTER_HOSTS:
-        parsed = parsed._replace(netloc="x.com", query="")
+        parsed = parsed._replace(netloc="x.com", query="", path=canonical_twitter_path(parsed.path))
+    else:
+        parsed = parsed._replace(path=parsed.path.rstrip("/"))
 
     return urlunparse(parsed)
 
@@ -313,22 +768,39 @@ def is_twitter_url(raw_url: str) -> bool:
     return (parsed.hostname or "").lower() in TWITTER_HOSTS
 
 
+def valid_twitter_username(username: str) -> str | None:
+    if not TWITTER_USERNAME_RE.fullmatch(username):
+        return None
+    if username.lower() in TWITTER_RESERVED_USERNAMES:
+        return None
+
+    return username
+
+
 def twitter_profile_media_username(raw_url: str) -> str | None:
     parsed = urlparse(raw_url)
     if (parsed.hostname or "").lower() not in TWITTER_HOSTS:
         return None
 
-    parts = [part for part in parsed.path.split("/") if part]
+    parts = path_segments(parsed.path)
     if len(parts) < 2 or parts[1].lower() != "media":
         return None
 
-    username = parts[0]
-    if not re.fullmatch(r"[A-Za-z0-9_]{1,15}", username):
-        return None
-    if username.lower() in {"home", "explore", "notifications", "messages", "i", "settings"}:
+    return valid_twitter_username(parts[0])
+
+
+def twitter_status_username(raw_url: str) -> str | None:
+    parsed = urlparse(raw_url)
+    if (parsed.hostname or "").lower() not in TWITTER_HOSTS:
         return None
 
-    return username
+    parts = path_segments(parsed.path)
+    if len(parts) < 3 or parts[1].lower() not in TWITTER_STATUS_SEGMENTS:
+        return None
+    if not TWITTER_STATUS_ID_RE.fullmatch(parts[2]):
+        return None
+
+    return valid_twitter_username(parts[0])
 
 
 def safe_path_part(value: str) -> str:
@@ -402,7 +874,7 @@ def load_config() -> dict[str, Any]:
 def save_config(candidate: dict[str, Any]) -> dict[str, Any]:
     config = normalize_config(candidate)
     ensure_state()
-    with CONFIG_PATH.open("w", encoding="utf-8") as handle:
+    with open_private(CONFIG_PATH, "w") as handle:
         json.dump(config, handle, indent=2)
         handle.write("\n")
     return config
@@ -528,14 +1000,44 @@ def reserve_next_job(preferred_job_id: str | None = None) -> dict[str, Any] | No
                 "error": None,
                 "exit_code": None,
                 "pid": None,
+                "worker_pid": None,
+                "worker_start_ticks": None,
                 "run_started_at": now,
                 "updated_at": now,
+                "heartbeat": time.time(),
                 "finished_at": None,
             }
         )
         return {"job": normalize_job(selected)}
 
     return mutate_jobs(mutator).get("job")
+
+
+def launch_is_blocked(state: dict[str, Any]) -> bool:
+    launch = normalize_launch_state(state.get("launch"))
+    return time.time() < launch["blocked_until"]
+
+
+def record_launch_failure() -> None:
+    def mutator(state: dict[str, Any]) -> None:
+        launch = normalize_launch_state(state.get("launch"))
+        failures = launch["failures"] + 1
+        delay = min(
+            LAUNCH_BACKOFF_BASE_SECONDS * (2 ** (failures - 1)),
+            LAUNCH_BACKOFF_MAX_SECONDS,
+        )
+        state["launch"] = {"failures": failures, "blocked_until": time.time() + delay}
+        return None
+
+    mutate_jobs(mutator)
+
+
+def clear_launch_failures() -> None:
+    def mutator(state: dict[str, Any]) -> None:
+        state["launch"] = default_launch_state()
+        return None
+
+    mutate_jobs(mutator)
 
 
 def launch_reserved_job(job: dict[str, Any]) -> bool:
@@ -560,16 +1062,171 @@ def launch_reserved_job(job: dict[str, Any]) -> bool:
         )
         return False
 
-    update_job(job["id"], {"pid": process.pid})
+    update_job(
+        job["id"],
+        {
+            "pid": process.pid,
+            "worker_pid": process.pid,
+            "worker_start_ticks": process_start_ticks(process.pid),
+        },
+    )
     return True
 
 
-def launch_next_queued_job(preferred_job_id: str | None = None) -> dict[str, Any]:
-    job = reserve_next_job(preferred_job_id)
-    if not job:
-        return {"started": False}
+def launch_next_queued_job(
+    preferred_job_id: str | None = None,
+    attempt_limit: int = LAUNCH_ATTEMPT_LIMIT,
+) -> dict[str, Any]:
+    wanted_job_id = preferred_job_id
+    last_job_id = None
+    failed = False
+    for _ in range(max(1, attempt_limit)):
+        job = reserve_next_job(wanted_job_id)
+        if not job:
+            break
 
-    return {"started": launch_reserved_job(job), "job_id": job["id"]}
+        last_job_id = job["id"]
+        if launch_reserved_job(job):
+            clear_launch_failures()
+            return {"started": True, "job_id": last_job_id}
+
+        failed = True
+        wanted_job_id = None
+
+    if failed:
+        record_launch_failure()
+
+    return {"started": False, "job_id": last_job_id}
+
+
+def signal_process_group(pgid: int, number: int) -> bool:
+    try:
+        os.killpg(pgid, number)
+    except OSError:
+        return False
+
+    return True
+
+
+def process_group_is_running(pgid: int) -> bool:
+    """Whether the group still holds a process that is not a zombie.
+
+    A pgid stays reserved while any member exists, so once the group is known to
+    be ours it cannot silently become someone else's between signals.
+    """
+    if not signal_process_group(pgid, 0):
+        return False
+
+    try:
+        entries = os.listdir(PROC_ROOT)
+    except OSError:
+        return True
+
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+
+        fields = read_proc_stat_fields(int(entry))
+        if not fields or fields[PROC_STAT_STATE_INDEX] == "Z":
+            continue
+        if proc_stat_number(fields, PROC_STAT_PGRP_INDEX) == pgid:
+            return True
+
+    return False
+
+
+def worker_process_group(pid: Any, start_ticks: Any) -> int | None:
+    """The process group to signal, or None when the worker cannot be confirmed."""
+    if not process_identity_matches(pid, start_ticks):
+        return None
+
+    try:
+        pgid = os.getpgid(pid)
+    except OSError:
+        return None
+
+    if pgid <= 1 or pgid == os.getpgrp():
+        return None
+
+    return pgid
+
+
+def terminate_process_group(pid: Any, start_ticks: Any) -> bool:
+    pgid = worker_process_group(pid, start_ticks)
+    if pgid is None:
+        return False
+
+    if not signal_process_group(pgid, signal.SIGTERM):
+        return False
+
+    deadline = time.monotonic() + CANCEL_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        if not process_group_is_running(pgid):
+            return True
+        time.sleep(CANCEL_POLL_SECONDS)
+
+    if process_group_is_running(pgid):
+        signal_process_group(pgid, signal.SIGKILL)
+
+    return True
+
+
+def cancel_download_job(job_id: str) -> dict[str, Any]:
+    now = timestamp()
+
+    def mutator(state: dict[str, Any]) -> dict[str, Any]:
+        for job in state["jobs"]:
+            if job.get("id") != job_id:
+                continue
+
+            status = job.get("status")
+            if status not in CANCELLABLE_STATUSES:
+                return {
+                    "ok": False,
+                    "error": "Only queued or running downloads can be cancelled.",
+                }
+
+            job.update(
+                {
+                    "status": "cancelled",
+                    "status_detail": "Cancelled",
+                    "speed": None,
+                    "eta": None,
+                    "error": None,
+                    "exit_code": None,
+                    "force_requested_at": None,
+                    "updated_at": now,
+                    "finished_at": now,
+                }
+            )
+            return {
+                "ok": True,
+                "was_running": status == "running",
+                "worker_pid": job.get("worker_pid"),
+                "worker_start_ticks": job.get("worker_start_ticks"),
+            }
+
+        return {"ok": False, "error": "Download job not found."}
+
+    result = mutate_jobs(mutator)
+    if not result.get("ok"):
+        return result
+
+    if result.get("was_running"):
+        signalled = terminate_process_group(
+            result.get("worker_pid"),
+            result.get("worker_start_ticks"),
+        )
+        if signalled:
+            log_line(f"Cancelled running download job {job_id}")
+        else:
+            log_line(
+                f"Cancelled download job {job_id} without signalling: "
+                "its worker could not be identified."
+            )
+        launch_next_queued_job()
+
+    return {"ok": True, "job_id": job_id, "status": "cancelled"}
 
 
 def force_download_job(job_id: str) -> dict[str, Any]:
@@ -580,20 +1237,20 @@ def force_download_job(job_id: str) -> dict[str, Any]:
             if job.get("id") != job_id:
                 continue
 
-            if job.get("status") == "running":
+            status = job.get("status")
+            if status == "running":
                 return {"ok": True, "status": "running", "job_id": job_id}
 
-            if job.get("status") not in {"queued", "failed"}:
+            if status not in RESTARTABLE_STATUSES:
                 return {
                     "ok": False,
-                    "error": "Only queued or failed downloads can be started from the dashboard.",
+                    "error": "Only queued, failed, or cancelled downloads can be started from the dashboard.",
                 }
 
             job.update(
                 {
                     "status": "queued",
                     "status_detail": "Queued next",
-                    "progress": 0 if job.get("status") == "failed" else job.get("progress"),
                     "speed": None,
                     "eta": None,
                     "fragment": None,
@@ -604,6 +1261,18 @@ def force_download_job(job_id: str) -> dict[str, Any]:
                     "finished_at": None,
                 }
             )
+            if status != "queued":
+                job.update(
+                    {
+                        "progress": 0,
+                        "filename": None,
+                        "pid": None,
+                        "worker_pid": None,
+                        "worker_start_ticks": None,
+                        "run_started_at": None,
+                        "heartbeat": None,
+                    }
+                )
             return {"ok": True, "status": "queued", "job_id": job_id}
 
         return {"ok": False, "error": "Download job not found."}
@@ -647,12 +1316,7 @@ def clear_download_jobs() -> dict[str, Any]:
 
 
 def get_download_job(job_id: str) -> dict[str, Any] | None:
-    ensure_state()
-    with JOBS_LOCK_PATH.open("w", encoding="utf-8") as lock_handle:
-        fcntl.flock(lock_handle, fcntl.LOCK_SH)
-        state = read_jobs_unlocked()
-        fcntl.flock(lock_handle, fcntl.LOCK_UN)
-
+    state = read_jobs_shared()
     for job in state["jobs"]:
         if job.get("id") == job_id:
             return normalize_job(job)
@@ -707,11 +1371,100 @@ def open_download_folder(job_id: str) -> dict[str, Any]:
     return {"ok": True, "path": str(folder)}
 
 
+def decode_worker_payload(encoded_payload: str) -> dict[str, Any]:
+    return json.loads(base64.urlsafe_b64decode(encoded_payload.encode("ascii")).decode("utf-8"))
+
+
+def start_job_heartbeat(job_id: str) -> threading.Event:
+    stop_event = threading.Event()
+
+    def beat() -> None:
+        while not stop_event.wait(HEARTBEAT_INTERVAL_SECONDS):
+            try:
+                update_job(job_id, {})
+            except Exception as error:  # noqa: BLE001
+                try:
+                    log_line(f"Heartbeat failed for job {job_id}: {error}")
+                except Exception:  # noqa: BLE001
+                    pass
+
+    threading.Thread(target=beat, daemon=True).start()
+    return stop_event
+
+
+def is_progress_update(updates: dict[str, Any]) -> bool:
+    return updates.get("status_detail") == "Downloading" and set(updates).issubset(PROGRESS_UPDATE_KEYS)
+
+
+def run_yt_dlp(command: list[str], job_id: str) -> int:
+    handle = open_log_stream()
+    if handle is None:
+        result = subprocess.run(
+            command,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return result.returncode
+
+    pending: dict[str, Any] = {}
+    last_written = 0.0
+    last_progress: float | None = None
+    try:
+        handle = write_log_stream(handle, f"\n=== Download started at {timestamp()} ===\n")
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        update_job(job_id, {"pid": process.pid})
+
+        assert process.stdout is not None
+        for line in process.stdout:
+            updates = parse_progress_line(line)
+            progress_only = bool(updates) and is_progress_update(updates)
+            if not progress_only:
+                handle = write_log_stream(handle, line)
+            if not updates:
+                continue
+
+            if not progress_only:
+                update_job(job_id, {**pending, **updates})
+                pending = {}
+                last_written = time.monotonic()
+                continue
+
+            pending.update(updates)
+            progress = updates.get("progress")
+            moved = isinstance(progress, (int, float)) and (
+                last_progress is None or abs(float(progress) - last_progress) >= PROGRESS_PERSIST_PERCENT
+            )
+            now = time.monotonic()
+            if moved or now - last_written >= PROGRESS_PERSIST_SECONDS:
+                update_job(job_id, pending)
+                if isinstance(progress, (int, float)):
+                    last_progress = float(progress)
+                pending = {}
+                last_written = now
+
+        if pending:
+            update_job(job_id, pending)
+
+        return_code = process.wait()
+        handle = write_log_stream(handle, f"=== Download finished with exit code {return_code} ===\n")
+        return return_code
+    finally:
+        if handle is not None:
+            handle.close()
+
+
 def run_download_worker(encoded_payload: str) -> int:
     try:
-        payload = json.loads(
-            base64.urlsafe_b64decode(encoded_payload.encode("ascii")).decode("utf-8")
-        )
+        payload = decode_worker_payload(encoded_payload)
         url = payload["url"]
         job_id = payload["job_id"]
         source = payload.get("source", "extension")
@@ -720,90 +1473,53 @@ def run_download_worker(encoded_payload: str) -> int:
         command = build_command(url, config, download_dir_override)
         download_dir = os.path.expanduser(str(download_dir_override or config["download_dir"]).strip())
 
-        notify("yt-dlp download started", url)
-        log_line(f"Starting download for {url} from {source}")
-        log_line("Command: " + " ".join(command))
+        safe_url = redact_url(url)
+        notify("yt-dlp download started", safe_url)
+        log_line(f"Starting download for {safe_url} from {source}")
+        log_line("Command: " + redact_command(command))
         update_job(
             job_id,
             {
                 "download_dir": download_dir,
                 "pid": os.getpid(),
+                "worker_pid": os.getpid(),
+                "worker_start_ticks": process_start_ticks(os.getpid()),
                 "status": "running",
                 "status_detail": "Starting",
             },
         )
+        stop_heartbeat = start_job_heartbeat(job_id)
 
         try:
-            rotate_log_if_needed()
-            try:
-                handle = LOG_PATH.open("a", encoding="utf-8")
-            except OSError:
-                handle = None
-
-            if handle is None:
-                result = subprocess.run(
-                    command,
-                    check=False,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            else:
-                with handle:
-                    handle.write("\n")
-                    handle.write(f"=== Download started at {timestamp()} ===\n")
-                    process = subprocess.Popen(
-                        command,
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        bufsize=1,
-                    )
-                    update_job(job_id, {"pid": process.pid})
-
-                    assert process.stdout is not None
-                    for line in process.stdout:
-                        handle.write(line)
-                        handle.flush()
-                        updates = parse_progress_line(line)
-                        if updates:
-                            update_job(job_id, updates)
-
-                    return_code = process.wait()
-                    result = subprocess.CompletedProcess(command, return_code)
-
-                    handle.write(f"=== Download finished with exit code {result.returncode} ===\n")
-
-            if result.returncode == 0:
-                notify("yt-dlp download complete", url)
-                log_line(f"Download complete for {url}")
+            return_code = run_yt_dlp(command, job_id)
+            if return_code == 0:
+                notify("yt-dlp download complete", safe_url)
+                log_line(f"Download complete for {safe_url}")
                 update_job(
                     job_id,
                     {
                         "status": "complete",
                         "status_detail": "Complete",
                         "progress": 100,
-                        "exit_code": result.returncode,
+                        "exit_code": return_code,
                         "finished_at": timestamp(),
                     },
                 )
-                launch_next_queued_job()
             else:
-                notify("yt-dlp download failed", f"{url}\nSee {LOG_PATH}")
-                log_line(f"Download failed for {url} with exit code {result.returncode}")
+                notify("yt-dlp download failed", f"{safe_url}\nSee {LOG_PATH}")
+                log_line(f"Download failed for {safe_url} with exit code {return_code}")
                 update_job(
                     job_id,
                     {
                         "status": "failed",
                         "status_detail": "Failed",
-                        "exit_code": result.returncode,
+                        "exit_code": return_code,
                         "finished_at": timestamp(),
                     },
                 )
-                launch_next_queued_job()
 
-            return result.returncode
+            launch_next_queued_job()
+            return return_code
         except (OSError, subprocess.SubprocessError) as e:
             log_line(f"Subprocess error: {e}")
             notify("yt-dlp subprocess error", f"{e}\nSee {LOG_PATH}")
@@ -819,13 +1535,13 @@ def run_download_worker(encoded_payload: str) -> int:
             )
             launch_next_queued_job()
             return 1
+        finally:
+            stop_heartbeat.set()
     except Exception as error:  # noqa: BLE001
         log_line(f"Worker error: {error}")
         notify("yt-dlp worker error", f"{error}\nSee {LOG_PATH}")
         try:
-            job_id = json.loads(
-                base64.urlsafe_b64decode(encoded_payload.encode("ascii")).decode("utf-8")
-            ).get("job_id")
+            job_id = decode_worker_payload(encoded_payload).get("job_id")
             if job_id:
                 update_job(
                     str(job_id),
@@ -882,6 +1598,9 @@ def start_download_job(
                     "error": "This video is already queued, running, or completed.",
                 }
 
+        if not queue_capacity(state):
+            return queue_full_response()
+
         state["jobs"].insert(0, normalize_job(new_job))
         return {"ok": True}
 
@@ -921,22 +1640,40 @@ def start_profile_download_jobs(
     if not base_download_dir:
         raise ValueError("download_dir must be a non-empty string when provided.")
 
-    video_urls = []
+    video_urls: list[str] = []
     seen_urls: set[str] = set()
+    rejected_count = 0
     for profile_video_url in profile_video_urls:
-        normalized_video_url = normalize_url(profile_video_url)
+        try:
+            normalized_video_url = normalize_url(profile_video_url)
+        except ValueError:
+            rejected_count += 1
+            continue
+
+        status_username = twitter_status_username(normalized_video_url)
+        if not status_username or status_username.lower() != username.lower():
+            rejected_count += 1
+            continue
+
         if normalized_video_url in seen_urls:
             continue
         seen_urls.add(normalized_video_url)
         video_urls.append(normalized_video_url)
 
+    limit_skipped_count = max(0, len(video_urls) - MAX_PROFILE_BATCH_JOBS)
+    video_urls = video_urls[:MAX_PROFILE_BATCH_JOBS]
+
     if not video_urls:
+        if rejected_count:
+            raise ValueError(
+                f"None of the {rejected_count} scraped links are posts by @{username}. "
+                "Reload the profile media page and try again."
+            )
         raise ValueError(
             "No profile video links were provided. Open the profile media page in Chrome and try again."
         )
 
     profile_dir = Path(os.path.expanduser(base_download_dir)) / safe_path_part(username)
-    profile_dir.mkdir(parents=True, exist_ok=True)
     started_at = timestamp()
 
     def make_job(video_url: str, index: int) -> dict[str, Any]:
@@ -963,8 +1700,9 @@ def start_profile_download_jobs(
         else:
             queued_jobs = []
             duplicates: list[dict[str, Any]] = []
+            index = duplicate_url_index(state)
             for job in new_jobs:
-                duplicate = duplicate_download_for_url(state, job["url"])
+                duplicate = duplicate_in_index(index, job["url"])
                 if duplicate:
                     duplicates.append(duplicate)
                 else:
@@ -977,19 +1715,33 @@ def start_profile_download_jobs(
                     "duplicate_job": duplicates[0],
                     "duplicate_count": len(duplicates),
                     "discovered_count": len(new_jobs),
+                    "rejected_count": rejected_count,
                     "error": "All profile videos are already queued, running, or completed.",
                 }
 
             skipped = len(duplicates)
 
+        capacity = queue_capacity(state)
+        capped_count = max(0, len(queued_jobs) - capacity)
+        if capped_count:
+            queued_jobs = queued_jobs[:capacity]
+        if not queued_jobs:
+            return queue_full_response()
+
         state["jobs"] = queued_jobs + state["jobs"]
-        return {"ok": True, "queued_jobs": queued_jobs, "skipped_count": skipped}
+        return {
+            "ok": True,
+            "queued_jobs": queued_jobs,
+            "skipped_count": skipped,
+            "capped_count": capped_count,
+        }
 
     response = mutate_jobs(mutator)
     if not response.get("ok"):
         return response
 
     queued_jobs = response["queued_jobs"]
+    profile_dir.mkdir(parents=True, exist_ok=True)
     launch_result = launch_next_queued_job(queued_jobs[0]["id"])
     return {
         "ok": True,
@@ -999,6 +1751,8 @@ def start_profile_download_jobs(
         "queued_count": len(queued_jobs),
         "discovered_count": len(new_jobs),
         "skipped_count": response.get("skipped_count", 0),
+        "rejected_count": rejected_count,
+        "limit_skipped_count": limit_skipped_count + response.get("capped_count", 0),
         "download_dir": str(profile_dir),
         "log_path": str(LOG_PATH),
     }
@@ -1048,6 +1802,12 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
         if not job_id:
             raise ValueError("Missing job_id field.")
         return force_download_job(job_id)
+
+    if message_type == "cancel_download_job":
+        job_id = str(message.get("job_id", "")).strip()
+        if not job_id:
+            raise ValueError("Missing job_id field.")
+        return cancel_download_job(job_id)
 
     if message_type == "remove_download_job":
         job_id = str(message.get("job_id", "")).strip()
