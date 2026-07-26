@@ -1,7 +1,7 @@
 # Twitter Video Downloader Bridge
 
 This project contains a Chrome extension plus a Linux native messaging host
-that sends X/Twitter URLs to `yt-dlp` on your machine.
+that sends X/Twitter and Facebook reel URLs to `yt-dlp` on your machine.
 
 The extension does not download anything by itself. It forwards a URL to a
 local Python host, and that host runs:
@@ -62,6 +62,20 @@ is loaded.
   extension or the host: `home`, `explore`, `notifications`, `messages`, `i`,
   and `settings`. A URL such as `https://x.com/home/media` is queued as a single
   ordinary download instead.
+- Open a Facebook profile's reels tab and click the extension button to scan
+  it the same way. Two URL forms are recognised, across the `www`, `m`, and
+  `web` subdomains: `facebook.com/profile.php?id=<digits>&sk=reels_tab` and
+  `facebook.com/<pagename>/reels`. The profile's videos tab is not supported,
+  since it mixes long-form uploads, live replays, and cross-posts that do not
+  belong in a reel-only batch.
+- A Facebook batch folder is named after the profile's display name, scraped
+  from the page rather than the URL, since a vanity page name or numeric id is
+  not the profile's real name. Japanese and other non-ASCII names are
+  preserved. When no usable name can be scraped, the folder falls back to the
+  numeric profile id or the vanity page name instead.
+- Facebook only shows profile reels to signed-in users. If you are signed out,
+  the scan finds nothing and the picker says so specifically, rather than
+  reporting the generic "no video links found" message.
 - Or right-click a page or link and choose `Download with yt-dlp`, then pick a
   folder.
 - The download page shows a dashboard with queued, running, completed, failed,
@@ -145,10 +159,36 @@ with 0700.
 - Video links discovered by a profile scan are re-validated by the host: each
   one must be a status URL belonging to the profile being scanned, so a quoted
   post from another account is not queued.
+- Facebook reel URLs are canonicalised to `https://www.facebook.com/reel/<id>`
+  before being queued, with any query string dropped, so tracking parameters
+  such as `?fs=e&s=...` do not defeat duplicate detection and the same reel is
+  not downloaded twice. This differs from an ordinary Facebook video URL that
+  carries its id in the query string, such as `/watch/?v=<id>`: that query
+  string is kept, since it is the only place the id appears.
+- The host validates that every scraped Facebook URL has the shape of a reel
+  permalink, but it cannot confirm a reel belongs to the profile that was
+  scanned, unlike Twitter: a Facebook reel URL is just
+  `facebook.com/reel/<id>`, with no uploader in it. The only defence against
+  collecting a reel that isn't the profile's own is the collector's DOM
+  scoping in the scanned page, which is heuristic and biased toward collecting
+  too few reels rather than too many. A Facebook markup change can make the
+  scan under-collect, and in principle a stray reel from elsewhere on the page
+  could still slip through.
 - Credentials are redacted from the log and from desktop notifications. URLs
   themselves are logged, since the log records what was downloaded.
-- X/Twitter downloads use the filename template
+- X/Twitter and Facebook downloads use the filename template
   `%(uploader_id,uploader|unknown-account)S-%(id)s.%(ext)s` to avoid very long
-  filenames from tweet text.
+  filenames from tweet text or reel captions.
 - Cookie access depends on `yt-dlp` being able to read your chosen browser
   profile on Linux.
+
+## Development
+
+Tests need Node and a one-time `npm install` (jsdom is a test-only dependency;
+the extension itself requires no build step).
+
+```bash
+npm install
+npm test                                    # extension scraper tests
+cd native-host && python3 -m unittest       # native host tests
+```
