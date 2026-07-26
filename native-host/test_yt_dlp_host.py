@@ -116,5 +116,59 @@ class SafePathPartUnicodeTests(unittest.TestCase):
         self.assertNotIn("\n", host.safe_path_part("a\nb"))
 
 
+class FacebookBatchMatchingTests(unittest.TestCase):
+    def test_matches_profile_php_reels_tab(self) -> None:
+        target = host.batch_target_for_url(
+            "https://www.facebook.com/profile.php?id=61590939736806&sk=reels_tab"
+        )
+        self.assertEqual(target, {"provider": "facebook", "key": "61590939736806"})
+
+    def test_matches_vanity_reels_path(self) -> None:
+        target = host.batch_target_for_url("https://www.facebook.com/somepage/reels")
+        self.assertEqual(target, {"provider": "facebook", "key": "somepage"})
+
+    def test_matches_mobile_subdomain(self) -> None:
+        self.assertEqual(
+            host.batch_target_for_url("https://m.facebook.com/somepage/reels")["key"],
+            "somepage",
+        )
+
+    def test_rejects_profile_php_without_reels_tab(self) -> None:
+        self.assertIsNone(
+            host.batch_target_for_url("https://www.facebook.com/profile.php?id=123")
+        )
+
+    def test_rejects_videos_tab(self) -> None:
+        self.assertIsNone(host.batch_target_for_url("https://www.facebook.com/somepage/videos"))
+
+    def test_rejects_reserved_segments(self) -> None:
+        for segment in ["reel", "watch", "groups", "marketplace", "profile.php", "login"]:
+            with self.subTest(segment=segment):
+                self.assertIsNone(
+                    host.batch_target_for_url(f"https://www.facebook.com/{segment}/reels")
+                )
+
+    def test_single_reel_is_not_a_batch(self) -> None:
+        self.assertIsNone(host.batch_target_for_url("https://www.facebook.com/reel/123"))
+
+
+class FacebookUrlCanonicalisationTests(unittest.TestCase):
+    def test_strips_tracking_parameters_so_duplicates_collapse(self) -> None:
+        variants = [
+            "https://www.facebook.com/reel/1234567890",
+            "https://www.facebook.com/reel/1234567890/",
+            "https://m.facebook.com/reel/1234567890?fs=e&s=TIeo",
+            "https://web.facebook.com/reel/1234567890?mibextid=abc",
+        ]
+        results = {host.normalize_url(url) for url in variants}
+        self.assertEqual(results, {"https://www.facebook.com/reel/1234567890"})
+
+    def test_reel_id_extraction(self) -> None:
+        self.assertEqual(
+            host.facebook_reel_id("https://www.facebook.com/reel/1234567890"), "1234567890"
+        )
+        self.assertIsNone(host.facebook_reel_id("https://www.facebook.com/somepage/reels"))
+
+
 if __name__ == "__main__":
     unittest.main()
