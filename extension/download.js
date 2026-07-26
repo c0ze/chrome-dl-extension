@@ -40,6 +40,7 @@ const elements = {
 const state = {
   defaultDirectory: "~/Downloads",
   partialAcknowledged: false,
+  profileName: "",
   profileScanError: "",
   profileUrls: null,
   rescanTabId: null,
@@ -195,8 +196,8 @@ function partialScanPromptText(count) {
   );
 }
 
-function isTwitterProfileMediaUrl(rawUrl) {
-  return batchTargetForUrl(rawUrl)?.provider === "twitter";
+function isProfileBatchUrl(rawUrl) {
+  return batchTargetForUrl(rawUrl) !== null;
 }
 
 function isScanning() {
@@ -233,7 +234,7 @@ function canRescan() {
   return (
     Boolean(state.scanKey) &&
     state.rescanTabId !== null &&
-    isTwitterProfileMediaUrl(state.targetUrl)
+    isProfileBatchUrl(state.targetUrl)
   );
 }
 
@@ -312,6 +313,7 @@ function applyScanRecord(record) {
     ? record.urls.filter((url) => typeof url === "string" && url.startsWith("https://"))
     : [];
   state.profileUrls = urls;
+  state.profileName = record.profileName || "";
   state.scanPartial = Boolean(record.partial) && urls.length > 0;
   state.partialAcknowledged = false;
 
@@ -324,9 +326,12 @@ function applyScanRecord(record) {
     showMessage("success", `Found ${urls.length} video links on this profile page.`);
     setRescanVisible(false);
   } else {
-    state.profileScanError =
-      "No video links were found. Scroll the profile media page to load videos, then try again.";
-    showMessage("error", state.profileScanError);
+    const emptyScanMessage =
+      batchTargetForUrl(state.targetUrl)?.provider === "facebook"
+        ? "No reels were found. If you are signed out, Facebook hides profile reels — sign in, reload the page, and scan again."
+        : "No video links were found. Scroll the profile media page to load videos, then try again.";
+    state.profileScanError = emptyScanMessage;
+    showMessage("error", emptyScanMessage);
     setRescanVisible(canRescan());
   }
 
@@ -761,7 +766,7 @@ async function startDownload(directory, allowDuplicate = false) {
     return;
   }
 
-  if (isTwitterProfileMediaUrl(state.targetUrl) && !state.profileUrls?.length) {
+  if (isProfileBatchUrl(state.targetUrl) && !state.profileUrls?.length) {
     showMessage(
       "error",
       state.profileScanError ||
@@ -792,6 +797,7 @@ async function startDownload(directory, allowDuplicate = false) {
       url: state.targetUrl,
       allow_duplicate: allowDuplicate,
       profile_urls: state.profileUrls,
+      profile_name: state.profileName || undefined,
     });
 
     if (response?.duplicate) {
@@ -862,12 +868,14 @@ async function initialize() {
     showMessage("info", "Scanning this profile page for videos…");
     armScanWatchdog();
     applyBusyState();
-  } else if (isTwitterProfileMediaUrl(state.targetUrl)) {
+  } else if (isProfileBatchUrl(state.targetUrl)) {
     state.scanSettled = true;
     state.scanStatus = "error";
     state.profileUrls = [];
     state.profileScanError =
-      "Open the X/Twitter profile media page in a tab and use the toolbar button there to scan it.";
+      batchTargetForUrl(state.targetUrl)?.provider === "facebook"
+        ? "Open the Facebook profile reels page in a tab and use the toolbar button there to scan it."
+        : "Open the X/Twitter profile media page in a tab and use the toolbar button there to scan it.";
     showMessage("error", state.profileScanError);
   }
 

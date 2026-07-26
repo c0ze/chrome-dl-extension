@@ -1,9 +1,9 @@
 import {
   TWITTER_HOSTS,
+  FACEBOOK_HOSTS,
   RESERVED_PROFILE_USERNAMES,
   batchTargetForUrl,
   profileScanChunk,
-  twitterProfileMediaUsername,
 } from "./providers.js";
 
 const MENU_ID = "download-with-ytdlp";
@@ -12,8 +12,6 @@ const PROFILE_BATCH_TTL_MS = 10 * 60 * 1000;
 const PROFILE_SCAN_CHUNK_MS = 4000;
 const PROFILE_SCAN_MAX_PASSES = 36;
 const PROFILE_SCAN_MAX_ROUNDS = 16;
-
-const USERNAME_PATTERN = /^[A-Za-z0-9_]{1,15}$/;
 
 // Batch keys whose scan is running in this worker instance. Empty after a
 // worker restart, which is exactly when a popup-driven rescan should be allowed.
@@ -106,13 +104,15 @@ async function restoreScrollPosition(tabId, scrollY) {
   }
 }
 
-async function runProfileScan(tabId, expectedUsername, key) {
+async function runProfileScan(tabId, provider, expectedUsername, key) {
   if (activeScans.has(key)) {
     return;
   }
 
   activeScans.add(key);
   let progress = null;
+  let profileName = "";
+  const hosts = provider === "facebook" ? FACEBOOK_HOSTS : TWITTER_HOSTS;
 
   try {
     for (let round = 0; round < PROFILE_SCAN_MAX_ROUNDS; round += 1) {
@@ -121,7 +121,8 @@ async function runProfileScan(tabId, expectedUsername, key) {
         func: profileScanChunk,
         args: [
           {
-            hosts: TWITTER_HOSTS,
+            provider,
+            hosts,
             reserved: RESERVED_PROFILE_USERNAMES,
             expectedUsername,
             budgetMs: PROFILE_SCAN_CHUNK_MS,
@@ -145,7 +146,10 @@ async function runProfileScan(tabId, expectedUsername, key) {
       }
 
       progress = result.progress;
-      const urls = Array.isArray(progress?.urls) ? progress.urls : [];
+      if (result.profileName) {
+        profileName = result.profileName;
+      }
+      const urls = Array.isArray(result.urls) ? result.urls : [];
 
       if (result.done) {
         await writeScanRecord(key, {
@@ -153,6 +157,7 @@ async function runProfileScan(tabId, expectedUsername, key) {
           username: result.username || expectedUsername,
           urls,
           found: urls.length,
+          profileName,
         });
         return;
       }
@@ -161,6 +166,7 @@ async function runProfileScan(tabId, expectedUsername, key) {
         status: "scanning",
         username: result.username || expectedUsername,
         found: urls.length,
+        profileName,
       });
     }
 
@@ -171,6 +177,7 @@ async function runProfileScan(tabId, expectedUsername, key) {
       urls,
       found: urls.length,
       partial: true,
+      profileName,
     });
   } catch (error) {
     await writeScanRecord(key, {
@@ -187,17 +194,25 @@ async function runProfileScan(tabId, expectedUsername, key) {
 /**
  * Restarts a scan whose worker was terminated mid-run. The popup's watchdog is
  * the only thing that can notice that, so it drives this.
+ *
+ * The provider isn't re-derived from a hand-rolled pattern here: the original
+ * scan record (written by openDownloadPicker from a real batchTargetForUrl
+ * lookup) is the source of truth for which provider and key this batch key
+ * belongs to, and the message's username must match it.
  */
 async function restartProfileScan(message) {
   const key = typeof message?.key === "string" ? message.key : "";
   const tabId = message?.tabId;
   const username = typeof message?.username === "string" ? message.username : "";
 
-  const usable =
-    key.startsWith(PROFILE_BATCH_PREFIX) &&
-    typeof tabId === "number" &&
-    USERNAME_PATTERN.test(username) &&
-    !RESERVED_PROFILE_USERNAMES.includes(username.toLowerCase());
+  if (!key.startsWith(PROFILE_BATCH_PREFIX) || typeof tabId !== "number" || !username) {
+    return { ok: false, error: "This profile scan cannot be restarted." };
+  }
+
+  const stored = await chrome.storage.session.get([key]);
+  const record = stored[key];
+  const provider = record?.provider === "facebook" ? "facebook" : "twitter";
+  const usable = record && record.username === username;
 
   if (!usable) {
     return { ok: false, error: "This profile scan cannot be restarted." };
@@ -209,8 +224,8 @@ async function restartProfileScan(message) {
     return { ok: true, alreadyRunning: true };
   }
 
-  await writeScanRecord(key, { status: "scanning", username });
-  void runProfileScan(tabId, username, key);
+  await writeScanRecord(key, { status: "scanning", username, provider });
+  void runProfileScan(tabId, provider, username, key);
   return { ok: true };
 }
 
@@ -223,14 +238,18 @@ async function openDownloadPicker(url, source, tab) {
   void sweepProfileBatches();
 
   const params = new URLSearchParams({ url, source });
-  const username = twitterProfileMediaUsername(url);
-  const scannable = Boolean(username) && typeof tab?.id === "number";
+  const target = batchTargetForUrl(url);
+  const scannable = Boolean(target) && typeof tab?.id === "number";
   const batchKey = scannable ? makeProfileBatchKey() : null;
 
   if (batchKey) {
     params.set("profileBatchKey", batchKey);
     params.set("profileTabId", String(tab.id));
-    await writeScanRecord(batchKey, { status: "scanning", username });
+    await writeScanRecord(batchKey, {
+      status: "scanning",
+      provider: target.provider,
+      username: target.key,
+    });
   }
 
   await chrome.windows.create({
@@ -241,7 +260,7 @@ async function openDownloadPicker(url, source, tab) {
   });
 
   if (batchKey) {
-    await runProfileScan(tab.id, username, batchKey);
+    await runProfileScan(tab.id, target.provider, target.key, batchKey);
   }
 }
 
