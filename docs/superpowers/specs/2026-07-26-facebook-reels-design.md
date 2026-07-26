@@ -227,6 +227,14 @@ JavaScript (`node --test`, jsdom):
   scoping excludes them.
 - Existing Twitter scraper fixtures, to prove no regression.
 
+**Amendment (post-implementation):** jsdom is not in Node's standard library, so
+the JS tests need a `package.json` declaring it as a `devDependency` and a
+`node_modules` from a one-time `npm install`. This resolves this document's
+implicit assumption, from "no committed tests" above, that the repository
+would stay dependency-free — it now carries a test-only dependency. The
+extension itself is unaffected: it is still loaded unpacked with no build
+step, and `package.json` exists solely to run `tests/scan.test.js`.
+
 ## Out of scope
 
 - The Facebook videos tab (`/<page>/videos`, `sk=videos`), which mixes long-form
