@@ -88,5 +88,31 @@ class SafePathPartTraversalTests(unittest.TestCase):
                 self.assertTrue(host.safe_path_part(value))
 
 
+class SafePathPartUnicodeTests(unittest.TestCase):
+    def test_preserves_japanese(self) -> None:
+        self.assertEqual(host.safe_path_part("ネコ動画"), "ネコ動画")
+
+    def test_preserves_mixed_scripts(self) -> None:
+        self.assertEqual(host.safe_path_part("Neko 動画"), "Neko 動画")
+
+    def test_strips_filesystem_hostile_characters(self) -> None:
+        result = host.safe_path_part('a/b\\c:d*e?f"g<h>i|j')
+        for bad in '/\\:*?"<>|':
+            self.assertNotIn(bad, result)
+
+    def test_caps_at_255_utf8_bytes_on_a_character_boundary(self) -> None:
+        result = host.safe_path_part("動" * 200)
+        self.assertLessEqual(len(result.encode("utf-8")), 255)
+        # Must not have split a multi-byte sequence.
+        result.encode("utf-8").decode("utf-8")
+
+    def test_uses_supplied_fallback_when_empty(self) -> None:
+        self.assertEqual(host.safe_path_part("///", fallback="61590939736806"), "61590939736806")
+
+    def test_strips_control_characters(self) -> None:
+        self.assertNotIn("\x00", host.safe_path_part("a\x00b"))
+        self.assertNotIn("\n", host.safe_path_part("a\nb"))
+
+
 if __name__ == "__main__":
     unittest.main()
