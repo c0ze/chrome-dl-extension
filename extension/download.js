@@ -1,3 +1,5 @@
+import { batchTargetForUrl } from "./providers.js";
+
 const HOST_NAME = "dev.arda.ytdlp_host";
 const RECENT_DIRECTORIES_KEY = "recentDownloadDirectories";
 const MAX_RECENT_DIRECTORIES = 10;
@@ -16,26 +18,6 @@ const POLL_HIDDEN_MS = 30000;
 // update, never total elapsed time: a full scan legitimately runs for tens of
 // seconds.
 const SCAN_WATCHDOG_MS = 20000;
-
-const TWITTER_HOSTS = [
-  "twitter.com",
-  "www.twitter.com",
-  "mobile.twitter.com",
-  "x.com",
-  "www.x.com",
-];
-
-// Kept in sync with twitter_profile_media_username() in native-host/yt_dlp_host.py.
-const RESERVED_PROFILE_USERNAMES = [
-  "home",
-  "explore",
-  "notifications",
-  "messages",
-  "i",
-  "settings",
-];
-
-const USERNAME_PATTERN = /^[A-Za-z0-9_]{1,15}$/;
 
 const TOTAL_JOB_COUNT_KEYS = ["total_count", "total_jobs", "job_count", "total"];
 
@@ -213,31 +195,8 @@ function partialScanPromptText(count) {
   );
 }
 
-function twitterProfileMediaUsername(rawUrl) {
-  try {
-    const url = new URL(rawUrl);
-    if (!TWITTER_HOSTS.includes(url.hostname)) {
-      return null;
-    }
-
-    const parts = url.pathname.split("/").filter(Boolean);
-    if (parts.length < 2 || parts[1].toLowerCase() !== "media") {
-      return null;
-    }
-
-    const username = parts[0];
-    if (!USERNAME_PATTERN.test(username)) {
-      return null;
-    }
-
-    return RESERVED_PROFILE_USERNAMES.includes(username.toLowerCase()) ? null : username;
-  } catch (_error) {
-    return null;
-  }
-}
-
 function isTwitterProfileMediaUrl(rawUrl) {
-  return Boolean(twitterProfileMediaUsername(rawUrl));
+  return batchTargetForUrl(rawUrl)?.provider === "twitter";
 }
 
 function isScanning() {
@@ -274,7 +233,7 @@ function canRescan() {
   return (
     Boolean(state.scanKey) &&
     state.rescanTabId !== null &&
-    Boolean(twitterProfileMediaUsername(state.targetUrl))
+    isTwitterProfileMediaUrl(state.targetUrl)
   );
 }
 
@@ -451,7 +410,7 @@ async function requestRescan() {
       type: "rescan-profile",
       key: state.scanKey,
       tabId: state.rescanTabId,
-      username: twitterProfileMediaUsername(state.targetUrl),
+      username: batchTargetForUrl(state.targetUrl)?.key,
     });
 
     if (!response?.ok) {
