@@ -307,7 +307,7 @@ class StartProfileDownloadJobsProfileNameTests(unittest.TestCase):
         self.assertTrue(result["download_dir"].endswith("alice"))
 
     def test_non_batch_url_is_rejected(self) -> None:
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, r"Profile downloads require.*X/Twitter.*Facebook"):
             host.start_profile_download_jobs(
                 "https://example.com/somepage",
                 "extension",
@@ -315,6 +315,20 @@ class StartProfileDownloadJobsProfileNameTests(unittest.TestCase):
                 [],
                 False,
             )
+
+    def test_facebook_rejection_message_no_at_sign(self) -> None:
+        """Verify Facebook rejection message uses 'reels from this profile', not '@profile_id'."""
+        with self.assertRaises(ValueError) as cm:
+            host.start_profile_download_jobs(
+                "https://www.facebook.com/61590939736806/reels",
+                "extension",
+                None,
+                ["https://www.facebook.com/invalid/link"],  # Will be rejected
+                False,
+            )
+        error_message = str(cm.exception)
+        self.assertNotIn("@", error_message)
+        self.assertIn("reels from this profile", error_message)
 
 
 class HandleMessageProfileNameTests(unittest.TestCase):

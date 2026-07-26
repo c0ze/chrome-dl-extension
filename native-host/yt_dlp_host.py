@@ -1787,15 +1787,18 @@ def start_profile_download_jobs(
 
     if not video_urls:
         if rejected_count:
-            raise ValueError(
-                f"None of the {rejected_count} scraped links are posts by @{target['key']}. "
-                "Reload the profile media page and try again."
-            )
+            rejection_messages = {
+                "twitter": f"None of the {rejected_count} scraped links are posts by @{target['key']}. Reload the profile media page and try again.",
+                "facebook": f"None of the {rejected_count} scraped links are reels from this profile. Reload the profile reels page and try again.",
+            }
+            message = rejection_messages.get(target["provider"], rejection_messages["twitter"])
+            raise ValueError(message)
         raise ValueError(
             "No profile video links were provided. Open the profile media page in Chrome and try again."
         )
 
-    folder_name = safe_path_part(profile_name or target["key"], fallback=target["key"])
+    profile_name_stripped = (profile_name or "").strip() if profile_name else ""
+    folder_name = safe_path_part(profile_name_stripped or target["key"], fallback=target["key"])
     profile_dir = Path(os.path.expanduser(base_download_dir)) / folder_name
     started_at = timestamp()
 
