@@ -101,25 +101,127 @@ export function batchTargetForUrl(rawUrl) {
  */
 export async function profileScanChunk(options) {
   if (options.provider === "facebook") {
+    // Multilingual "this is not the profile's own content" wording. Substring
+    // match, case-insensitive. Facebook class names are randomised per build
+    // and per locale, so wording + ARIA structure are the only signals left.
+    const suggestionWords = [
+      "suggested", "suggestions", "people also watched", "reels for you", "for you",
+      "you might like", "recommended",
+      "おすすめ", "あなたへのおすすめ", "関連",
+      "sugerencias", "para ti",
+      "sugestões", "para você",
+      "pour vous",
+      "vorschläge", "für dich",
+    ];
+
+    // True when `node` sits inside a nested/embedded/quoted-post wrapper, i.e.
+    // shared or repost content that does not belong to the scanned profile.
+    function isEmbeddedFacebookContent(node, root) {
+      let element = node.parentElement;
+      while (element && element !== root) {
+        if (element.getAttribute("role") === "article") {
+          return true;
+        }
+        const testId = (element.getAttribute("data-testid") || "").toLowerCase();
+        if (testId.includes("attachment") || testId.includes("quoted")) {
+          return true;
+        }
+        if (element.getAttribute("role") === "link") {
+          return true;
+        }
+        element = element.parentElement;
+      }
+      return false;
+    }
+
+    // True when `node` looks like a labelled content section: a `<section>`,
+    // an explicit region/complementary role, or anything carrying its own
+    // aria-label(ledby). These are the nodes whose label we inspect for
+    // suggestion wording.
+    function isSectionLike(element) {
+      if (element.tagName === "SECTION") {
+        return true;
+      }
+      const role = element.getAttribute("role");
+      if (role === "region" || role === "complementary") {
+        return true;
+      }
+      if (element.hasAttribute("aria-label") || element.hasAttribute("aria-labelledby")) {
+        return true;
+      }
+      return false;
+    }
+
+    // First h1/h2/h3 within `element`'s own subtree, without descending into
+    // a nested section-like boundary (other than `element` itself) - so a
+    // high-level ancestor never inherits headings that belong to a more
+    // specific nested section.
+    function ownHeadingText(element) {
+      const stack = Array.from(element.children);
+      while (stack.length) {
+        const child = stack.shift();
+        if (/^H[123]$/.test(child.tagName)) {
+          return (child.textContent || "").trim();
+        }
+        if (isSectionLike(child)) {
+          continue;
+        }
+        stack.unshift(...Array.from(child.children));
+      }
+      return "";
+    }
+
+    function sectionLabel(element) {
+      const ariaLabel = element.getAttribute("aria-label");
+      if (ariaLabel && ariaLabel.trim()) {
+        return ariaLabel.trim();
+      }
+      const labelledBy = element.getAttribute("aria-labelledby");
+      if (labelledBy) {
+        const labelNode = document.getElementById(labelledBy);
+        const labelText = (labelNode?.textContent || "").trim();
+        if (labelText) {
+          return labelText;
+        }
+      }
+      return ownHeadingText(element);
+    }
+
+    function looksLikeSuggestion(text) {
+      const lower = text.toLowerCase();
+      return suggestionWords.some((word) => lower.includes(word));
+    }
+
+    // Bias toward under-collection: any ambiguity here means "exclude".
+    function isSuggestedOrUnscoped(anchor, root) {
+      let node = anchor.parentElement;
+      while (node && node !== root) {
+        if (isSectionLike(node)) {
+          const label = sectionLabel(node);
+          if (label && looksLikeSuggestion(label)) {
+            return true;
+          }
+        }
+        node = node.parentElement;
+      }
+      return false;
+    }
+
     function collectFacebookReels() {
       const root = document.querySelector("[role='main']");
       if (!root) {
         return [];
       }
-      const suggestionWords = ["suggested", "people also watched", "reels for you"];
       const found = [];
       root.querySelectorAll("a[href*='/reel/']").forEach((anchor) => {
         if (anchor.closest("[role='complementary']")) {
           return;
         }
-        let node = anchor.parentElement;
-        while (node && node !== root) {
-          const heading = node.querySelector(":scope > h1, :scope > h2, :scope > h3");
-          const text = (heading?.textContent || "").toLowerCase();
-          if (text && suggestionWords.some((word) => text.includes(word))) {
-            return;
-          }
-          node = node.parentElement;
+        if (isEmbeddedFacebookContent(anchor, root)) {
+          return;
+        }
+        if (isSuggestedOrUnscoped(anchor, root)) {
+          return;
         }
         const match = /^\/reel\/(\d+)\/?$/.exec(new URL(anchor.href, window.location.href).pathname);
         if (match) {
@@ -129,20 +231,30 @@ export async function profileScanChunk(options) {
       return found;
     }
 
+    function isPlausibleProfileName(name) {
+      if (!name) {
+        return false;
+      }
+      return name.toLowerCase() !== "facebook";
+    }
+
     function facebookProfileName() {
       const og = document.querySelector("meta[property='og:title']");
-      if (og?.content?.trim()) {
-        return og.content.trim();
+      const ogName = (og?.content || "").replace(/\s+/g, " ").trim();
+      if (isPlausibleProfileName(ogName)) {
+        return ogName;
       }
       const heading = document.querySelector("[role='main'] h1");
-      if (heading?.textContent?.trim()) {
-        return heading.textContent.trim();
+      const headingName = (heading?.textContent || "").replace(/\s+/g, " ").trim();
+      if (isPlausibleProfileName(headingName)) {
+        return headingName;
       }
       const title = (document.title || "")
         .replace(/^\(\d+\+?\)\s*/, "")
         .replace(/\s*\|\s*Facebook\s*$/i, "")
+        .replace(/\s+/g, " ")
         .trim();
-      return title || "";
+      return isPlausibleProfileName(title) ? title : "";
     }
 
     const urls = Array.from(new Set(collectFacebookReels()));
@@ -369,5 +481,5 @@ export async function profileScanChunk(options) {
 
   progress.urls = Array.from(links.values());
 
-  return { ok: true, username, done, progress };
+  return { ok: true, username, done, progress, urls: progress.urls };
 }
