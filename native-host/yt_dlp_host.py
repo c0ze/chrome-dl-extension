@@ -60,7 +60,7 @@ FACEBOOK_RESERVED_SEGMENTS = {
     "settings", "messages", "notifications",
 }
 FACEBOOK_REEL_ID_RE = re.compile(r"^/reel/(\d+)/?$")
-FACEBOOK_VANITY_RE = re.compile(r"^[A-Za-z0-9.\-]{1,60}$")
+FACEBOOK_VANITY_RE = re.compile(r"^(?=[A-Za-z0-9.\-]{1,60}$)(?=.*[A-Za-z0-9])[A-Za-z0-9.\-]+$")
 PROFILE_OUTPUT_TEMPLATE = "%(uploader_id,uploader|unknown-account)S-%(id)s.%(ext)s"
 
 PROVIDERS = (
@@ -70,7 +70,7 @@ PROVIDERS = (
         "canonical_host": "x.com",
         "batch_key": lambda url: twitter_profile_media_username(url),
         "canonical_path": lambda path: canonical_twitter_path(path),
-        "strip_query": True,
+        "strip_query": lambda path: True,
         "template": PROFILE_OUTPUT_TEMPLATE,
     },
     {
@@ -79,7 +79,7 @@ PROVIDERS = (
         "canonical_host": "www.facebook.com",
         "batch_key": lambda url: facebook_profile_reels_key(url),
         "canonical_path": lambda path: canonical_facebook_path(path),
-        "strip_query": True,
+        "strip_query": lambda path: FACEBOOK_REEL_ID_RE.match(path) is not None,
         "template": PROFILE_OUTPUT_TEMPLATE,
     },
 )
@@ -811,7 +811,7 @@ def normalize_url(raw_url: str) -> str:
     if provider:
         parsed = parsed._replace(
             netloc=provider["canonical_host"],
-            query="" if provider["strip_query"] else parsed.query,
+            query="" if provider["strip_query"](parsed.path) else parsed.query,
             path=provider["canonical_path"](parsed.path),
         )
     else:

@@ -170,5 +170,58 @@ class FacebookUrlCanonicalisationTests(unittest.TestCase):
         self.assertIsNone(host.facebook_reel_id("https://www.facebook.com/somepage/reels"))
 
 
+class FacebookNonReelQueryPreservationTests(unittest.TestCase):
+    """strip_query is path-aware: only recognised reel paths lose their query.
+
+    facebook.com/watch/?v=<id> is a URL yt-dlp's facebook extractor resolves;
+    facebook.com/watch (no query) is not. Stripping the query on this path
+    silently breaks the download, so these must never regress.
+    """
+
+    def test_watch_url_keeps_its_video_id(self) -> None:
+        self.assertEqual(
+            host.normalize_url("https://facebook.com/watch/?v=1234567890123456"),
+            "https://www.facebook.com/watch?v=1234567890123456",
+        )
+
+    def test_watch_live_url_keeps_its_full_query(self) -> None:
+        self.assertEqual(
+            host.normalize_url(
+                "https://facebook.com/watch/live/?ref=watch_permalink&v=999"
+            ),
+            "https://www.facebook.com/watch/live?ref=watch_permalink&v=999",
+        )
+
+    def test_video_permalink_still_normalises_correctly(self) -> None:
+        self.assertEqual(
+            host.normalize_url("https://facebook.com/somepage/videos/123456/"),
+            "https://www.facebook.com/somepage/videos/123456",
+        )
+
+    def test_reel_urls_still_drop_tracking_params(self) -> None:
+        variants = [
+            "https://www.facebook.com/reel/1234567890",
+            "https://www.facebook.com/reel/1234567890/",
+            "https://m.facebook.com/reel/1234567890?fs=e&s=TIeo",
+            "https://web.facebook.com/reel/1234567890?mibextid=abc",
+        ]
+        results = {host.normalize_url(url) for url in variants}
+        self.assertEqual(results, {"https://www.facebook.com/reel/1234567890"})
+
+    def test_twitter_still_strips_its_query(self) -> None:
+        self.assertEqual(
+            host.normalize_url("https://x.com/foo/status/123?s=20"),
+            "https://x.com/foo/status/123",
+        )
+
+
+class FacebookVanityRegexTraversalTests(unittest.TestCase):
+    def test_rejects_dotdot_as_a_batch_target(self) -> None:
+        self.assertIsNone(host.batch_target_for_url("https://www.facebook.com/../reels"))
+
+    def test_rejects_dot_as_a_batch_target(self) -> None:
+        self.assertIsNone(host.batch_target_for_url("https://www.facebook.com/./reels"))
+
+
 if __name__ == "__main__":
     unittest.main()
