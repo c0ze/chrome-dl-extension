@@ -58,6 +58,10 @@ is loaded.
 - A scan that hits its round limit is reported as partial, and starting a
   partial download asks for confirmation first. Scroll the media page further
   and use `Scan Again` to pick up older posts.
+- Reserved X/Twitter routes are never treated as profile batches, by either the
+  extension or the host: `home`, `explore`, `notifications`, `messages`, `i`,
+  and `settings`. A URL such as `https://x.com/home/media` is queued as a single
+  ordinary download instead.
 - Or right-click a page or link and choose `Download with yt-dlp`, then pick a
   folder.
 - The download page shows a dashboard with queued, running, completed, failed,
@@ -78,7 +82,8 @@ is loaded.
   dashboard refresh, marks the job `Interrupted`, and resumes the queue.
 - If a URL is already queued, running, or completed in the dashboard, the
   extension asks before queueing a duplicate. Profile media scans use the same
-  duplicate check for every discovered video URL.
+  duplicate check for every discovered video URL. Cancelled downloads do not
+  count as duplicates, so a cancelled URL can be queued again without a prompt.
 - The native host uses `notify-send` to show start and finish notifications.
 - The picker remembers your last 10 folder paths in Chrome extension storage for
   quick reuse.
