@@ -42,11 +42,53 @@ export function twitterProfileMediaUsername(rawUrl) {
   }
 }
 
+export const FACEBOOK_RESERVED_SEGMENTS = [
+  "reel", "reels", "watch", "groups", "marketplace", "events", "pages",
+  "profile.php", "story.php", "photo", "share", "people", "login",
+  "settings", "messages", "notifications",
+];
+
+export function facebookProfileReelsKey(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    if (!FACEBOOK_HOSTS.includes(url.hostname)) {
+      return null;
+    }
+    const parts = url.pathname.split("/").filter(Boolean);
+
+    if (parts.length === 1 && parts[0] === "profile.php") {
+      if (url.searchParams.get("sk") !== "reels_tab") {
+        return null;
+      }
+      const id = url.searchParams.get("id") || "";
+      return /^\d+$/.test(id) ? id : null;
+    }
+
+    if (parts.length === 2 && parts[1].toLowerCase() === "reels") {
+      const candidate = parts[0];
+      if (FACEBOOK_RESERVED_SEGMENTS.includes(candidate.toLowerCase())) {
+        return null;
+      }
+      return /^[A-Za-z0-9.\-]{1,60}$/.test(candidate) ? candidate : null;
+    }
+
+    return null;
+  } catch (_error) {
+    return null;
+  }
+}
+
 export function batchTargetForUrl(rawUrl) {
   const twitterKey = twitterProfileMediaUsername(rawUrl);
   if (twitterKey) {
     return { provider: "twitter", key: twitterKey };
   }
+
+  const facebookKey = facebookProfileReelsKey(rawUrl);
+  if (facebookKey) {
+    return { provider: "facebook", key: facebookKey };
+  }
+
   return null;
 }
 
@@ -58,6 +100,55 @@ export function batchTargetForUrl(rawUrl) {
  * getting API responses (and therefore stays alive) while a long scan runs.
  */
 export async function profileScanChunk(options) {
+  if (options.provider === "facebook") {
+    function collectFacebookReels() {
+      const root = document.querySelector("[role='main']");
+      if (!root) {
+        return [];
+      }
+      const suggestionWords = ["suggested", "people also watched", "reels for you"];
+      const found = [];
+      root.querySelectorAll("a[href*='/reel/']").forEach((anchor) => {
+        if (anchor.closest("[role='complementary']")) {
+          return;
+        }
+        let node = anchor.parentElement;
+        while (node && node !== root) {
+          const heading = node.querySelector(":scope > h1, :scope > h2, :scope > h3");
+          const text = (heading?.textContent || "").toLowerCase();
+          if (text && suggestionWords.some((word) => text.includes(word))) {
+            return;
+          }
+          node = node.parentElement;
+        }
+        const match = /^\/reel\/(\d+)\/?$/.exec(new URL(anchor.href, window.location.href).pathname);
+        if (match) {
+          found.push(`https://www.facebook.com/reel/${match[1]}`);
+        }
+      });
+      return found;
+    }
+
+    function facebookProfileName() {
+      const og = document.querySelector("meta[property='og:title']");
+      if (og?.content?.trim()) {
+        return og.content.trim();
+      }
+      const heading = document.querySelector("[role='main'] h1");
+      if (heading?.textContent?.trim()) {
+        return heading.textContent.trim();
+      }
+      const title = (document.title || "")
+        .replace(/^\(\d+\+?\)\s*/, "")
+        .replace(/\s*\|\s*Facebook\s*$/i, "")
+        .trim();
+      return title || "";
+    }
+
+    const urls = Array.from(new Set(collectFacebookReels()));
+    return { ok: true, urls, profileName: facebookProfileName(), done: true };
+  }
+
   const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
   const hosts = new Set(options.hosts || []);
   const reserved = new Set(options.reserved || []);

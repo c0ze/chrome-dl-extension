@@ -60,3 +60,69 @@ test("Twitter scan collects only video-backed posts owned by the profile", async
   assert.ok(!urls.some((u) => u.includes("bob")), "quoted post must not leak");
   assert.ok(!urls.some((u) => u.includes("1002")), "views text is not video evidence");
 });
+
+test("batchTargetForUrl matches both Facebook reels URL forms", () => {
+  assert.deepEqual(
+    batchTargetForUrl("https://www.facebook.com/profile.php?id=61590939736806&sk=reels_tab"),
+    { provider: "facebook", key: "61590939736806" }
+  );
+  assert.deepEqual(batchTargetForUrl("https://www.facebook.com/somepage/reels"), {
+    provider: "facebook",
+    key: "somepage",
+  });
+  assert.equal(batchTargetForUrl("https://www.facebook.com/somepage/videos"), null);
+});
+
+test("Facebook scan collects grid reels and excludes suggestions", async () => {
+  withPage(
+    `<html><head>
+       <meta property="og:title" content="ネコ動画">
+     </head><body>
+       <div role="main">
+         <a href="/reel/1001">a</a>
+         <a href="/reel/1002/">b</a>
+         <a href="/somepage/posts/5">not a reel</a>
+         <section>
+           <h2>Reels for you</h2>
+           <a href="/reel/8001">suggested</a>
+         </section>
+       </div>
+       <div role="complementary">
+         <a href="/reel/9001">sidebar</a>
+       </div>
+     </body></html>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com"],
+    expectedUsername: "somepage",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+
+  assert.deepEqual((result.urls || []).sort(), [
+    "https://www.facebook.com/reel/1001",
+    "https://www.facebook.com/reel/1002",
+  ]);
+  assert.equal(result.profileName, "ネコ動画");
+});
+
+test("Facebook display name falls back through og:title, h1, then title", async () => {
+  withPage(
+    `<html><head><title>(12+) Some Creator | Facebook</title></head>
+     <body><div role="main"><a href="/reel/1">x</a></div></body></html>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  const result = await profileScanChunk({
+    provider: "facebook",
+    hosts: ["www.facebook.com"],
+    expectedUsername: "somepage",
+    budgetMs: 50,
+    maxPasses: 1,
+    progress: {},
+  });
+  assert.equal(result.profileName, "Some Creator");
+});
