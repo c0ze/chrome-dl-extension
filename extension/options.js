@@ -2,6 +2,7 @@ const HOST_NAME = "dev.arda.ytdlp_host";
 
 const elements = {
   browser: document.getElementById("browser"),
+  keyring: document.getElementById("keyring"),
   configPath: document.getElementById("config-path"),
   downloadDir: document.getElementById("download-dir"),
   extensionId: document.getElementById("extension-id"),
@@ -33,6 +34,8 @@ function parseArgs(text) {
 
 function renderConfig(config) {
   elements.browser.value = config.browser || "chrome";
+  elements.keyring.value = config.keyring || "";
+  elements.keyring.disabled = elements.browser.value === "firefox";
   elements.downloadDir.value = config.download_dir || "~/Downloads";
   elements.profile.value = config.profile || "";
   elements.ytDlpPath.value = config.yt_dlp_path || "yt-dlp";
@@ -42,6 +45,7 @@ function renderConfig(config) {
 function collectConfig() {
   return {
     browser: elements.browser.value.trim(),
+    keyring: elements.keyring.value,
     download_dir: elements.downloadDir.value.trim(),
     profile: elements.profile.value.trim(),
     yt_dlp_path: elements.ytDlpPath.value.trim(),
@@ -127,6 +131,10 @@ async function saveConfig() {
     elements.saveButton.disabled = false;
   }
 }
+
+elements.browser.addEventListener("change", () => {
+  elements.keyring.disabled = elements.browser.value === "firefox";
+});
 
 elements.reloadButton.addEventListener("click", () => {
   void loadConfig();

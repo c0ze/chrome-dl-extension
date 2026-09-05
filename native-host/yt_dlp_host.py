@@ -31,12 +31,14 @@ PRIVATE_FILE_MODE = 0o600
 PRIVATE_DIR_MODE = 0o700
 DEFAULT_CONFIG = {
     "browser": "chrome",
+    "keyring": "",
     "profile": "",
     "download_dir": "~/Downloads",
     "yt_dlp_path": "yt-dlp",
     "extra_args": [],
 }
 VALID_BROWSERS = {"chrome", "chromium", "brave", "edge", "firefox"}
+VALID_KEYRINGS = {"", "basictext", "gnomekeyring", "kwallet", "kwallet5", "kwallet6"}
 TWITTER_HOSTS = {
     "twitter.com",
     "www.twitter.com",
@@ -964,6 +966,7 @@ def safe_path_part(value: str, fallback: str = "download") -> str:
 def config_for_response(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "browser": config["browser"],
+        "keyring": config.get("keyring", ""),
         "profile": config["profile"],
         "download_dir": config["download_dir"],
         "yt_dlp_path": config["yt_dlp_path"],
@@ -978,6 +981,10 @@ def normalize_config(candidate: dict[str, Any]) -> dict[str, Any]:
     browser = str(config["browser"]).strip().lower()
     if browser not in VALID_BROWSERS:
         raise ValueError(f"Unsupported browser '{browser}'.")
+
+    keyring = str(config["keyring"]).strip().lower()
+    if keyring not in VALID_KEYRINGS:
+        raise ValueError(f"Unsupported cookie keyring '{keyring}'.")
 
     download_dir = str(config["download_dir"]).strip() or "~/Downloads"
     yt_dlp_path = str(config["yt_dlp_path"]).strip() or "yt-dlp"
@@ -995,6 +1002,7 @@ def normalize_config(candidate: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "browser": browser,
+        "keyring": keyring,
         "profile": profile,
         "download_dir": download_dir,
         "yt_dlp_path": yt_dlp_path,
@@ -1034,8 +1042,12 @@ def save_config(candidate: dict[str, Any]) -> dict[str, Any]:
 
 
 def browser_spec(config: dict[str, Any]) -> str:
+    browser = config["browser"]
+    keyring = config.get("keyring", "")
+    if keyring and browser != "firefox":
+        browser = f"{browser}+{keyring}"
     profile = config.get("profile", "")
-    return f"{config['browser']}:{profile}" if profile else config["browser"]
+    return f"{browser}:{profile}" if profile else browser
 
 
 def build_command(
@@ -1550,18 +1562,32 @@ def is_progress_update(updates: dict[str, Any]) -> bool:
     return updates.get("status_detail") == "Downloading" and set(updates).issubset(PROGRESS_UPDATE_KEYS)
 
 
+def cookie_failure_hint(line: str) -> str | None:
+    """Keep actionable cookie diagnostics when a later extractor error masks them."""
+    lowered = line.strip().lower()
+    if not lowered.startswith(("warning:", "error:")):
+        return None
+    if "secretstorage" in lowered and ("not available" in lowered or "not installed" in lowered):
+        return (
+            "Install SecretStorage in the Python environment used by the configured yt-dlp "
+            "executable so it can read the GNOME keyring."
+        )
+    if "cookie" in lowered and any(
+        phrase in lowered for phrase in ("cannot decrypt", "failed to decrypt", "could not be decrypted")
+    ):
+        return (
+            "Some browser cookies could not be decrypted, so the download may be missing your "
+            "signed-in session. Check the cookies browser, profile, and Cookie keyring in "
+            "extension Settings; select gnomekeyring if Chrome uses GNOME Keyring on Hyprland."
+        )
+    return None
+
+
 def run_yt_dlp(command: list[str], job_id: str) -> int:
     handle = open_log_stream()
-    if handle is None:
-        result = subprocess.run(
-            command,
-            check=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return result.returncode
-
+    # Parsing output and tracking the process must also work when logging fails.
+    cookie_hints: list[str] = []
+    last_error: str | None = None
     pending: dict[str, Any] = {}
     last_written = 0.0
     last_progress: float | None = None
@@ -1579,7 +1605,12 @@ def run_yt_dlp(command: list[str], job_id: str) -> int:
 
         assert process.stdout is not None
         for line in process.stdout:
+            hint = cookie_failure_hint(line)
+            if hint and hint not in cookie_hints:
+                cookie_hints.append(hint)
             updates = parse_progress_line(line)
+            if updates and updates.get("error"):
+                last_error = updates["error"]
             progress_only = bool(updates) and is_progress_update(updates)
             if not progress_only:
                 handle = write_log_stream(handle, line)
@@ -1609,6 +1640,11 @@ def run_yt_dlp(command: list[str], job_id: str) -> int:
             update_job(job_id, pending)
 
         return_code = process.wait()
+        if return_code:
+            error = last_error or f"yt-dlp exited with exit code {return_code}. See {LOG_PATH}."
+            update_job(job_id, {"error": "\n".join([error, *cookie_hints])})
+        else:
+            update_job(job_id, {"error": None})
         handle = write_log_stream(handle, f"=== Download finished with exit code {return_code} ===\n")
         return return_code
     finally:

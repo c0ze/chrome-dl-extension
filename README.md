@@ -115,6 +115,7 @@ Default config:
 ```json
 {
   "browser": "chrome",
+  "keyring": "",
   "profile": "",
   "download_dir": "~/Downloads",
   "yt_dlp_path": "yt-dlp",
@@ -123,6 +124,34 @@ Default config:
 ```
 
 You can edit that file manually or use the extension options page.
+
+### Cookie decryption failures on Linux
+
+If the log says `cannot decrypt v11 cookies: no key found`, yt-dlp can lose your
+signed-in session even though Chrome is signed in. X may then return
+`No video could be found in this tweet`. Failed downloads retain cookie
+diagnostics in the dashboard alongside the final extractor error.
+
+Set **Cookie keyring** in Options to the store Chrome actually uses. For
+Hyprland with GNOME Keyring this is `gnomekeyring`; automatic desktop detection
+can incorrectly choose `basictext`. The default empty `keyring` value retains
+yt-dlp's automatic detection. Explicit alternatives are `basictext`,
+`gnomekeyring`, `kwallet`, `kwallet5`, and `kwallet6`. Firefox ignores this field.
+The host passes it as `chrome+gnomekeyring:Profile 1` when a profile is selected.
+
+GNOME Keyring also requires `SecretStorage` in the **same Python environment as
+yt-dlp**, not merely the Python running the native host. Install the corresponding
+distribution package, or use a dedicated environment (with `uv` installed):
+
+```bash
+uv venv ~/.local/share/yt-dlp-browser-host/venv
+uv pip install --python ~/.local/share/yt-dlp-browser-host/venv/bin/python 'yt-dlp[default]' SecretStorage
+```
+
+Then set **yt-dlp path** in Options to the full absolute path of
+`~/.local/share/yt-dlp-browser-host/venv/bin/yt-dlp` (expand `~` to your home
+directory), select the correct keyring and profile, and retry the failed job.
+See [yt-dlp's cookie options and dependencies](https://github.com/yt-dlp/yt-dlp).
 
 ## Native Host Locations
 

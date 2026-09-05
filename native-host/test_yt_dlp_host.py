@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import unittest
 import unittest.mock
+import io
 from typing import Any
 
 import yt_dlp_host as host
@@ -520,6 +521,83 @@ class HandleMessageProfileNameTests(unittest.TestCase):
             )
 
         self.assertIsNone(captured["profile_name"])
+
+
+class CookieKeyringTests(unittest.TestCase):
+    def test_legacy_config_keeps_automatic_keyring(self) -> None:
+        config = host.normalize_config({"browser": "chrome", "profile": "Default"})
+        self.assertEqual(config["keyring"], "")
+        self.assertEqual(host.browser_spec(config), "chrome:Default")
+
+    def test_keyring_survives_settings_round_trip_and_command_building(self) -> None:
+        config = host.normalize_config({"keyring": " GNOMEKEYRING ", "profile": "Profile 1"})
+        config = host.normalize_config(host.config_for_response(config))
+        command = host.build_command("https://example.invalid/", config)
+        self.assertEqual(command[command.index("--cookies-from-browser") + 1],
+                         "chrome+gnomekeyring:Profile 1")
+
+    def test_keyring_without_profile(self) -> None:
+        config = host.normalize_config({"keyring": "kwallet6"})
+        self.assertEqual(host.browser_spec(config), "chrome+kwallet6")
+
+    def test_firefox_ignores_chromium_keyring_setting(self) -> None:
+        config = host.normalize_config({"browser": "firefox", "keyring": "gnomekeyring"})
+        self.assertEqual(host.browser_spec(config), "firefox")
+
+    def test_invalid_keyring_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            host.normalize_config({"keyring": "gnomekeyring:OtherProfile"})
+
+
+class DownloadDiagnosticsTests(unittest.TestCase):
+    def run_output(self, output: str, returncode: int, log_available: bool = True):
+        process = unittest.mock.MagicMock()
+        process.stdout = io.StringIO(output)
+        process.pid = 12345
+        process.wait.return_value = returncode
+        job = {}
+        log = io.StringIO() if log_available else None
+        with (
+            unittest.mock.patch.object(host, "open_log_stream", return_value=log),
+            unittest.mock.patch.object(host, "write_log_stream", side_effect=lambda handle, text: handle),
+            unittest.mock.patch.object(host.subprocess, "Popen", return_value=process),
+            unittest.mock.patch.object(host, "update_job", side_effect=lambda _, updates: job.update(updates)),
+        ):
+            code = host.run_yt_dlp(["yt-dlp", "https://example.invalid/"], "test-job")
+        self.assertEqual(code, returncode)
+        return job
+
+    def test_decryption_warning_explains_misleading_no_video_error(self) -> None:
+        job = self.run_output(
+            "WARNING: cannot decrypt v11 cookies: no key found\n"
+            "ERROR: [twitter] 123: No video could be found in this tweet\n", 1)
+        self.assertIn("No video", job["error"])
+        self.assertIn("cookie", job["error"].lower())
+        self.assertIn("keyring", job["error"].lower())
+
+    def test_missing_secretstorage_is_not_overwritten_by_extractor_error(self) -> None:
+        job = self.run_output(
+            "ERROR: secretstorage not available as the `secretstorage` module is not installed.\n"
+            "ERROR: [twitter] 123: Could not authenticate you\n", 1)
+        self.assertIn("SecretStorage", job["error"])
+        self.assertIn("Could not authenticate", job["error"])
+
+    def test_diagnostics_and_pid_still_work_without_log_file(self) -> None:
+        job = self.run_output("ERROR: network unavailable\n", 1, log_available=False)
+        self.assertEqual(job["pid"], 12345)
+        self.assertEqual(job["error"], "ERROR: network unavailable")
+
+    def test_success_clears_recovered_errors(self) -> None:
+        job = self.run_output("ERROR: temporary failure\n[download] 100%\n", 0)
+        self.assertIsNone(job["error"])
+
+    def test_success_with_unrelated_cookie_warning_is_not_an_error(self) -> None:
+        job = self.run_output("WARNING: cannot decrypt v11 cookies: no key found\n", 0)
+        self.assertIsNone(job.get("error"))
+
+    def test_nonzero_exit_without_error_line_has_useful_error(self) -> None:
+        job = self.run_output("", 2)
+        self.assertIn("exit code 2", job["error"])
 
 
 if __name__ == "__main__":
