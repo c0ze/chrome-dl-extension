@@ -83,6 +83,21 @@
           </div>
 
           <label class="field">
+            <span>Cookie keyring (Linux Chromium browsers)</span>
+            <select id="keyring" name="keyring" aria-describedby="keyring-help">
+              <option value="">Automatic</option>
+              <option value="gnomekeyring">gnomekeyring</option>
+              <option value="kwallet">kwallet</option>
+              <option value="kwallet5">kwallet5</option>
+              <option value="kwallet6">kwallet6</option>
+              <option value="basictext">basictext</option>
+            </select>
+            <small id="keyring-help">Select the keyring Chrome uses if automatic detection cannot decrypt cookies.
+              On Hyprland with GNOME Keyring, choose gnomekeyring. This requires SecretStorage
+              in yt-dlp's Python environment. Firefox does not use this setting.</small>
+          </label>
+
+          <label class="field">
             <span><code>yt-dlp</code> path</span>
             <input id="yt-dlp-path" name="ytDlpPath" type="text" placeholder="yt-dlp">
           </label>
