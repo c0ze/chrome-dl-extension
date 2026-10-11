@@ -94,6 +94,12 @@ is loaded.
 - If a download is interrupted because its worker process died, for example on
   reboot or if the process was killed, the host detects this on the next
   dashboard refresh, marks the job `Interrupted`, and resumes the queue.
+- If yt-dlp cannot run at all, because the configured `yt-dlp` path is missing
+  or yt-dlp rejects its options (exit code 2, often a bad extra argument), only
+  that job fails and the queue pauses instead of failing every queued video.
+  Once the problem is fixed, the queue resumes the next time the download page
+  is open or a new download is queued. The pause backs off from 2 seconds up to
+  a minute between attempts.
 - If a URL is already queued, running, or completed in the dashboard, the
   extension asks before queueing a duplicate. Profile media scans use the same
   duplicate check for every discovered video URL. Cancelled downloads do not
