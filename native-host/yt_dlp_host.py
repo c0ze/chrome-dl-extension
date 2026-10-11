@@ -1900,6 +1900,9 @@ def run_download_worker(encoded_payload: str) -> int:
         config = load_config()
         command = build_command(url, config, download_dir_override)
         download_dir = resolve_download_dir(download_dir_override or config["download_dir"])
+        # Checked again here: the folder may have vanished since the job was
+        # queued, and the job may come from the config default or a retry.
+        require_download_dir_parent(download_dir)
 
         safe_url = redact_url(url)
         log_line(f"Starting download for {safe_url} from {source}")
@@ -2013,7 +2016,9 @@ def start_download_job(
     normalized_download_dir = None
     if download_dir_override is not None:
         normalized_download_dir = str(download_dir_override).strip()
-        require_download_dir_parent(resolve_download_dir(normalized_download_dir))
+    require_download_dir_parent(
+        resolve_download_dir(normalized_download_dir or load_config()["download_dir"])
+    )
 
     started_at = timestamp()
     new_job = {
