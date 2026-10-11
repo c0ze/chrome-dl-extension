@@ -627,6 +627,35 @@ class CookieProfileDetectionTests(unittest.TestCase):
         self.assertEqual(os.environ[host.EXTENSION_ID_ENV], EXTENSION_ID)
 
 
+class DownloadDirValidationTests(unittest.TestCase):
+    def test_accepts_absolute_and_home_relative_paths(self) -> None:
+        self.assertEqual(host.resolve_download_dir("/srv/videos"), "/srv/videos")
+        self.assertEqual(host.resolve_download_dir(" ~/Downloads "), os.path.expanduser("~/Downloads"))
+
+    def test_rejects_paths_that_would_land_in_the_host_directory(self) -> None:
+        # A relative path resolves against the worker's working directory, so
+        # smb://host/share used to create ./smb:/host/share inside the app dir.
+        for value in ["smb://nas.local/home/videos", "Videos", "./x", "file:///tmp/x", ""]:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                host.resolve_download_dir(value)
+
+    def test_config_rejects_relative_download_dir(self) -> None:
+        with self.assertRaises(ValueError):
+            host.normalize_config({"download_dir": "smb://nas.local/share"})
+
+    def test_single_download_rejects_relative_download_dir(self) -> None:
+        with unittest.mock.patch.object(host, "mutate_jobs") as mutate_jobs, self.assertRaises(ValueError):
+            host.start_download_job("https://x.com/a/status/1", "toolbar", "smb://nas.local/share")
+        mutate_jobs.assert_not_called()
+
+    def test_profile_download_rejects_relative_download_dir(self) -> None:
+        with unittest.mock.patch.object(host, "mutate_jobs") as mutate_jobs, self.assertRaises(ValueError):
+            host.start_profile_download_jobs(
+                "https://x.com/a/media", "toolbar", "smb://nas.local/share", ["https://x.com/a/status/1"]
+            )
+        mutate_jobs.assert_not_called()
+
+
 class DownloadDiagnosticsTests(unittest.TestCase):
     def run_output(self, output: str, returncode: int, log_available: bool = True):
         process = unittest.mock.MagicMock()

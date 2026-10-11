@@ -997,6 +997,7 @@ def normalize_config(candidate: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Unsupported cookie keyring '{keyring}'.")
 
     download_dir = str(config["download_dir"]).strip() or "~/Downloads"
+    resolve_download_dir(download_dir)
     yt_dlp_path = str(config["yt_dlp_path"]).strip() or "yt-dlp"
     profile = str(config["profile"]).strip()
 
@@ -1051,6 +1052,22 @@ def save_config(candidate: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+def resolve_download_dir(value: Any) -> str:
+    """Expand a download folder, rejecting anything that is not an absolute path.
+
+    yt-dlp resolves a relative -P against the worker's working directory, so a
+    URI such as smb://host/share would silently land inside the host's app dir.
+    """
+    text = str(value or "").strip()
+    path = os.path.expanduser(text)
+    if not os.path.isabs(path):
+        raise ValueError(
+            f"Download folder must be an absolute local path, not '{text}'. "
+            "Mount network shares first and use the mounted folder path."
+        )
+    return path
+
+
 def remember_extension_origin(argv: list[str]) -> None:
     for arg in argv[1:]:
         match = EXTENSION_ORIGIN_RE.fullmatch(arg)
@@ -1103,8 +1120,7 @@ def build_command(
     config: dict[str, Any],
     download_dir_override: str | None = None,
 ) -> list[str]:
-    download_dir_value = str(download_dir_override or config["download_dir"]).strip()
-    download_dir = os.path.expanduser(download_dir_value)
+    download_dir = resolve_download_dir(download_dir_override or config["download_dir"])
 
     command = [
         config["yt_dlp_path"],
@@ -1723,7 +1739,7 @@ def run_download_worker(encoded_payload: str) -> int:
         download_dir_override = payload.get("download_dir")
         config = load_config()
         command = build_command(url, config, download_dir_override)
-        download_dir = os.path.expanduser(str(download_dir_override or config["download_dir"]).strip())
+        download_dir = resolve_download_dir(download_dir_override or config["download_dir"])
 
         safe_url = redact_url(url)
         notify("yt-dlp download started", safe_url)
@@ -1822,8 +1838,7 @@ def start_download_job(
     normalized_download_dir = None
     if download_dir_override is not None:
         normalized_download_dir = str(download_dir_override).strip()
-        if not normalized_download_dir:
-            raise ValueError("download_dir must be a non-empty string when provided.")
+        resolve_download_dir(normalized_download_dir)
 
     started_at = timestamp()
     new_job = {
@@ -1892,8 +1907,7 @@ def start_profile_download_jobs(
     else:
         base_download_dir = str(download_dir_override).strip()
 
-    if not base_download_dir:
-        raise ValueError("download_dir must be a non-empty string when provided.")
+    base_download_path = resolve_download_dir(base_download_dir)
 
     video_urls: list[str] = []
     seen_urls: set[str] = set()
@@ -1938,7 +1952,7 @@ def start_profile_download_jobs(
     folder_name = safe_path_part(
         profile_name_stripped or url_decoded_name or target["key"], fallback=target["key"]
     )
-    profile_dir = Path(os.path.expanduser(base_download_dir)) / folder_name
+    profile_dir = Path(base_download_path) / folder_name
     started_at = timestamp()
 
     def make_job(video_url: str, index: int) -> dict[str, Any]:
