@@ -2068,12 +2068,14 @@ def start_profile_download_jobs(
             "capped_count": capped_count,
         }
 
+    # Create the folder before queueing, so a folder that cannot be created
+    # fails the request instead of leaving a batch queued but not started.
+    profile_dir.mkdir(parents=True, exist_ok=True)
     response = mutate_jobs(mutator)
     if not response.get("ok"):
         return response
 
     queued_jobs = response["queued_jobs"]
-    profile_dir.mkdir(parents=True, exist_ok=True)
     launch_result = launch_next_queued_job(queued_jobs[0]["id"])
     return {
         "ok": True,
