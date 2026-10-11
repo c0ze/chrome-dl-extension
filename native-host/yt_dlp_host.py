@@ -149,7 +149,7 @@ PROC_STAT_PGRP_INDEX = 2
 PROC_STAT_START_TICKS_INDEX = 19
 REDACTED = "***"
 SENSITIVE_VALUE_FLAGS = {
-    "--add-header",
+    "--add-headers",
     "--ap-password",
     "--ap-username",
     "--client-certificate-password",
@@ -157,11 +157,15 @@ SENSITIVE_VALUE_FLAGS = {
     "--http-header",
     "--netrc-cmd",
     "--password",
+    "--twofactor",
     "--username",
     "--video-password",
+    "-2",
     "-p",
     "-u",
 }
+# yt-dlp also accepts "-pSECRET" for these short flags.
+SENSITIVE_ATTACHED_SHORT_RE = re.compile(r"-[pu2].+")
 SENSITIVE_KEY_HINTS = (
     "auth",
     "credential",
@@ -722,6 +726,15 @@ def redact_url(raw_url: Any) -> str:
     return urlunparse(parsed._replace(netloc=netloc, query=query))
 
 
+def is_sensitive_flag(flag: str) -> bool:
+    if flag in SENSITIVE_VALUE_FLAGS:
+        return True
+    # optparse accepts any unambiguous prefix of a long option, such as --passw.
+    return len(flag) > 3 and flag.startswith("--") and any(
+        option.startswith(flag) for option in SENSITIVE_VALUE_FLAGS
+    )
+
+
 def redact_command(command: list[str]) -> str:
     parts: list[str] = []
     redact_next = False
@@ -732,14 +745,18 @@ def redact_command(command: list[str]) -> str:
             redact_next = False
             continue
 
-        if text in SENSITIVE_VALUE_FLAGS:
+        if is_sensitive_flag(text):
             parts.append(text)
             redact_next = True
             continue
 
         flag, separator, _ = text.partition("=")
-        if separator and flag in SENSITIVE_VALUE_FLAGS:
+        if separator and is_sensitive_flag(flag):
             parts.append(f"{flag}={REDACTED}")
+            continue
+
+        if SENSITIVE_ATTACHED_SHORT_RE.fullmatch(text):
+            parts.append(f"{text[:2]}{REDACTED}")
             continue
 
         parts.append(redact_url(text) if "://" in text else text)

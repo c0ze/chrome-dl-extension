@@ -701,6 +701,21 @@ class WorkerFailureBackoffTests(unittest.TestCase):
         clear_failures.assert_called_once()
 
 
+class RedactCommandTests(unittest.TestCase):
+    def test_redacts_every_form_yt_dlp_accepts(self) -> None:
+        command = [
+            "yt-dlp", "--add-headers", "Authorization: Bearer XYZ", "--add-header", "Cookie: c=1",
+            "-psecret", "--passw", "pw2", "-2", "123456", "--password=pw3", "-uuser", "--twofactor=7",
+        ]
+        redacted = host.redact_command(command)
+        for secret in ["XYZ", "c=1", "secret", "pw2", "123456", "pw3", "user", "=7"]:
+            self.assertNotIn(secret, redacted)
+
+    def test_keeps_ordinary_arguments(self) -> None:
+        command = ["yt-dlp", "--newline", "--cookies-from-browser", "chrome", "-P", "/srv/v", "-o", "%(id)s"]
+        self.assertEqual(host.redact_command(command), " ".join(command))
+
+
 class DownloadDiagnosticsTests(unittest.TestCase):
     def run_output(self, output: str, returncode: int, log_available: bool = True):
         process = unittest.mock.MagicMock()
