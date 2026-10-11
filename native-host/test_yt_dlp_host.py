@@ -1,9 +1,13 @@
 """Unit tests for the yt-dlp native messaging host."""
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 import unittest
 import unittest.mock
 import io
+from pathlib import Path
 from typing import Any
 
 import yt_dlp_host as host
@@ -549,6 +553,80 @@ class CookieKeyringTests(unittest.TestCase):
             host.normalize_config({"keyring": "gnomekeyring:OtherProfile"})
 
 
+EXTENSION_ID = "a" * 32
+
+
+class CookieProfileDetectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.config_home = Path(temp.name)
+        env = unittest.mock.patch.dict(
+            os.environ,
+            {"XDG_CONFIG_HOME": str(self.config_home), host.EXTENSION_ID_ENV: EXTENSION_ID},
+        )
+        env.start()
+        self.addCleanup(env.stop)
+
+    def add_profile(self, name: str, extension_ids: list[str], root: str = "google-chrome") -> None:
+        profile_dir = self.config_home / root / name
+        profile_dir.mkdir(parents=True)
+        settings = {extension_id: {} for extension_id in extension_ids}
+        (profile_dir / "Preferences").write_text(json.dumps({"extensions": {"settings": settings}}))
+
+    def test_empty_profile_uses_the_only_profile_with_the_extension(self) -> None:
+        # Without a profile, yt-dlp reads whichever profile wrote cookies last,
+        # which may not be signed in to the site being downloaded.
+        self.add_profile("Default", ["b" * 32])
+        self.add_profile("Profile 5", [EXTENSION_ID])
+        self.add_profile("Profile 9", [])
+        config = host.normalize_config({"keyring": "gnomekeyring"})
+        self.assertEqual(host.browser_spec(config), "chrome+gnomekeyring:Profile 5")
+
+    def test_explicit_profile_wins(self) -> None:
+        self.add_profile("Profile 5", [EXTENSION_ID])
+        config = host.normalize_config({"profile": "Default"})
+        self.assertEqual(host.browser_spec(config), "chrome:Default")
+
+    def test_ambiguous_install_keeps_yt_dlp_default(self) -> None:
+        self.add_profile("Default", [EXTENSION_ID])
+        self.add_profile("Profile 5", [EXTENSION_ID])
+        self.assertEqual(host.browser_spec(host.normalize_config({})), "chrome")
+
+    def test_unknown_extension_id_keeps_yt_dlp_default(self) -> None:
+        self.add_profile("Profile 5", [EXTENSION_ID])
+        with unittest.mock.patch.dict(os.environ):
+            del os.environ[host.EXTENSION_ID_ENV]
+            self.assertEqual(host.browser_spec(host.normalize_config({})), "chrome")
+
+    def test_unreadable_preferences_are_skipped(self) -> None:
+        broken = self.config_home / "google-chrome" / "Default"
+        broken.mkdir(parents=True)
+        (broken / "Preferences").write_text("{not json")
+        self.add_profile("Profile 5", [EXTENSION_ID])
+        self.assertEqual(host.browser_spec(host.normalize_config({})), "chrome:Profile 5")
+
+    def test_uses_the_configured_browser_data_dir(self) -> None:
+        self.add_profile("Default", [EXTENSION_ID])
+        self.add_profile("Profile 2", [EXTENSION_ID], root="BraveSoftware/Brave-Browser")
+        config = host.normalize_config({"browser": "brave"})
+        self.assertEqual(host.browser_spec(config), "brave:Profile 2")
+
+    def test_firefox_is_not_probed(self) -> None:
+        self.add_profile("Default", [EXTENSION_ID])
+        self.assertEqual(host.browser_spec(host.normalize_config({"browser": "firefox"})), "firefox")
+
+    def test_remember_extension_origin_reads_chrome_caller_argument(self) -> None:
+        with unittest.mock.patch.dict(os.environ):
+            del os.environ[host.EXTENSION_ID_ENV]
+            host.remember_extension_origin(["host.py", f"chrome-extension://{'c' * 32}/"])
+            self.assertEqual(os.environ[host.EXTENSION_ID_ENV], "c" * 32)
+
+    def test_remember_extension_origin_ignores_other_arguments(self) -> None:
+        host.remember_extension_origin(["host.py", "--parent-window=0", "chrome-extension://bad/"])
+        self.assertEqual(os.environ[host.EXTENSION_ID_ENV], EXTENSION_ID)
+
+
 class DownloadDiagnosticsTests(unittest.TestCase):
     def run_output(self, output: str, returncode: int, log_available: bool = True):
         process = unittest.mock.MagicMock()
@@ -594,6 +672,15 @@ class DownloadDiagnosticsTests(unittest.TestCase):
     def test_success_with_unrelated_cookie_warning_is_not_an_error(self) -> None:
         job = self.run_output("WARNING: cannot decrypt v11 cookies: no key found\n", 0)
         self.assertIsNone(job.get("error"))
+
+    def test_guest_fallback_explains_missing_x_session(self) -> None:
+        job = self.run_output(
+            "Extracted 89 cookies from chrome\n"
+            "[twitter] 123: Downloading guest token\n"
+            "ERROR: [twitter] 123: No video could be found in this tweet\n", 1)
+        self.assertIn("No video", job["error"])
+        self.assertIn("guest", job["error"])
+        self.assertIn("profile", job["error"].lower())
 
     def test_nonzero_exit_without_error_line_has_useful_error(self) -> None:
         job = self.run_output("", 2)

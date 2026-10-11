@@ -39,6 +39,16 @@ DEFAULT_CONFIG = {
 }
 VALID_BROWSERS = {"chrome", "chromium", "brave", "edge", "firefox"}
 VALID_KEYRINGS = {"", "basictext", "gnomekeyring", "kwallet", "kwallet5", "kwallet6"}
+# Linux user data directories, relative to $XDG_CONFIG_HOME, matching yt-dlp's.
+CHROMIUM_CONFIG_DIRS = {
+    "chrome": "google-chrome",
+    "chromium": "chromium",
+    "brave": "BraveSoftware/Brave-Browser",
+    "edge": "microsoft-edge",
+}
+# Chrome passes the caller origin to the host; workers inherit it through this.
+EXTENSION_ID_ENV = "YT_DLP_HOST_EXTENSION_ID"
+EXTENSION_ORIGIN_RE = re.compile(r"chrome-extension://([a-p]{32})/?")
 TWITTER_HOSTS = {
     "twitter.com",
     "www.twitter.com",
@@ -1041,12 +1051,50 @@ def save_config(candidate: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+def remember_extension_origin(argv: list[str]) -> None:
+    for arg in argv[1:]:
+        match = EXTENSION_ORIGIN_RE.fullmatch(arg)
+        if match:
+            os.environ[EXTENSION_ID_ENV] = match.group(1)
+            return
+
+
+def extension_profile(browser: str) -> str:
+    """Return the browser profile this extension is installed in, if unambiguous.
+
+    With no profile, yt-dlp reads the most recently written cookie database of
+    any profile, which may not be signed in to the site being downloaded.
+    """
+    config_dir = CHROMIUM_CONFIG_DIRS.get(browser)
+    extension_id = os.environ.get(EXTENSION_ID_ENV, "")
+    if not config_dir or not extension_id:
+        return ""
+
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    try:
+        candidates = sorted((config_home / config_dir).glob("*/Preferences"))
+    except OSError:
+        return ""
+
+    matches = []
+    for preferences_path in candidates:
+        try:
+            with preferences_path.open("r", encoding="utf-8") as handle:
+                preferences = json.load(handle)
+            settings = preferences["extensions"]["settings"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if isinstance(settings, dict) and extension_id in settings:
+            matches.append(preferences_path.parent.name)
+    return matches[0] if len(matches) == 1 else ""
+
+
 def browser_spec(config: dict[str, Any]) -> str:
     browser = config["browser"]
+    profile = config.get("profile", "") or extension_profile(browser)
     keyring = config.get("keyring", "")
     if keyring and browser != "firefox":
         browser = f"{browser}+{keyring}"
-    profile = config.get("profile", "")
     return f"{browser}:{profile}" if profile else browser
 
 
@@ -1583,6 +1631,20 @@ def cookie_failure_hint(line: str) -> str | None:
     return None
 
 
+GUEST_FALLBACK_HINT = (
+    "yt-dlp found no X/Twitter login in the browser cookies it read and fell back to "
+    "guest access, which cannot see sensitive or restricted posts. Set the cookies "
+    "profile in extension Settings to the browser profile that is signed in to X "
+    "(for example Default or Profile 1)."
+)
+
+
+def guest_fallback_hint(line: str) -> str | None:
+    if line.startswith("[twitter]") and line.rstrip().endswith("Downloading guest token"):
+        return GUEST_FALLBACK_HINT
+    return None
+
+
 def run_yt_dlp(command: list[str], job_id: str) -> int:
     handle = open_log_stream()
     # Parsing output and tracking the process must also work when logging fails.
@@ -1605,7 +1667,7 @@ def run_yt_dlp(command: list[str], job_id: str) -> int:
 
         assert process.stdout is not None
         for line in process.stdout:
-            hint = cookie_failure_hint(line)
+            hint = cookie_failure_hint(line) or guest_fallback_hint(line)
             if hint and hint not in cookie_hints:
                 cookie_hints.append(hint)
             updates = parse_progress_line(line)
@@ -2057,6 +2119,8 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
 def main() -> int:
     if len(sys.argv) == 3 and sys.argv[1] == "--worker":
         return run_download_worker(sys.argv[2])
+
+    remember_extension_origin(sys.argv)
 
     try:
         message = read_message()
