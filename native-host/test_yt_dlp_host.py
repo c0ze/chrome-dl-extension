@@ -766,6 +766,20 @@ class SaveConfigTests(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in Path(temp).iterdir()), ["config.json"])
 
 
+class ReadJobsTests(unittest.TestCase):
+    def read(self, raw: bytes) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory() as temp:
+            jobs_path = Path(temp) / "downloads.json"
+            jobs_path.write_bytes(raw)
+            with unittest.mock.patch.object(host, "JOBS_PATH", jobs_path):
+                return host.read_jobs_unlocked()
+
+    def test_unexpected_shapes_read_as_empty_state(self) -> None:
+        for raw in [b"[]", b"null", b"\xff\xfe", b"{not json"]:
+            with self.subTest(raw=raw):
+                self.assertEqual(self.read(raw)["jobs"], [])
+
+
 class DownloadDiagnosticsTests(unittest.TestCase):
     def run_output(self, output: str, returncode: int, log_available: bool = True):
         process = unittest.mock.MagicMock()
