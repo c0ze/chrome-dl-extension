@@ -1062,9 +1062,13 @@ def load_config() -> dict[str, Any]:
 def save_config(candidate: dict[str, Any]) -> dict[str, Any]:
     config = normalize_config(candidate)
     ensure_state()
-    with open_private(CONFIG_PATH, "w") as handle:
+    # Workers read the config while Options may be saving it; a truncated
+    # file would make them fall back to the defaults, so replace it atomically.
+    temp_path = CONFIG_PATH.with_name(f"{CONFIG_PATH.name}.{os.getpid()}.tmp")
+    with open_private(temp_path, "w") as handle:
         json.dump(config, handle, indent=2)
         handle.write("\n")
+    temp_path.replace(CONFIG_PATH)
     return config
 
 
