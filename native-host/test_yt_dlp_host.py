@@ -867,6 +867,37 @@ class MissingDownloadDirTests(unittest.TestCase):
         with self.assertRaises(host.MissingDownloadDir):
             host.require_download_dir_parent(str(self.root / "gone" / "share" / "videos"))
 
+    def test_config_default_folder_is_checked_too(self) -> None:
+        config = {**host.DEFAULT_CONFIG, "download_dir": str(self.root / "gone" / "share")}
+        with (
+            unittest.mock.patch.object(host, "load_config", return_value=config),
+            unittest.mock.patch.object(host, "mutate_jobs") as mutate_jobs,
+        ):
+            response = host.handle_message({"type": "download", "url": "https://x.com/a/status/1"})
+        mutate_jobs.assert_not_called()
+        self.assertTrue(response["missing_dir"])
+
+    def test_worker_refuses_a_folder_that_vanished_after_queueing(self) -> None:
+        payload = host.encode_worker_payload({
+            "id": "job", "url": "https://x.com/a/status/1",
+            "download_dir": str(self.root / "gone" / "share" / "a"),
+        })
+        with (
+            unittest.mock.patch.object(host, "load_config", return_value=dict(host.DEFAULT_CONFIG)),
+            unittest.mock.patch.object(host, "update_job") as update_job,
+            unittest.mock.patch.object(host, "claim_job", return_value=True),
+            unittest.mock.patch.object(host, "notify"),
+            unittest.mock.patch.object(host, "log_line"),
+            unittest.mock.patch.object(host, "run_yt_dlp") as run_yt_dlp,
+            unittest.mock.patch.object(host, "record_launch_failure") as record_failure,
+            unittest.mock.patch.object(host, "launch_next_queued_job") as launch_next,
+        ):
+            self.assertEqual(host.run_download_worker(payload), 1)
+        run_yt_dlp.assert_not_called()
+        launch_next.assert_not_called()
+        record_failure.assert_called_once()
+        self.assertIn("does not exist", update_job.call_args.args[1]["error"])
+
     def test_download_message_reports_missing_folder(self) -> None:
         stale = str(self.root / "gone" / "share" / "videos")
         with unittest.mock.patch.object(host, "mutate_jobs") as mutate_jobs:
