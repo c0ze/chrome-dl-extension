@@ -620,6 +620,15 @@ class CookieProfileDetectionTests(unittest.TestCase):
         self.add_profile("Profile 5", [EXTENSION_ID])
         self.assertEqual(host.browser_spec(host.normalize_config({})), "chrome")
 
+    def test_malformed_preferences_make_the_match_unknown(self) -> None:
+        self.add_profile("Profile 5", [EXTENSION_ID])
+        other = self.config_home / "google-chrome" / "Default"
+        other.mkdir(parents=True)
+        for value in [None, [], {"extensions": None}, {"extensions": {"settings": []}}]:
+            with self.subTest(value=value):
+                (other / "Preferences").write_text(json.dumps(value))
+                self.assertEqual(host.browser_spec(host.normalize_config({})), "chrome")
+
     def test_preferences_without_extensions_are_skipped(self) -> None:
         other = self.config_home / "google-chrome" / "Default"
         other.mkdir(parents=True)
@@ -788,6 +797,24 @@ class RedactCommandTests(unittest.TestCase):
         for command in (["-qpSECRET"], ["-qu", "SECRET"], ["-q2SECRET"], ["-vp", "SECRET"]):
             with self.subTest(command=command):
                 self.assertNotIn("SECRET", host.redact_command(["yt-dlp", *command]))
+
+    def test_short_option_values_are_not_read_as_credential_flags(self) -> None:
+        for group in ["-N2", "-o./clip", "-fbestup", "-x"]:
+            with self.subTest(group=group):
+                redacted = host.redact_command(["yt-dlp", group, "--password", "SECRET"])
+                self.assertEqual(redacted, f"yt-dlp {group} --password ***")
+
+    def test_launcher_does_not_overwrite_a_newer_reservation(self) -> None:
+        state = {"jobs": [{"id": "a", "url": "https://x.com/a/status/1", "status": "running",
+                           "attempt": "new", "worker_pid": 222}]}
+        process = unittest.mock.MagicMock(pid=111)
+        with (
+            unittest.mock.patch.object(host, "mutate_jobs", side_effect=lambda mutator: mutator(state)),
+            unittest.mock.patch.object(host.subprocess, "Popen", return_value=process),
+            unittest.mock.patch.object(host, "process_start_ticks", return_value=1),
+        ):
+            self.assertTrue(host.launch_reserved_job({"id": "a", "url": "https://x.com/a/status/1", "attempt": "old"}))
+        self.assertEqual(state["jobs"][0]["worker_pid"], 222)
 
     def test_keeps_ordinary_arguments(self) -> None:
         command = ["yt-dlp", "--newline", "--cookies-from-browser", "chrome", "-P", "/srv/v", "-o", "%(id)s"]
