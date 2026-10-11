@@ -1162,6 +1162,24 @@ def resolve_download_dir(value: Any) -> str:
     return path
 
 
+class MissingDownloadDir(ValueError):
+    """The download folder and its parent are both missing."""
+
+
+def require_download_dir_parent(path: str) -> None:
+    """Refuse a folder whose parent is missing instead of creating the whole chain.
+
+    yt-dlp and the batch mkdir would otherwise rebuild a stale path, such as a
+    remembered folder on a network share that has since moved, on local disk.
+    """
+    if os.path.isdir(path) or os.path.isdir(os.path.dirname(path.rstrip("/")) or "/"):
+        return
+    raise MissingDownloadDir(
+        f"Download folder '{path}' does not exist, and neither does its parent folder. "
+        "If it is on a network share, check that the share is mounted at that path."
+    )
+
+
 def remember_extension_origin(argv: list[str]) -> None:
     for arg in argv[1:]:
         match = EXTENSION_ORIGIN_RE.fullmatch(arg)
@@ -1995,7 +2013,7 @@ def start_download_job(
     normalized_download_dir = None
     if download_dir_override is not None:
         normalized_download_dir = str(download_dir_override).strip()
-        resolve_download_dir(normalized_download_dir)
+        require_download_dir_parent(resolve_download_dir(normalized_download_dir))
 
     started_at = timestamp()
     new_job = {
@@ -2065,6 +2083,7 @@ def start_profile_download_jobs(
         base_download_dir = str(download_dir_override).strip()
 
     base_download_path = resolve_download_dir(base_download_dir)
+    require_download_dir_parent(base_download_path)
 
     video_urls: list[str] = []
     seen_urls: set[str] = set()
@@ -2196,38 +2215,45 @@ def start_profile_download_jobs(
     }
 
 
+def handle_download_message(message: dict[str, Any]) -> dict[str, Any]:
+    url = str(message.get("url", "")).strip()
+    if not url:
+        raise ValueError("Missing url field.")
+    source = str(message.get("source", "extension")).strip() or "extension"
+    download_dir = message.get("download_dir")
+    if download_dir is not None and not isinstance(download_dir, str):
+        raise ValueError("download_dir must be a string when provided.")
+    allow_duplicate = bool(message.get("allow_duplicate", False))
+    profile_name = message.get("profile_name")
+    if profile_name is not None and not isinstance(profile_name, str):
+        raise ValueError("profile_name must be a string when provided.")
+    if profile_name is not None and len(profile_name) > MAX_PROFILE_NAME_CHARS:
+        profile_name = profile_name[:MAX_PROFILE_NAME_CHARS]
+    if batch_target_for_url(url):
+        raw_profile_urls = message.get("profile_urls")
+        if not isinstance(raw_profile_urls, list):
+            raw_profile_urls = []
+        profile_urls = [str(profile_url).strip() for profile_url in raw_profile_urls]
+        profile_urls = [profile_url for profile_url in profile_urls if profile_url]
+        return start_profile_download_jobs(
+            url,
+            source,
+            download_dir,
+            profile_urls,
+            allow_duplicate,
+            profile_name,
+        )
+    return start_download_job(url, source, download_dir, allow_duplicate)
+
+
 def handle_message(message: dict[str, Any]) -> dict[str, Any]:
     message_type = message.get("type")
 
     if message_type == "download":
-        url = str(message.get("url", "")).strip()
-        if not url:
-            raise ValueError("Missing url field.")
-        source = str(message.get("source", "extension")).strip() or "extension"
-        download_dir = message.get("download_dir")
-        if download_dir is not None and not isinstance(download_dir, str):
-            raise ValueError("download_dir must be a string when provided.")
-        allow_duplicate = bool(message.get("allow_duplicate", False))
-        profile_name = message.get("profile_name")
-        if profile_name is not None and not isinstance(profile_name, str):
-            raise ValueError("profile_name must be a string when provided.")
-        if profile_name is not None and len(profile_name) > MAX_PROFILE_NAME_CHARS:
-            profile_name = profile_name[:MAX_PROFILE_NAME_CHARS]
-        if batch_target_for_url(url):
-            raw_profile_urls = message.get("profile_urls")
-            if not isinstance(raw_profile_urls, list):
-                raw_profile_urls = []
-            profile_urls = [str(profile_url).strip() for profile_url in raw_profile_urls]
-            profile_urls = [profile_url for profile_url in profile_urls if profile_url]
-            return start_profile_download_jobs(
-                url,
-                source,
-                download_dir,
-                profile_urls,
-                allow_duplicate,
-                profile_name,
-            )
-        return start_download_job(url, source, download_dir, allow_duplicate)
+        try:
+            return handle_download_message(message)
+        except MissingDownloadDir as error:
+            return {"ok": False, "missing_dir": True, "error": str(error)}
 
     if message_type == "get_config":
         config = load_config()
