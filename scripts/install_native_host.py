@@ -5,6 +5,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import shutil
 import stat
 from pathlib import Path
@@ -62,8 +63,23 @@ def write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def install_host_script(source_path: Path) -> None:
+def ensure_install_dir() -> None:
+    # The config can hold credentials in extra_args, so match the host's
+    # private modes: 0700 for the directory and 0600 for the config.
     INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+    INSTALL_DIR.chmod(0o700)
+
+
+def write_private_json(path: Path, payload: dict) -> None:
+    ensure_install_dir()
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(descriptor, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, indent=2) + "\n")
+
+
+def install_host_script(source_path: Path) -> None:
+    ensure_install_dir()
     shutil.copy2(source_path, HOST_SCRIPT_PATH)
     current_mode = HOST_SCRIPT_PATH.stat().st_mode
     HOST_SCRIPT_PATH.chmod(current_mode | stat.S_IXUSR)
@@ -106,7 +122,7 @@ def main() -> int:
         existing_config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 
     config = merge_config(existing_config, args)
-    write_json(CONFIG_PATH, config)
+    write_private_json(CONFIG_PATH, config)
 
     native_host_dir = NATIVE_HOST_DIRS[args.browser]
     native_host_manifest_path = native_host_dir / f"{HOST_NAME}.json"
