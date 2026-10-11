@@ -716,6 +716,21 @@ class RedactCommandTests(unittest.TestCase):
         self.assertEqual(host.redact_command(command), " ".join(command))
 
 
+class SaveConfigTests(unittest.TestCase):
+    def test_save_replaces_config_without_leaving_temp_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config_path = Path(temp) / "config.json"
+            config_path.write_text("{}")
+            with (
+                unittest.mock.patch.object(host, "CONFIG_PATH", config_path),
+                unittest.mock.patch.object(host, "ensure_state"),
+            ):
+                host.save_config({"download_dir": "/srv/videos"})
+            self.assertEqual(json.loads(config_path.read_text())["download_dir"], "/srv/videos")
+            self.assertEqual(os.stat(config_path).st_mode & 0o777, 0o600)
+            self.assertEqual(sorted(p.name for p in Path(temp).iterdir()), ["config.json"])
+
+
 class DownloadDiagnosticsTests(unittest.TestCase):
     def run_output(self, output: str, returncode: int, log_available: bool = True):
         process = unittest.mock.MagicMock()
