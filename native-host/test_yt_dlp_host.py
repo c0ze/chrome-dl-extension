@@ -850,6 +850,38 @@ class ReadJobsTests(unittest.TestCase):
                 self.assertEqual(self.read(raw)["jobs"], [])
 
 
+class MissingDownloadDirTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+
+    def test_existing_folder_and_new_child_of_existing_folder_are_allowed(self) -> None:
+        host.require_download_dir_parent(str(self.root))
+        host.require_download_dir_parent(str(self.root / "new"))
+        host.require_download_dir_parent(str(self.root / "new") + "/")
+
+    def test_stale_path_is_refused_instead_of_rebuilt(self) -> None:
+        # A remembered folder on a share that moved: rebuilding the chain would
+        # quietly fill local disk instead of the share.
+        with self.assertRaises(host.MissingDownloadDir):
+            host.require_download_dir_parent(str(self.root / "gone" / "share" / "videos"))
+
+    def test_download_message_reports_missing_folder(self) -> None:
+        stale = str(self.root / "gone" / "share" / "videos")
+        with unittest.mock.patch.object(host, "mutate_jobs") as mutate_jobs:
+            single = host.handle_message({"type": "download", "url": "https://x.com/a/status/1", "download_dir": stale})
+            batch = host.handle_message({
+                "type": "download", "url": "https://x.com/a/media", "download_dir": stale,
+                "profile_urls": ["https://x.com/a/status/1"],
+            })
+        mutate_jobs.assert_not_called()
+        for response in (single, batch):
+            self.assertFalse(response["ok"])
+            self.assertTrue(response["missing_dir"])
+            self.assertIn("does not exist", response["error"])
+
+
 class DownloadDiagnosticsTests(unittest.TestCase):
     def run_output(self, output: str, returncode: int, log_available: bool = True):
         process = unittest.mock.MagicMock()

@@ -106,6 +106,13 @@ async function saveRecentDirectory(directory) {
   return next;
 }
 
+async function forgetRecentDirectory(directory) {
+  const trimmed = directory.trim();
+  const next = (await getRecentDirectories()).filter((value) => value !== trimmed);
+  await chrome.storage.local.set({ [RECENT_DIRECTORIES_KEY]: next });
+  return next;
+}
+
 function renderRecentDirectories(directories) {
   elements.recentList.textContent = "";
 
@@ -812,6 +819,14 @@ async function startDownload(directory, allowDuplicate = false) {
       } else {
         showMessage("error", "Duplicate download was not queued.");
       }
+      return;
+    }
+
+    if (response?.missing_dir) {
+      // A remembered folder that no longer exists, such as a share that moved,
+      // would keep failing; drop it so the list only offers real folders.
+      renderRecentDirectories(await forgetRecentDirectory(selectedDirectory));
+      showMessage("error", `${response.error} It was removed from Recent Folders.`);
       return;
     }
 

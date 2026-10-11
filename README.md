@@ -205,6 +205,10 @@ with 0700.
 - Download folders must be absolute local paths, or start with `~`. A network
   location such as `smb://nas/share` is rejected: mount the share and use its
   mounted path instead.
+- A download folder must exist, or at least its parent folder must. A path
+  whose parent is missing, such as a remembered folder on a network share
+  that has since been mounted elsewhere, is refused instead of being rebuilt
+  on local disk, and the download page drops it from Recent Folders.
 - For X/Twitter URLs it strips query strings and fragments before calling
   `yt-dlp`, and reduces a status URL to `/<user>/status/<id>` so that trailing
   slashes and `/photo/N` or `/video/N` suffixes are recognised as the same
