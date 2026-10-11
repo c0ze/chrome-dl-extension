@@ -525,8 +525,12 @@ def reap_stale_jobs_now() -> None:
     mutate_jobs(mutator)
 
 
-def update_job(job_id: str, updates: dict[str, Any]) -> None:
+def update_job(job_id: str, updates: dict[str, Any]) -> bool:
+    """Apply updates to a job; False when it was cancelled or removed."""
+    applied = False
+
     def mutator(state: dict[str, Any]) -> None:
+        nonlocal applied
         for job in state["jobs"]:
             if job.get("id") != job_id:
                 continue
@@ -536,9 +540,11 @@ def update_job(job_id: str, updates: dict[str, Any]) -> None:
             job.update(updates)
             job["updated_at"] = timestamp()
             job["heartbeat"] = time.time()
+            applied = True
             return
 
     mutate_jobs(mutator)
+    return applied
 
 
 def promote_running_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1772,10 +1778,9 @@ def run_download_worker(encoded_payload: str) -> int:
         download_dir = resolve_download_dir(download_dir_override or config["download_dir"])
 
         safe_url = redact_url(url)
-        notify("yt-dlp download started", safe_url)
         log_line(f"Starting download for {safe_url} from {source}")
         log_line("Command: " + redact_command(command))
-        update_job(
+        claimed = update_job(
             job_id,
             {
                 "download_dir": download_dir,
@@ -1786,6 +1791,12 @@ def run_download_worker(encoded_payload: str) -> int:
                 "status_detail": "Starting",
             },
         )
+        if not claimed:
+            # Cancelled before this worker recorded its pid, so the cancel could
+            # not signal it and has already started the next job.
+            log_line(f"Download for {safe_url} was cancelled before it started")
+            return 0
+        notify("yt-dlp download started", safe_url)
         stop_heartbeat = start_job_heartbeat(job_id)
 
         try:
