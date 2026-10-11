@@ -666,6 +666,41 @@ class VisibleJobsTests(unittest.TestCase):
         self.assertEqual(len(host.visible_jobs(jobs)), 10)
 
 
+class WorkerFailureBackoffTests(unittest.TestCase):
+    def run_worker(self, run_yt_dlp: Any) -> tuple[unittest.mock.MagicMock, unittest.mock.MagicMock, unittest.mock.MagicMock]:
+        payload = host.encode_worker_payload({"id": "job", "url": "https://x.com/a/status/1"})
+        with (
+            unittest.mock.patch.object(host, "load_config", return_value=dict(host.DEFAULT_CONFIG)),
+            unittest.mock.patch.object(host, "run_yt_dlp", side_effect=run_yt_dlp),
+            unittest.mock.patch.object(host, "update_job"),
+            unittest.mock.patch.object(host, "notify"),
+            unittest.mock.patch.object(host, "log_line"),
+            unittest.mock.patch.object(host, "start_job_heartbeat", return_value=unittest.mock.MagicMock()),
+            unittest.mock.patch.object(host, "launch_next_queued_job") as launch_next,
+            unittest.mock.patch.object(host, "record_launch_failure") as record_failure,
+            unittest.mock.patch.object(host, "clear_launch_failures") as clear_failures,
+        ):
+            host.run_download_worker(payload)
+        return launch_next, record_failure, clear_failures
+
+    def test_missing_yt_dlp_backs_off_instead_of_failing_the_whole_queue(self) -> None:
+        launch_next, record_failure, clear_failures = self.run_worker(FileNotFoundError("yt-dlp"))
+        launch_next.assert_not_called()
+        record_failure.assert_called_once()
+        clear_failures.assert_not_called()
+
+    def test_unexpected_worker_error_backs_off(self) -> None:
+        launch_next, record_failure, _ = self.run_worker(RuntimeError("boom"))
+        launch_next.assert_not_called()
+        record_failure.assert_called_once()
+
+    def test_a_failed_download_still_moves_on(self) -> None:
+        launch_next, record_failure, clear_failures = self.run_worker(lambda *_: 1)
+        launch_next.assert_called_once()
+        record_failure.assert_not_called()
+        clear_failures.assert_called_once()
+
+
 class DownloadDiagnosticsTests(unittest.TestCase):
     def run_output(self, output: str, returncode: int, log_available: bool = True):
         process = unittest.mock.MagicMock()
@@ -720,6 +755,19 @@ class DownloadDiagnosticsTests(unittest.TestCase):
         self.assertIn("No video", job["error"])
         self.assertIn("guest", job["error"])
         self.assertIn("profile", job["error"].lower())
+
+    def test_unexpected_error_kills_yt_dlp(self) -> None:
+        process = unittest.mock.MagicMock()
+        process.stdout = io.StringIO("[download] Destination: a.mp4\n")
+        process.poll.return_value = None
+        with (
+            unittest.mock.patch.object(host, "open_log_stream", return_value=None),
+            unittest.mock.patch.object(host.subprocess, "Popen", return_value=process),
+            unittest.mock.patch.object(host, "update_job", side_effect=[None, OSError("disk full")]),
+            self.assertRaises(OSError),
+        ):
+            host.run_yt_dlp(["yt-dlp", "https://example.invalid/"], "test-job")
+        process.kill.assert_called_once()
 
     def test_nonzero_exit_without_error_line_has_useful_error(self) -> None:
         job = self.run_output("", 2)
