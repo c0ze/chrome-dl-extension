@@ -167,6 +167,9 @@ SENSITIVE_VALUE_FLAGS = {
     "-u",
 }
 SENSITIVE_SHORT_FLAGS = {"p", "u", "2"}
+# yt-dlp's short options that take a value; in a group such as -N2 the rest
+# of the argument is that value, not more flags.
+VALUE_SHORT_FLAGS = set("2INOPRSafoprtu")
 # Real options that are prefixes of a sensitive one; optparse prefers the
 # exact match, so these are not abbreviations of it.
 EXACT_OPTION_PREFIXES = {"--client-certificate", "--netrc"}
@@ -779,13 +782,16 @@ def is_sensitive_flag(flag: str) -> bool:
 def sensitive_short_group(text: str) -> int | None:
     """Index of a credential flag in a short option group such as -qpSECRET.
 
-    Flags before it might take a value themselves, which only over-redacts.
+    Walks the group the way optparse does: the first flag that takes a value
+    consumes the rest of the argument.
     """
     if len(text) < 2 or text[0] != "-" or text[1] == "-":
         return None
     for index, character in enumerate(text[1:], start=1):
         if character in SENSITIVE_SHORT_FLAGS:
             return index
+        if character in VALUE_SHORT_FLAGS:
+            return None
     return None
 
 
@@ -1183,17 +1189,18 @@ def extension_profile(browser: str) -> str:
 
     matches = []
     for preferences_path in candidates:
+        # Anything unreadable or malformed means unknown membership: it may be
+        # the calling profile, so a match elsewhere is not known to be unique.
         try:
             with preferences_path.open("r", encoding="utf-8") as handle:
                 preferences = json.load(handle)
-            settings = preferences["extensions"]["settings"]
         except (OSError, ValueError):
-            # Unknown membership: this may be the calling profile, so a match
-            # elsewhere is not known to be unique.
             return ""
-        except (KeyError, TypeError):
-            continue
-        if isinstance(settings, dict) and extension_id in settings:
+        extensions = preferences.get("extensions", {}) if isinstance(preferences, dict) else None
+        settings = extensions.get("settings", {}) if isinstance(extensions, dict) else None
+        if not isinstance(settings, dict):
+            return ""
+        if extension_id in settings:
             matches.append(preferences_path.parent.name)
     return matches[0] if len(matches) == 1 else ""
 
@@ -1374,8 +1381,9 @@ def launch_reserved_job(job: dict[str, Any]) -> bool:
             start_new_session=True,
         )
     except OSError as error:
-        update_job(
+        claim_job(
             job["id"],
+            job.get("attempt"),
             {
                 "status": "failed",
                 "status_detail": "Launch error",
@@ -1386,8 +1394,11 @@ def launch_reserved_job(job: dict[str, Any]) -> bool:
         )
         return False
 
-    update_job(
+    # Only while this reservation stands: a cancel and retry in the meantime
+    # may already have a newer worker recorded on the job.
+    claim_job(
         job["id"],
+        job.get("attempt"),
         {
             "pid": process.pid,
             "worker_pid": process.pid,
