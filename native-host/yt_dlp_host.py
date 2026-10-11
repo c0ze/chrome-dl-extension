@@ -328,7 +328,10 @@ def read_jobs_unlocked() -> dict[str, Any]:
     try:
         with JOBS_PATH.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
+        return default_jobs_state()
+
+    if not isinstance(data, dict):
         return default_jobs_state()
 
     jobs = data.get("jobs", [])
