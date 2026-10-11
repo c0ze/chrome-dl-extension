@@ -129,6 +129,19 @@ class SafePathPartUnicodeTests(unittest.TestCase):
         self.assertNotIn("\n", host.safe_path_part("a\nb"))
 
 
+class SafePathPartExpansionTests(unittest.TestCase):
+    def test_dollar_cannot_expand_to_another_folder(self) -> None:
+        self.assertNotIn("$", host.safe_path_part("$HOME"))
+        self.assertEqual(host.safe_path_part("Ca$h"), "Ca_h")
+
+    def test_control_and_bidi_characters_are_replaced(self) -> None:
+        self.assertEqual(host.safe_path_part("a\x7fb\x85c"), "a_b_c")
+        self.assertEqual(host.safe_path_part("evil\u202egpj.exe"), "evil_gpj.exe")
+
+    def test_joiners_used_by_real_names_are_kept(self) -> None:
+        self.assertEqual(host.safe_path_part("می\u200cخواهم"), "می\u200cخواهم")
+
+
 class FacebookBatchMatchingTests(unittest.TestCase):
     def test_matches_profile_php_reels_tab(self) -> None:
         target = host.batch_target_for_url(
