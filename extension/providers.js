@@ -316,7 +316,12 @@ export async function profileScanChunk(options) {
       }
       const found = [];
       root.querySelectorAll("a[href*='/reel/']").forEach((anchor) => {
-        const resolved = new URL(anchor.href, window.location.href);
+        let resolved;
+        try {
+          resolved = new URL(anchor.href, window.location.href);
+        } catch (_error) {
+          return;
+        }
         if (!fbHosts.has(resolved.hostname)) {
           return;
         }
@@ -481,12 +486,19 @@ export async function profileScanChunk(options) {
     const fbMaxPasses = options.maxPasses || 36;
     const fbBudgetMs = options.budgetMs || 4000;
     let fbDone = false;
+    let fbCapped = false;
 
     collectFacebookRound();
 
     while (true) {
-      if (fbProgress.passes >= fbMaxPasses || fbProgress.stablePasses >= 4) {
+      if (fbProgress.stablePasses >= 4) {
         fbDone = true;
+        break;
+      }
+      if (fbProgress.passes >= fbMaxPasses) {
+        // The page was still growing, so this is only part of the profile.
+        fbDone = true;
+        fbCapped = true;
         break;
       }
       if (Date.now() - fbStartedAt >= fbBudgetMs) {
@@ -513,6 +525,7 @@ export async function profileScanChunk(options) {
       urls: fbProgress.urls,
       profileName: fbProgress.profileName,
       done: fbDone,
+      capped: fbCapped,
       progress: fbProgress,
     };
   }
@@ -711,12 +724,19 @@ export async function profileScanChunk(options) {
   const maxPasses = options.maxPasses || 36;
   const budgetMs = options.budgetMs || 4000;
   let done = false;
+  let capped = false;
 
   collectVisibleLinks();
 
   while (true) {
-    if (progress.passes >= maxPasses || progress.stablePasses >= 4) {
+    if (progress.stablePasses >= 4) {
       done = true;
+      break;
+    }
+    if (progress.passes >= maxPasses) {
+      // The page was still growing, so this is only part of the profile.
+      done = true;
+      capped = true;
       break;
     }
     if (Date.now() - startedAt >= budgetMs) {
@@ -737,5 +757,5 @@ export async function profileScanChunk(options) {
 
   progress.urls = Array.from(links.values());
 
-  return { ok: true, username, done, progress, urls: progress.urls };
+  return { ok: true, username, done, capped, progress, urls: progress.urls };
 }
