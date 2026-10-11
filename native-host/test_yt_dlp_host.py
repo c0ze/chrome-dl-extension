@@ -612,10 +612,18 @@ class CookieProfileDetectionTests(unittest.TestCase):
             del os.environ[host.EXTENSION_ID_ENV]
             self.assertEqual(host.browser_spec(host.normalize_config({})), "chrome")
 
-    def test_unreadable_preferences_are_skipped(self) -> None:
+    def test_unreadable_preferences_make_the_match_unknown(self) -> None:
+        # The unreadable profile may be the one that called the host.
         broken = self.config_home / "google-chrome" / "Default"
         broken.mkdir(parents=True)
         (broken / "Preferences").write_text("{not json")
+        self.add_profile("Profile 5", [EXTENSION_ID])
+        self.assertEqual(host.browser_spec(host.normalize_config({})), "chrome")
+
+    def test_preferences_without_extensions_are_skipped(self) -> None:
+        other = self.config_home / "google-chrome" / "Default"
+        other.mkdir(parents=True)
+        (other / "Preferences").write_text("{}")
         self.add_profile("Profile 5", [EXTENSION_ID])
         self.assertEqual(host.browser_spec(host.normalize_config({})), "chrome:Profile 5")
 
@@ -686,6 +694,7 @@ class WorkerFailureBackoffTests(unittest.TestCase):
             unittest.mock.patch.object(host, "load_config", return_value=dict(host.DEFAULT_CONFIG)),
             unittest.mock.patch.object(host, "run_yt_dlp", side_effect=run_yt_dlp),
             unittest.mock.patch.object(host, "update_job"),
+            unittest.mock.patch.object(host, "claim_job", return_value=True),
             unittest.mock.patch.object(host, "notify"),
             unittest.mock.patch.object(host, "log_line"),
             unittest.mock.patch.object(host, "start_job_heartbeat", return_value=unittest.mock.MagicMock()),
@@ -711,7 +720,7 @@ class WorkerFailureBackoffTests(unittest.TestCase):
         payload = host.encode_worker_payload({"id": "job", "url": "https://x.com/a/status/1"})
         with (
             unittest.mock.patch.object(host, "load_config", return_value=dict(host.DEFAULT_CONFIG)),
-            unittest.mock.patch.object(host, "update_job", return_value=False),
+            unittest.mock.patch.object(host, "claim_job", return_value=False),
             unittest.mock.patch.object(host, "notify"),
             unittest.mock.patch.object(host, "log_line"),
             unittest.mock.patch.object(host, "run_yt_dlp") as run_yt_dlp,
@@ -729,6 +738,30 @@ class WorkerFailureBackoffTests(unittest.TestCase):
             self.assertTrue(host.update_job("b", {"progress": 5}))
         self.assertEqual(state["jobs"][0]["status"], "cancelled")
 
+    def test_rejected_options_back_off_instead_of_failing_the_whole_queue(self) -> None:
+        launch_next, record_failure, clear_failures = self.run_worker(lambda *_: 2)
+        launch_next.assert_not_called()
+        record_failure.assert_called_once()
+        clear_failures.assert_not_called()
+
+    def test_claim_requires_the_reservation_the_worker_was_launched_for(self) -> None:
+        state = {"jobs": [{"id": "a", "status": "queued", "attempt": "old"}]}
+        with unittest.mock.patch.object(host, "mutate_jobs", side_effect=lambda mutator: mutator(state)):
+            # Cancelled and retried: queued again, so the old worker must not run.
+            self.assertFalse(host.claim_job("a", "old", {"status": "running"}))
+            state["jobs"][0].update({"status": "running", "attempt": "new"})
+            self.assertFalse(host.claim_job("a", "old", {"worker_pid": 1}))
+            self.assertTrue(host.claim_job("a", "new", {"worker_pid": 2}))
+        self.assertEqual(state["jobs"][0]["worker_pid"], 2)
+
+    def test_reservation_hands_its_attempt_to_the_worker(self) -> None:
+        state = {"jobs": [{"id": "a", "url": "https://x.com/a/status/1", "status": "queued"}]}
+        with unittest.mock.patch.object(host, "mutate_jobs", side_effect=lambda mutator: mutator(state)):
+            job = host.reserve_next_job()
+        payload = host.decode_worker_payload(host.encode_worker_payload(job))
+        self.assertEqual(payload["attempt"], state["jobs"][0]["attempt"])
+        self.assertTrue(payload["attempt"])
+
     def test_a_failed_download_still_moves_on(self) -> None:
         launch_next, record_failure, clear_failures = self.run_worker(lambda *_: 1)
         launch_next.assert_called_once()
@@ -745,6 +778,16 @@ class RedactCommandTests(unittest.TestCase):
         redacted = host.redact_command(command)
         for secret in ["XYZ", "c=1", "secret", "pw2", "123456", "pw3", "user", "=7"]:
             self.assertNotIn(secret, redacted)
+
+    def test_boolean_options_that_prefix_a_sensitive_one_are_not_values(self) -> None:
+        redacted = host.redact_command(["yt-dlp", "--netrc", "--password", "pw", "--client-certificate", "c.pem"])
+        self.assertNotIn("pw", redacted.split())
+        self.assertIn("c.pem", redacted)
+
+    def test_redacts_short_option_groups(self) -> None:
+        for command in (["-qpSECRET"], ["-qu", "SECRET"], ["-q2SECRET"], ["-vp", "SECRET"]):
+            with self.subTest(command=command):
+                self.assertNotIn("SECRET", host.redact_command(["yt-dlp", *command]))
 
     def test_keeps_ordinary_arguments(self) -> None:
         command = ["yt-dlp", "--newline", "--cookies-from-browser", "chrome", "-P", "/srv/v", "-o", "%(id)s"]

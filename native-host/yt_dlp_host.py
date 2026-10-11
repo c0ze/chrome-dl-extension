@@ -142,6 +142,8 @@ QUEUE_KICK_ATTEMPT_LIMIT = 1
 LAUNCH_BACKOFF_BASE_SECONDS = 2.0
 LAUNCH_BACKOFF_MAX_SECONDS = 60.0
 CANCEL_GRACE_SECONDS = 3.0
+# yt-dlp exits with 2 when it rejects its options, before touching the URL.
+YT_DLP_OPTION_ERROR_EXIT_CODE = 2
 CANCEL_POLL_SECONDS = 0.1
 PROC_ROOT = Path("/proc")
 PROC_STAT_STATE_INDEX = 0
@@ -164,8 +166,10 @@ SENSITIVE_VALUE_FLAGS = {
     "-p",
     "-u",
 }
-# yt-dlp also accepts "-pSECRET" for these short flags.
-SENSITIVE_ATTACHED_SHORT_RE = re.compile(r"-[pu2].+")
+SENSITIVE_SHORT_FLAGS = {"p", "u", "2"}
+# Real options that are prefixes of a sensitive one; optparse prefers the
+# exact match, so these are not abbreviations of it.
+EXACT_OPTION_PREFIXES = {"--client-certificate", "--netrc"}
 SENSITIVE_KEY_HINTS = (
     "auth",
     "credential",
@@ -550,6 +554,32 @@ def update_job(job_id: str, updates: dict[str, Any]) -> bool:
     return applied
 
 
+def claim_job(job_id: str, attempt: Any, updates: dict[str, Any]) -> bool:
+    """Let a worker take its job only if the reservation it was launched for still stands.
+
+    A cancel can miss a worker that has not recorded its pid yet, and a retry
+    can queue or relaunch the same job; the attempt token tells them apart.
+    """
+    claimed = False
+
+    def mutator(state: dict[str, Any]) -> None:
+        nonlocal claimed
+        for job in state["jobs"]:
+            if job.get("id") != job_id:
+                continue
+            if job.get("status") != "running" or job.get("attempt") != attempt:
+                return
+
+            job.update(updates)
+            job["updated_at"] = timestamp()
+            job["heartbeat"] = time.time()
+            claimed = True
+            return
+
+    mutate_jobs(mutator)
+    return claimed
+
+
 def promote_running_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     running = [job for job in jobs if job.get("status") == "running"]
     if not running:
@@ -738,10 +768,25 @@ def redact_url(raw_url: Any) -> str:
 def is_sensitive_flag(flag: str) -> bool:
     if flag in SENSITIVE_VALUE_FLAGS:
         return True
+    if flag in EXACT_OPTION_PREFIXES:
+        return False
     # optparse accepts any unambiguous prefix of a long option, such as --passw.
     return len(flag) > 3 and flag.startswith("--") and any(
         option.startswith(flag) for option in SENSITIVE_VALUE_FLAGS
     )
+
+
+def sensitive_short_group(text: str) -> int | None:
+    """Index of a credential flag in a short option group such as -qpSECRET.
+
+    Flags before it might take a value themselves, which only over-redacts.
+    """
+    if len(text) < 2 or text[0] != "-" or text[1] == "-":
+        return None
+    for index, character in enumerate(text[1:], start=1):
+        if character in SENSITIVE_SHORT_FLAGS:
+            return index
+    return None
 
 
 def redact_command(command: list[str]) -> str:
@@ -764,8 +809,13 @@ def redact_command(command: list[str]) -> str:
             parts.append(f"{flag}={REDACTED}")
             continue
 
-        if SENSITIVE_ATTACHED_SHORT_RE.fullmatch(text):
-            parts.append(f"{text[:2]}{REDACTED}")
+        flag_index = sensitive_short_group(text)
+        if flag_index is not None:
+            if flag_index + 1 < len(text):
+                parts.append(f"{text[: flag_index + 1]}{REDACTED}")
+            else:
+                parts.append(text)
+                redact_next = True
             continue
 
         parts.append(redact_url(text) if "://" in text else text)
@@ -1137,7 +1187,11 @@ def extension_profile(browser: str) -> str:
             with preferences_path.open("r", encoding="utf-8") as handle:
                 preferences = json.load(handle)
             settings = preferences["extensions"]["settings"]
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError):
+            # Unknown membership: this may be the calling profile, so a match
+            # elsewhere is not known to be unique.
+            return ""
+        except (KeyError, TypeError):
             continue
         if isinstance(settings, dict) and extension_id in settings:
             matches.append(preferences_path.parent.name)
@@ -1220,6 +1274,7 @@ def encode_worker_payload(job: dict[str, Any]) -> str:
         json.dumps(
             {
                 "job_id": job["id"],
+                "attempt": job.get("attempt"),
                 "download_dir": job.get("download_dir"),
                 "url": job["url"],
                 "source": job.get("source", "extension"),
@@ -1270,6 +1325,7 @@ def reserve_next_job(preferred_job_id: str | None = None) -> dict[str, Any] | No
                 "pid": None,
                 "worker_pid": None,
                 "worker_start_ticks": None,
+                "attempt": uuid.uuid4().hex,
                 "run_started_at": now,
                 "updated_at": now,
                 "heartbeat": time.time(),
@@ -1402,6 +1458,32 @@ def process_group_is_running(pgid: int) -> bool:
             return True
 
     return False
+
+
+def kill_worker_descendants() -> None:
+    """SIGKILL everything else in this worker's process group, such as ffmpeg.
+
+    Workers start their own session, so the group holds only this download.
+    Anywhere else (the host itself, tests) this does nothing.
+    """
+    pgid = os.getpgrp()
+    if pgid != os.getpid():
+        return
+
+    try:
+        entries = os.listdir(PROC_ROOT)
+    except OSError:
+        return
+
+    for entry in entries:
+        if not entry.isdigit() or int(entry) == os.getpid():
+            continue
+        fields = read_proc_stat_fields(int(entry))
+        if fields and proc_stat_number(fields, PROC_STAT_PGRP_INDEX) == pgid:
+            try:
+                os.kill(int(entry), signal.SIGKILL)
+            except OSError:
+                pass
 
 
 def worker_process_group(pid: Any, start_ticks: Any) -> int | None:
@@ -1772,6 +1854,7 @@ def run_yt_dlp(command: list[str], job_id: str) -> int:
         if process is not None and process.poll() is None:
             process.kill()
             process.wait()
+        kill_worker_descendants()
         raise
     finally:
         if handle is not None:
@@ -1792,8 +1875,9 @@ def run_download_worker(encoded_payload: str) -> int:
         safe_url = redact_url(url)
         log_line(f"Starting download for {safe_url} from {source}")
         log_line("Command: " + redact_command(command))
-        claimed = update_job(
+        claimed = claim_job(
             job_id,
+            payload.get("attempt"),
             {
                 "download_dir": download_dir,
                 "pid": os.getpid(),
@@ -1804,8 +1888,8 @@ def run_download_worker(encoded_payload: str) -> int:
             },
         )
         if not claimed:
-            # Cancelled before this worker recorded its pid, so the cancel could
-            # not signal it and has already started the next job.
+            # Cancelled (or retried) before this worker recorded its pid, so the
+            # cancel could not signal it and has already started the next job.
             log_line(f"Download for {safe_url} was cancelled before it started")
             return 0
         notify("yt-dlp download started", safe_url)
@@ -1813,7 +1897,9 @@ def run_download_worker(encoded_payload: str) -> int:
 
         try:
             return_code = run_yt_dlp(command, job_id)
-            clear_launch_failures()
+            setup_failed = return_code == YT_DLP_OPTION_ERROR_EXIT_CODE
+            if not setup_failed:
+                clear_launch_failures()
             if return_code == 0:
                 notify("yt-dlp download complete", safe_url)
                 log_line(f"Download complete for {safe_url}")
@@ -1840,7 +1926,11 @@ def run_download_worker(encoded_payload: str) -> int:
                     },
                 )
 
-            launch_next_queued_job()
+            if setup_failed:
+                # Bad options fail every job the same way; see record_launch_failure below.
+                record_launch_failure()
+            else:
+                launch_next_queued_job()
             return return_code
         except (OSError, subprocess.SubprocessError) as e:
             log_line(f"Subprocess error: {e}")
