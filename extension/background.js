@@ -159,6 +159,7 @@ async function runProfileScan(tabId, provider, expectedUsername, key) {
           username: result.username || expectedUsername,
           urls,
           found: urls.length,
+          partial: Boolean(result.capped),
           profileName,
         });
         return;

@@ -673,3 +673,59 @@ test("a multi-round Facebook scan accumulates across rounds and reports partial 
     "https://www.facebook.com/reel/1002",
   ]);
 });
+
+const TWITTER_SCAN_OPTIONS = {
+  provider: "twitter",
+  hosts: ["x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"],
+  reserved: ["home", "explore", "notifications", "messages", "i", "settings"],
+  expectedUsername: "alice",
+  budgetMs: 50,
+  maxPasses: 36,
+};
+
+const FACEBOOK_SCAN_OPTIONS = {
+  provider: "facebook",
+  hosts: ["facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com"],
+  expectedUsername: "somepage",
+  budgetMs: 50,
+  maxPasses: 36,
+};
+
+for (const [name, options, url] of [
+  ["Twitter", TWITTER_SCAN_OPTIONS, "https://x.com/alice/media"],
+  ["Facebook", FACEBOOK_SCAN_OPTIONS, "https://www.facebook.com/somepage/reels"],
+]) {
+  test(`a ${name} scan that hits the pass cap while the page still grows is reported as capped`, async () => {
+    withPage(`<div role="main"></div>`, url);
+    const result = await profileScanChunk({
+      ...options,
+      progress: { passes: 36, stablePasses: 0 },
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.done, true);
+    assert.equal(result.capped, true);
+  });
+
+  test(`a ${name} scan that settles is done and not capped`, async () => {
+    withPage(`<div role="main"></div>`, url);
+    const result = await profileScanChunk({
+      ...options,
+      progress: { passes: 36, stablePasses: 4 },
+    });
+    assert.equal(result.done, true);
+    assert.equal(result.capped, false);
+  });
+}
+
+test("a Facebook scan skips a reel link whose href cannot be parsed", async () => {
+  withPage(
+    `<div role="main">
+       <a href="/reel/1001">good reel</a>
+       <a href="http://[bad/reel/2">broken reel</a>
+     </div>`,
+    "https://www.facebook.com/somepage/reels"
+  );
+  const result = await profileScanChunk({ ...FACEBOOK_SCAN_OPTIONS, progress: {} });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.urls, ["https://www.facebook.com/reel/1001"]);
+});
