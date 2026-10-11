@@ -125,6 +125,21 @@ Default config:
 
 You can edit that file manually or use the extension options page.
 
+### Which browser profile supplies the cookies
+
+When **Profile** is empty in Options, the host passes the Chromium profile this
+extension is installed in, such as `chrome:Profile 5`. It finds that profile by
+looking for the extension in each profile's `Preferences`. If the extension is
+installed in more than one profile, the host cannot tell which one sent the
+request and leaves the choice to yt-dlp, which reads the cookies of whichever
+profile wrote its cookie database last. That profile can change from one
+download to the next, so set **Profile** explicitly in that case.
+
+A profile that is not signed in to X makes yt-dlp fall back to guest access,
+and sensitive or restricted posts then fail with
+`No video could be found in this tweet`. The dashboard error says when this
+happened.
+
 ### Cookie decryption failures on Linux
 
 If the log says `cannot decrypt v11 cookies: no key found`, yt-dlp can lose your
