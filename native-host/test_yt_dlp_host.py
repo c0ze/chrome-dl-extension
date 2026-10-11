@@ -656,6 +656,16 @@ class DownloadDirValidationTests(unittest.TestCase):
         mutate_jobs.assert_not_called()
 
 
+class VisibleJobsTests(unittest.TestCase):
+    def test_running_job_leads_a_short_queue(self) -> None:
+        # Jobs are stored newest first, so the running (oldest) job would
+        # otherwise fall below the dashboard's short list.
+        jobs = [{"id": str(i), "status": "queued"} for i in range(9)]
+        jobs.append({"id": "run", "status": "running"})
+        self.assertEqual(host.visible_jobs(jobs)[0]["id"], "run")
+        self.assertEqual(len(host.visible_jobs(jobs)), 10)
+
+
 class DownloadDiagnosticsTests(unittest.TestCase):
     def run_output(self, output: str, returncode: int, log_available: bool = True):
         process = unittest.mock.MagicMock()

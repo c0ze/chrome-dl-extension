@@ -546,9 +546,8 @@ def promote_running_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def visible_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if len(jobs) <= MAX_JOBS_IN_RESPONSE:
-        return jobs
-
+    # The running job is the oldest active one, so without promotion it sorts
+    # below every newer queued job and falls off the dashboard's short list.
     return promote_running_jobs(jobs)[:MAX_JOBS_IN_RESPONSE]
 
 
