@@ -122,7 +122,7 @@ class SafePathPartUnicodeTests(unittest.TestCase):
         self.assertEqual(len(result.encode("utf-8")), 255)
 
     def test_uses_supplied_fallback_when_empty(self) -> None:
-        self.assertEqual(host.safe_path_part("///", fallback="61590939736806"), "61590939736806")
+        self.assertEqual(host.safe_path_part("///", fallback="100000000000001"), "100000000000001")
 
     def test_strips_control_characters(self) -> None:
         self.assertNotIn("\x00", host.safe_path_part("a\x00b"))
@@ -145,9 +145,9 @@ class SafePathPartExpansionTests(unittest.TestCase):
 class FacebookBatchMatchingTests(unittest.TestCase):
     def test_matches_profile_php_reels_tab(self) -> None:
         target = host.batch_target_for_url(
-            "https://www.facebook.com/profile.php?id=61590939736806&sk=reels_tab"
+            "https://www.facebook.com/profile.php?id=100000000000001&sk=reels_tab"
         )
-        self.assertEqual(target, {"provider": "facebook", "key": "61590939736806"})
+        self.assertEqual(target, {"provider": "facebook", "key": "100000000000001"})
 
     def test_matches_vanity_reels_path(self) -> None:
         target = host.batch_target_for_url("https://www.facebook.com/somepage/reels")
@@ -182,25 +182,25 @@ class FacebookPeopleUrlBatchMatchingTests(unittest.TestCase):
     """The third profile URL shape: /people/<name-segment>/<digits>?sk=reels_tab."""
 
     PEOPLE_URL = (
-        "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+        "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/100000000000001/?sk=reels_tab"
     )
 
     def test_matches_people_url_keyed_on_numeric_id(self) -> None:
         target = host.batch_target_for_url(self.PEOPLE_URL)
-        self.assertEqual(target, {"provider": "facebook", "key": "61590939736806"})
+        self.assertEqual(target, {"provider": "facebook", "key": "100000000000001"})
 
     def test_same_profile_via_profile_php_and_people_url_produces_same_key(self) -> None:
         via_profile_php = host.batch_target_for_url(
-            "https://www.facebook.com/profile.php?id=61590939736806&sk=reels_tab"
+            "https://www.facebook.com/profile.php?id=100000000000001&sk=reels_tab"
         )
         via_people = host.batch_target_for_url(self.PEOPLE_URL)
         self.assertEqual(via_profile_php, via_people)
-        self.assertEqual(via_people["key"], "61590939736806")
+        self.assertEqual(via_people["key"], "100000000000001")
 
     def test_rejects_people_url_without_reels_tab(self) -> None:
         self.assertIsNone(
             host.batch_target_for_url(
-                "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/"
+                "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/100000000000001/"
             )
         )
 
@@ -211,7 +211,7 @@ class FacebookPeopleUrlBatchMatchingTests(unittest.TestCase):
     def test_rejects_non_numeric_third_segment(self) -> None:
         self.assertIsNone(
             host.batch_target_for_url(
-                "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/not-a-number/?sk=reels_tab"
+                "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/not-a-number/?sk=reels_tab"
             )
         )
 
@@ -226,16 +226,16 @@ class FacebookPeopleUrlNameTests(unittest.TestCase):
     def test_decodes_percent_encoded_cjk_name(self) -> None:
         self.assertEqual(
             host.facebook_people_url_name(
-                "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+                "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/100000000000001/?sk=reels_tab"
             ),
-            "小妮",
+            "山田",
         )
 
     def test_decoded_name_survives_safe_path_part_intact(self) -> None:
         name = host.facebook_people_url_name(
-            "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+            "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/100000000000001/?sk=reels_tab"
         )
-        self.assertEqual(host.safe_path_part(name), "小妮")
+        self.assertEqual(host.safe_path_part(name), "山田")
 
     def test_returns_none_for_non_people_urls(self) -> None:
         self.assertIsNone(
@@ -249,7 +249,7 @@ class FacebookPeopleUrlNameTests(unittest.TestCase):
 
     def test_malformed_percent_encoding_falls_back_rather_than_raising(self) -> None:
         # "%E5%B0" alone is a truncated/invalid UTF-8 sequence.
-        malformed_url = "https://www.facebook.com/people/%E5%B0/61590939736806/?sk=reels_tab"
+        malformed_url = "https://www.facebook.com/people/%E5%B0/100000000000001/?sk=reels_tab"
         try:
             result = host.facebook_people_url_name(malformed_url)
         except Exception as error:  # noqa: BLE001
@@ -320,7 +320,7 @@ class FacebookVanityRegexTraversalTests(unittest.TestCase):
 
 class ProfileItemValidationTests(unittest.TestCase):
     def test_facebook_batch_accepts_only_reel_urls(self) -> None:
-        target = {"provider": "facebook", "key": "61590939736806"}
+        target = {"provider": "facebook", "key": "100000000000001"}
         self.assertTrue(host.valid_batch_item("https://www.facebook.com/reel/123", target))
         self.assertFalse(
             host.valid_batch_item("https://www.facebook.com/somepage/posts/9", target)
@@ -390,10 +390,10 @@ class StartProfileDownloadJobsProfileNameTests(unittest.TestCase):
         """Preference order: scraped name > URL-decoded /people/ segment > numeric id.
 
         With no scraped profile_name, the URL's own percent-encoded name
-        segment (小妮) must be used instead of falling straight to the numeric id.
+        segment (山田) must be used instead of falling straight to the numeric id.
         """
         result = host.start_profile_download_jobs(
-            "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab",
+            "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/100000000000001/?sk=reels_tab",
             "extension",
             None,
             ["https://www.facebook.com/reel/123"],
@@ -401,12 +401,12 @@ class StartProfileDownloadJobsProfileNameTests(unittest.TestCase):
             None,
         )
         self.assertTrue(result["ok"])
-        self.assertTrue(result["download_dir"].endswith("小妮"))
-        self.assertEqual(result["username"], "61590939736806")
+        self.assertTrue(result["download_dir"].endswith("山田"))
+        self.assertEqual(result["username"], "100000000000001")
 
     def test_people_url_scraped_name_still_wins_over_url_decoded_name(self) -> None:
         result = host.start_profile_download_jobs(
-            "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab",
+            "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/100000000000001/?sk=reels_tab",
             "extension",
             None,
             ["https://www.facebook.com/reel/123"],
@@ -463,7 +463,7 @@ class StartProfileDownloadJobsProfileNameTests(unittest.TestCase):
         """Verify Facebook rejection message uses 'reels from this profile', not '@profile_id'."""
         with self.assertRaises(ValueError) as cm:
             host.start_profile_download_jobs(
-                "https://www.facebook.com/61590939736806/reels",
+                "https://www.facebook.com/100000000000001/reels",
                 "extension",
                 None,
                 ["https://www.facebook.com/invalid/link"],  # Will be rejected

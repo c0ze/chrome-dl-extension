@@ -558,7 +558,7 @@ class SafePathPartUnicodeTests(unittest.TestCase):
         result.encode("utf-8").decode("utf-8")
 
     def test_uses_supplied_fallback_when_empty(self) -> None:
-        self.assertEqual(host.safe_path_part("///", fallback="61590939736806"), "61590939736806")
+        self.assertEqual(host.safe_path_part("///", fallback="100000000000001"), "100000000000001")
 
     def test_strips_control_characters(self) -> None:
         self.assertNotIn("\x00", host.safe_path_part("a\x00b"))
@@ -638,9 +638,9 @@ Add to `native-host/test_yt_dlp_host.py`:
 class FacebookBatchMatchingTests(unittest.TestCase):
     def test_matches_profile_php_reels_tab(self) -> None:
         target = host.batch_target_for_url(
-            "https://www.facebook.com/profile.php?id=61590939736806&sk=reels_tab"
+            "https://www.facebook.com/profile.php?id=100000000000001&sk=reels_tab"
         )
-        self.assertEqual(target, {"provider": "facebook", "key": "61590939736806"})
+        self.assertEqual(target, {"provider": "facebook", "key": "100000000000001"})
 
     def test_matches_vanity_reels_path(self) -> None:
         target = host.batch_target_for_url("https://www.facebook.com/somepage/reels")
@@ -799,7 +799,7 @@ Add to `native-host/test_yt_dlp_host.py`:
 ```python
 class ProfileItemValidationTests(unittest.TestCase):
     def test_facebook_batch_accepts_only_reel_urls(self) -> None:
-        target = {"provider": "facebook", "key": "61590939736806"}
+        target = {"provider": "facebook", "key": "100000000000001"}
         self.assertTrue(host.valid_batch_item("https://www.facebook.com/reel/123", target))
         self.assertFalse(
             host.valid_batch_item("https://www.facebook.com/somepage/posts/9", target)
@@ -916,8 +916,8 @@ Add to `tests/scan.test.js`:
 ```javascript
 test("batchTargetForUrl matches both Facebook reels URL forms", () => {
   assert.deepEqual(
-    batchTargetForUrl("https://www.facebook.com/profile.php?id=61590939736806&sk=reels_tab"),
-    { provider: "facebook", key: "61590939736806" }
+    batchTargetForUrl("https://www.facebook.com/profile.php?id=100000000000001&sk=reels_tab"),
+    { provider: "facebook", key: "100000000000001" }
   );
   assert.deepEqual(batchTargetForUrl("https://www.facebook.com/somepage/reels"), {
     provider: "facebook",
@@ -1202,7 +1202,7 @@ Expected: all PASS, exit 0.
 
 - [ ] **Step 5: Manual gate — run it against the real URL**
 
-Load unpacked in Chrome, open `https://www.facebook.com/profile.php?id=61590939736806&sk=reels_tab`, click the toolbar button. Confirm: the popup opens immediately in a scanning state, reels are found, the folder name matches the display name, and downloads queue one at a time. Then repeat on an X profile `/media` page to confirm no Twitter regression.
+Load unpacked in Chrome, open `https://www.facebook.com/profile.php?id=100000000000001&sk=reels_tab`, click the toolbar button. Confirm: the popup opens immediately in a scanning state, reels are found, the folder name matches the display name, and downloads queue one at a time. Then repeat on an X profile `/media` page to confirm no Twitter regression.
 
 This gate cannot be automated — the Facebook collector depends on live DOM structure that no fixture can prove.
 

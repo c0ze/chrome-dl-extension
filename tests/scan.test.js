@@ -67,8 +67,8 @@ test("Twitter scan collects only video-backed posts owned by the profile", async
 
 test("batchTargetForUrl matches both Facebook reels URL forms", () => {
   assert.deepEqual(
-    batchTargetForUrl("https://www.facebook.com/profile.php?id=61590939736806&sk=reels_tab"),
-    { provider: "facebook", key: "61590939736806" }
+    batchTargetForUrl("https://www.facebook.com/profile.php?id=100000000000001&sk=reels_tab"),
+    { provider: "facebook", key: "100000000000001" }
   );
   assert.deepEqual(batchTargetForUrl("https://www.facebook.com/somepage/reels"), {
     provider: "facebook",
@@ -82,26 +82,26 @@ test("batchTargetForUrl matches both Facebook reels URL forms", () => {
 test("batchTargetForUrl matches the /people/<name>/<digits> reels URL form, keyed on the numeric id", () => {
   assert.deepEqual(
     batchTargetForUrl(
-      "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+      "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/100000000000001/?sk=reels_tab"
     ),
-    { provider: "facebook", key: "61590939736806" }
+    { provider: "facebook", key: "100000000000001" }
   );
 });
 
 test("the same profile via profile.php?id=... and via /people/<name>/<id> produces the same key", () => {
   const viaProfilePhp = batchTargetForUrl(
-    "https://www.facebook.com/profile.php?id=61590939736806&sk=reels_tab"
+    "https://www.facebook.com/profile.php?id=100000000000001&sk=reels_tab"
   );
   const viaPeople = batchTargetForUrl(
-    "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+    "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/100000000000001/?sk=reels_tab"
   );
   assert.deepEqual(viaProfilePhp, viaPeople);
-  assert.equal(viaPeople.key, "61590939736806");
+  assert.equal(viaPeople.key, "100000000000001");
 });
 
 test("/people/<name>/<digits> without sk=reels_tab does not match", () => {
   assert.equal(
-    batchTargetForUrl("https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/"),
+    batchTargetForUrl("https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/100000000000001/"),
     null
   );
 });
@@ -113,7 +113,7 @@ test("/people/reels (two segments) still does not match — the reserved rule is
 test("a non-numeric third segment in a /people/ URL does not match", () => {
   assert.equal(
     batchTargetForUrl(
-      "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/not-a-number/?sk=reels_tab"
+      "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/not-a-number/?sk=reels_tab"
     ),
     null
   );
@@ -122,9 +122,9 @@ test("a non-numeric third segment in a /people/ URL does not match", () => {
 test("facebookPeopleUrlName decodes the percent-encoded name segment", () => {
   assert.equal(
     facebookPeopleUrlName(
-      "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+      "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/100000000000001/?sk=reels_tab"
     ),
-    "小妮"
+    "山田"
   );
 });
 
@@ -135,13 +135,13 @@ test("facebookPeopleUrlName returns null for non-/people/ URLs", () => {
 test("the inline collector in profileScanChunk accepts a /people/<name>/<id> reels page", async () => {
   withPage(
     `<div role="main"><a href="/reel/1001">own reel</a></div>`,
-    "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+    "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/100000000000001/?sk=reels_tab"
   );
 
   const result = await profileScanChunk({
     provider: "facebook",
     hosts: ["facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com"],
-    expectedUsername: "61590939736806",
+    expectedUsername: "100000000000001",
     budgetMs: 50,
     maxPasses: 1,
     progress: {},
@@ -149,7 +149,7 @@ test("the inline collector in profileScanChunk accepts a /people/<name>/<id> ree
 
   assert.notEqual(result.error, "Open a Facebook profile reels page first.");
   assert.equal(result.ok, true);
-  assert.equal(result.username, "61590939736806");
+  assert.equal(result.username, "100000000000001");
 });
 
 test("Facebook scan collects grid reels and excludes suggestions", async () => {
@@ -210,17 +210,17 @@ test("Facebook display name falls back to the decoded /people/ URL segment when 
   withPage(
     `<html><head><title>Facebook</title></head>
      <body><div role="main"><a href="/reel/1">x</a></div></body></html>`,
-    "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+    "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/100000000000001/?sk=reels_tab"
   );
   const result = await profileScanChunk({
     provider: "facebook",
     hosts: ["www.facebook.com"],
-    expectedUsername: "61590939736806",
+    expectedUsername: "100000000000001",
     budgetMs: 50,
     maxPasses: 1,
     progress: {},
   });
-  assert.equal(result.profileName, "小妮");
+  assert.equal(result.profileName, "山田");
 });
 
 test("a scraped page name still wins over the decoded /people/ URL segment", async () => {
@@ -228,12 +228,12 @@ test("a scraped page name still wins over the decoded /people/ URL segment", asy
     `<html><head>
        <meta property="og:title" content="Real Scraped Name">
      </head><body><div role="main"><a href="/reel/1">x</a></div></body></html>`,
-    "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+    "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/100000000000001/?sk=reels_tab"
   );
   const result = await profileScanChunk({
     provider: "facebook",
     hosts: ["www.facebook.com"],
-    expectedUsername: "61590939736806",
+    expectedUsername: "100000000000001",
     budgetMs: 50,
     maxPasses: 1,
     progress: {},
@@ -335,22 +335,22 @@ test("og:title of 'Some Creator | Facebook' yields 'Some Creator'", async () => 
   assert.equal(result.profileName, "Some Creator");
 });
 
-test("the /people/<name>/<id> case: URL name '小妮', scraped '小妮 Reels' yields '小妮'", async () => {
+test("the /people/<name>/<id> case: URL name '山田', scraped '山田 Reels' yields '山田'", async () => {
   withPage(
     `<html><head>
-       <meta property="og:title" content="小妮 Reels">
+       <meta property="og:title" content="山田 Reels">
      </head><body><div role="main"><a href="/reel/1">x</a></div></body></html>`,
-    "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+    "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/100000000000001/?sk=reels_tab"
   );
   const result = await profileScanChunk({
     provider: "facebook",
     hosts: ["www.facebook.com"],
-    expectedUsername: "61590939736806",
+    expectedUsername: "100000000000001",
     budgetMs: 50,
     maxPasses: 1,
     progress: {},
   });
-  assert.equal(result.profileName, "小妮");
+  assert.equal(result.profileName, "山田");
 });
 
 test("a scraped name unrelated to the URL name still wins over the URL name", async () => {
@@ -358,12 +358,12 @@ test("a scraped name unrelated to the URL name still wins over the URL name", as
     `<html><head>
        <meta property="og:title" content="Totally Different Name">
      </head><body><div role="main"><a href="/reel/1">x</a></div></body></html>`,
-    "https://www.facebook.com/people/%E5%B0%8F%E5%A6%AE/61590939736806/?sk=reels_tab"
+    "https://www.facebook.com/people/%E5%B1%B1%E7%94%B0/100000000000001/?sk=reels_tab"
   );
   const result = await profileScanChunk({
     provider: "facebook",
     hosts: ["www.facebook.com"],
-    expectedUsername: "61590939736806",
+    expectedUsername: "100000000000001",
     budgetMs: 50,
     maxPasses: 1,
     progress: {},

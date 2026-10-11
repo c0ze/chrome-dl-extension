@@ -13,7 +13,7 @@ into a folder named after the profile's display name.
 ## Motivating example
 
 ```text
-https://www.facebook.com/profile.php?id=61590939736806&sk=reels_tab
+https://www.facebook.com/profile.php?id=100000000000001&sk=reels_tab
 ```
 
 ## Why scraping is required
