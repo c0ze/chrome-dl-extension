@@ -969,7 +969,12 @@ def facebook_people_url_name(raw_url: str) -> str | None:
     return decoded or None
 
 
-FORBIDDEN_PATH_CHARS = set('/\\:*?"<>|')
+# yt-dlp runs -P through expandvars, so "$" would send files somewhere other
+# than the folder the host records and opens.
+FORBIDDEN_PATH_CHARS = set('/\\:*?"<>|$')
+# Bidi overrides and isolates can disguise a folder name; joiners stay, since
+# scripts such as Persian need them.
+BIDI_CONTROL_CHARS = set("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 MAX_PATH_PART_BYTES = 255
 
 
@@ -979,7 +984,11 @@ def safe_path_part(value: str, fallback: str = "download") -> str:
     if len(normalized) > MAX_PATH_PART_BYTES * 4:
         normalized = normalized[: MAX_PATH_PART_BYTES * 4]
     cleaned = "".join(
-        "_" if character in FORBIDDEN_PATH_CHARS or ord(character) < 32 else character
+        "_"
+        if character in FORBIDDEN_PATH_CHARS
+        or character in BIDI_CONTROL_CHARS
+        or unicodedata.category(character) == "Cc"
+        else character
         for character in normalized
     )
     cleaned = cleaned.strip(" ._")
