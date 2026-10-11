@@ -182,7 +182,8 @@ function partialScanMessage(count) {
   const label = count === 1 ? "video link" : "video links";
   return (
     `The scan stopped early, so this is only part of the profile: ${count} ${label} found so far. ` +
-    "Scroll further down the profile media page and scan again to pick up older posts."
+    "Queue these first, then scroll further down the profile page and scan again to pick up " +
+    "older posts. A new scan starts from where the page is scrolled, and already queued videos are skipped."
   );
 }
 
@@ -190,8 +191,8 @@ function partialScanPromptText(count) {
   const label = count === 1 ? "video" : "videos";
   return (
     "The profile scan stopped early before it reached the end of this profile.\n\n" +
-    `Only ${count} ${label} were found so far. Scrolling further down the profile media ` +
-    "page and scanning again would find more.\n\n" +
+    `Only ${count} ${label} were found so far. After queueing them, scroll further down the ` +
+    "profile page and scan again to find older posts.\n\n" +
     `Queue these ${count} ${label} now anyway?`
   );
 }
@@ -823,8 +824,20 @@ async function startDownload(directory, allowDuplicate = false) {
     if (response.profile) {
       const count = response.queued_count || 0;
       const skipped = response.skipped_count || 0;
+      const limited = response.limit_skipped_count || 0;
+      const rejected = response.rejected_count || 0;
       const label = count === 1 ? "download" : "downloads";
-      const suffix = skipped > 0 ? ` (skipped ${skipped} already queued or downloaded)` : "";
+      const notes = [];
+      if (skipped > 0) {
+        notes.push(`skipped ${skipped} already queued or downloaded`);
+      }
+      if (limited > 0) {
+        notes.push(`${limited} not queued because the queue limit was reached`);
+      }
+      if (rejected > 0) {
+        notes.push(`ignored ${rejected} links that are not from this profile`);
+      }
+      const suffix = notes.length ? ` (${notes.join("; ")})` : "";
       const partialNote = state.scanPartial
         ? " This was a partial scan — scroll the profile media page further and scan again for older posts."
         : "";
