@@ -1316,7 +1316,8 @@ def launch_next_queued_job(
 
         last_job_id = job["id"]
         if launch_reserved_job(job):
-            clear_launch_failures()
+            # Failures are cleared once the worker has run yt-dlp, so a worker
+            # that cannot even start it keeps the backoff growing.
             return {"started": True, "job_id": last_job_id}
 
         failed = True
@@ -1668,6 +1669,7 @@ def run_yt_dlp(command: list[str], job_id: str) -> int:
     pending: dict[str, Any] = {}
     last_written = 0.0
     last_progress: float | None = None
+    process: subprocess.Popen[str] | None = None
     try:
         handle = write_log_stream(handle, f"\n=== Download started at {timestamp()} ===\n")
         process = subprocess.Popen(
@@ -1676,6 +1678,7 @@ def run_yt_dlp(command: list[str], job_id: str) -> int:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            errors="replace",
             bufsize=1,
         )
         update_job(job_id, {"pid": process.pid})
@@ -1724,6 +1727,13 @@ def run_yt_dlp(command: list[str], job_id: str) -> int:
             update_job(job_id, {"error": None})
         handle = write_log_stream(handle, f"=== Download finished with exit code {return_code} ===\n")
         return return_code
+    except BaseException:
+        # The caller marks the job failed and moves on, so yt-dlp must not
+        # keep running untracked alongside the next download.
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        raise
     finally:
         if handle is not None:
             handle.close()
@@ -1759,6 +1769,7 @@ def run_download_worker(encoded_payload: str) -> int:
 
         try:
             return_code = run_yt_dlp(command, job_id)
+            clear_launch_failures()
             if return_code == 0:
                 notify("yt-dlp download complete", safe_url)
                 log_line(f"Download complete for {safe_url}")
@@ -1800,7 +1811,9 @@ def run_download_worker(encoded_payload: str) -> int:
                     "finished_at": timestamp(),
                 },
             )
-            launch_next_queued_job()
+            # yt-dlp could not run, which will fail every queued job the same
+            # way, so back off instead of starting the next one immediately.
+            record_launch_failure()
             return 1
         finally:
             stop_heartbeat.set()
@@ -1822,7 +1835,7 @@ def run_download_worker(encoded_payload: str) -> int:
                 )
         except Exception:  # noqa: BLE001
             pass
-        launch_next_queued_job()
+        record_launch_failure()
         return 1
 
 
