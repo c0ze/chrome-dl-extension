@@ -48,6 +48,10 @@ CHROMIUM_CONFIG_DIRS = {
 }
 # Chrome passes the caller origin to the host; workers inherit it through this.
 EXTENSION_ID_ENV = "YT_DLP_HOST_EXTENSION_ID"
+# Marks yt-dlp and what it starts (ffmpeg) with the job they belong to.
+JOB_ID_ENV = "YT_DLP_HOST_JOB_ID"
+# Set in a worker process to the attempt it was launched for; None in the host.
+WORKER_ATTEMPT: Any = None
 EXTENSION_ORIGIN_RE = re.compile(r"chrome-extension://([a-p]{32})/?")
 TWITTER_HOSTS = {
     "twitter.com",
@@ -59,6 +63,7 @@ TWITTER_HOSTS = {
 TWITTER_STATUS_SEGMENTS = {"status", "statuses"}
 TWITTER_USERNAME_RE = re.compile(r"[A-Za-z0-9_]{1,15}")
 TWITTER_STATUS_ID_RE = re.compile(r"\d+")
+TWITTER_STATUS_PATH_RE = re.compile(r"/status/(\d+)$")
 TWITTER_RESERVED_USERNAMES = {"home", "explore", "notifications", "messages", "i", "settings"}
 FACEBOOK_HOSTS = {
     "facebook.com",
@@ -186,6 +191,10 @@ SENSITIVE_KEY_HINTS = (
     "sig",
     "token",
 )
+# To the end of the argument: one argv element may hold spaces.
+URL_IN_ARGUMENT_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://.+", re.DOTALL)
+# yt-dlp --verbose prints each option source, as in "[debug] User config "path": [...]".
+CONFIG_DUMP_RE = re.compile(r"(\[debug\] [^\[\]]*config[^\[\]]*): \[")
 PROGRESS_RE = re.compile(r"\[download\]\s+(?P<percent>\d+(?:\.\d+)?)%")
 SPEED_RE = re.compile(r"\sat\s+(?P<speed>\S+/s)")
 ETA_RE = re.compile(r"\sETA\s+(?P<eta>\S+)")
@@ -199,6 +208,9 @@ def ensure_state() -> None:
     for directory in (APP_DIR, STATE_DIR):
         try:
             directory.mkdir(mode=PRIVATE_DIR_MODE, parents=True, exist_ok=True)
+            # mkdir leaves a directory that already exists as it is.
+            if directory.stat().st_mode & 0o777 != PRIVATE_DIR_MODE:
+                directory.chmod(PRIVATE_DIR_MODE)
         except OSError:
             pass
 
@@ -524,8 +536,41 @@ def reap_stale_jobs(state: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
         reaped.append(job)
+        kill_orphaned_downloads(job)
 
     return reaped
+
+
+def kill_orphaned_downloads(job: dict[str, Any]) -> None:
+    """SIGKILL the yt-dlp and ffmpeg a dead worker left in its process group.
+
+    They would otherwise keep writing next to a retry of the same job. The
+    group id is the worker's pid, which may have been recycled since, so only
+    processes carrying this job's id in their environment are touched.
+    """
+    job_id = str(job.get("id") or "")
+    pgid = job_worker_pid(job)
+    if not job_id or pgid is None:
+        return
+
+    marker = f"{JOB_ID_ENV}={job_id}".encode("utf-8")
+    try:
+        entries = os.listdir(PROC_ROOT)
+    except OSError:
+        return
+
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        fields = read_proc_stat_fields(int(entry))
+        if not fields or proc_stat_number(fields, PROC_STAT_PGRP_INDEX) != pgid:
+            continue
+        try:
+            environment = (PROC_ROOT / entry / "environ").read_bytes()
+            if marker in environment.split(b"\0"):
+                os.kill(int(entry), signal.SIGKILL)
+        except OSError:
+            continue
 
 
 def reap_stale_jobs_now() -> None:
@@ -545,6 +590,10 @@ def update_job(job_id: str, updates: dict[str, Any]) -> bool:
             if job.get("id") != job_id:
                 continue
             if job.get("status") == "cancelled":
+                return
+            # A retry reserves the job again under a new attempt; the worker of
+            # the old one may still be running and must not write over it.
+            if WORKER_ATTEMPT is not None and job.get("attempt") != WORKER_ATTEMPT:
                 return
 
             job.update(updates)
@@ -676,9 +725,19 @@ def get_jobs() -> dict[str, Any]:
 
 def normalized_url_key(raw_url: Any) -> str:
     try:
-        return normalize_url(str(raw_url))
+        normalized = normalize_url(str(raw_url))
     except (TypeError, ValueError):
         return str(raw_url or "")
+
+    # A status id names one post whatever the username's case, and x.com/i/status/<id>
+    # reaches it with no username at all.
+    parsed = urlparse(normalized)
+    if (parsed.hostname or "").lower() in TWITTER_HOSTS:
+        match = TWITTER_STATUS_PATH_RE.search(parsed.path)
+        if match:
+            return f"https://x.com/i/status/{match.group(1)}"
+
+    return normalized
 
 
 def duplicate_url_index(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -824,7 +883,8 @@ def redact_command(command: list[str]) -> str:
                 redact_next = True
             continue
 
-        parts.append(redact_url(text) if "://" in text else text)
+        # A URL can be the whole argument or follow a flag, as in --proxy=URL.
+        parts.append(URL_IN_ARGUMENT_RE.sub(lambda match: redact_url(match.group(0)), text))
 
     return " ".join(parts)
 
@@ -838,7 +898,7 @@ def notify(summary: str, body: str) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    except FileNotFoundError:
+    except OSError:
         return
 
 
@@ -1130,6 +1190,9 @@ def load_config() -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return DEFAULT_CONFIG.copy()
 
+    if not isinstance(data, dict):
+        return DEFAULT_CONFIG.copy()
+
     return normalize_config(data)
 
 
@@ -1159,6 +1222,10 @@ def resolve_download_dir(value: Any) -> str:
             f"Download folder must be an absolute local path, not '{text}'. "
             "Mount network shares first and use the mounted folder path."
         )
+    if "$" in path:
+        # yt-dlp expands $NAME in -P, so the files would go somewhere other
+        # than the folder checked and recorded here.
+        raise ValueError(f"Download folder must not contain '$': '{text}'.")
     return path
 
 
@@ -1579,12 +1646,13 @@ def cancel_download_job(job_id: str) -> dict[str, Any]:
                     "finished_at": now,
                 }
             )
-            return {
-                "ok": True,
-                "was_running": status == "running",
-                "worker_pid": job.get("worker_pid"),
-                "worker_start_ticks": job.get("worker_start_ticks"),
-            }
+            # Stopped while the queue is still locked: once the slot is free a
+            # retry may start, and it must not find the old yt-dlp still writing.
+            signalled = status == "running" and terminate_process_group(
+                job.get("worker_pid"),
+                job.get("worker_start_ticks"),
+            )
+            return {"ok": True, "was_running": status == "running", "signalled": signalled}
 
         return {"ok": False, "error": "Download job not found."}
 
@@ -1593,11 +1661,7 @@ def cancel_download_job(job_id: str) -> dict[str, Any]:
         return result
 
     if result.get("was_running"):
-        signalled = terminate_process_group(
-            result.get("worker_pid"),
-            result.get("worker_start_ticks"),
-        )
-        if signalled:
+        if result.get("signalled"):
             log_line(f"Cancelled running download job {job_id}")
         else:
             log_line(
@@ -1811,6 +1875,14 @@ def guest_fallback_hint(line: str) -> str | None:
     return None
 
 
+def loggable_output_line(line: str) -> str:
+    """yt-dlp --verbose prints its options, credentials included; drop the values."""
+    match = CONFIG_DUMP_RE.match(line)
+    if not match:
+        return line
+    return f"{match.group(1)}: not logged, see the redacted Command line above\n"
+
+
 def run_yt_dlp(command: list[str], job_id: str) -> int:
     handle = open_log_stream()
     # Parsing output and tracking the process must also work when logging fails.
@@ -1830,6 +1902,7 @@ def run_yt_dlp(command: list[str], job_id: str) -> int:
             text=True,
             errors="replace",
             bufsize=1,
+            env={**os.environ, JOB_ID_ENV: job_id},
         )
         update_job(job_id, {"pid": process.pid})
 
@@ -1843,7 +1916,7 @@ def run_yt_dlp(command: list[str], job_id: str) -> int:
                 last_error = updates["error"]
             progress_only = bool(updates) and is_progress_update(updates)
             if not progress_only:
-                handle = write_log_stream(handle, line)
+                handle = write_log_stream(handle, loggable_output_line(line))
             if not updates:
                 continue
 
@@ -1893,6 +1966,8 @@ def run_yt_dlp(command: list[str], job_id: str) -> int:
 def run_download_worker(encoded_payload: str) -> int:
     try:
         payload = decode_worker_payload(encoded_payload)
+        global WORKER_ATTEMPT
+        WORKER_ATTEMPT = payload.get("attempt")
         url = payload["url"]
         job_id = payload["job_id"]
         source = payload.get("source", "extension")
@@ -2104,9 +2179,10 @@ def start_profile_download_jobs(
             rejected_count += 1
             continue
 
-        if normalized_video_url in seen_urls:
+        url_key = normalized_url_key(normalized_video_url)
+        if url_key in seen_urls:
             continue
-        seen_urls.add(normalized_video_url)
+        seen_urls.add(url_key)
         video_urls.append(normalized_video_url)
 
     limit_skipped_count = max(0, len(video_urls) - MAX_PROFILE_BATCH_JOBS)

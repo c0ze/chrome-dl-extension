@@ -507,6 +507,14 @@ export async function profileScanChunk(options) {
 
       window.scrollBy(0, Math.max(700, Math.floor(window.innerHeight * 0.86)));
       await fbSleep(900);
+      // The tab may have moved on during the wait; another profile's reels
+      // must not be collected under this one's name.
+      if (facebookReelsKeyFromLocation() !== facebookKey) {
+        return {
+          ok: false,
+          error: "The page changed during the scan. Open the profile reels page again and rescan.",
+        };
+      }
       collectFacebookRound();
 
       fbProgress.passes += 1;
@@ -745,6 +753,13 @@ export async function profileScanChunk(options) {
 
     window.scrollBy(0, Math.max(700, Math.floor(window.innerHeight * 0.86)));
     await sleep(900);
+    // The tab may have moved on during the wait.
+    if (mediaUsername(window.location.href) !== username) {
+      return {
+        ok: false,
+        error: "The page changed during the scan. Open the profile media page again and rescan.",
+      };
+    }
     collectVisibleLinks();
 
     progress.passes += 1;

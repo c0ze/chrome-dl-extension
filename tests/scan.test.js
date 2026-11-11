@@ -729,3 +729,48 @@ test("a Facebook scan skips a reel link whose href cannot be parsed", async () =
   assert.equal(result.ok, true);
   assert.deepEqual(result.urls, ["https://www.facebook.com/reel/1001"]);
 });
+
+// A profile scan runs for many seconds; the tab can move to another profile
+// meanwhile, and its videos must not be queued under the first profile's name.
+async function scanWhileNavigating(provider, hosts, html, fromUrl, toUrl, expectedUsername) {
+  const dom = withPage(html, fromUrl);
+  const scan = profileScanChunk({
+    provider,
+    hosts,
+    reserved: [],
+    expectedUsername,
+    budgetMs: 1500,
+    maxPasses: 5,
+    progress: {},
+  });
+  dom.reconfigure({ url: toUrl });
+  return scan;
+}
+
+test("a Facebook scan stops when the tab navigates to another profile mid-scan", async () => {
+  const result = await scanWhileNavigating(
+    "facebook",
+    ["facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com"],
+    `<div role="main"><a href="/reel/2002">another profile's reel</a></div>`,
+    "https://www.facebook.com/somepage/reels",
+    "https://www.facebook.com/otherpage/reels",
+    "somepage"
+  );
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /changed/);
+});
+
+test("a Twitter scan stops when the tab navigates to another profile mid-scan", async () => {
+  const result = await scanWhileNavigating(
+    "twitter",
+    ["x.com", "twitter.com"],
+    `<a href="/alice/status/1/video/1">clip</a>`,
+    "https://x.com/alice/media",
+    "https://x.com/bob/media",
+    "alice"
+  );
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /changed/);
+});

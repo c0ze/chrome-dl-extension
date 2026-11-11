@@ -985,6 +985,308 @@ class DownloadDiagnosticsTests(unittest.TestCase):
         job = self.run_output("", 2)
         self.assertIn("exit code 2", job["error"])
 
+class RedactEmbeddedUrlTests(unittest.TestCase):
+    """Logs are kept for weeks, so a credential must not survive in any spelling."""
+
+    def test_redacts_url_credentials_attached_to_an_option(self) -> None:
+        command = [
+            "yt-dlp", "--proxy=http://user:SECRET@proxy:8080",
+            "--geo-verification-proxy=socks5://user:SECRET@host:1080",
+            "--referer=https://example.com/?token=SECRET",
+        ]
+        redacted = host.redact_command(command)
+        self.assertNotIn("SECRET", redacted)
+        self.assertIn("--proxy=http://***@proxy:8080", redacted)
+
+    def test_credentials_containing_spaces_are_redacted_whole(self) -> None:
+        # One argv element can hold spaces; the URL runs to the end of it.
+        for command in (
+            ["--proxy", "http://user:hello SECRET@proxy:8080"],
+            ["--proxy=http://user:hello SECRET@proxy:8080"],
+            ["--referer", "https://example.com/?token=hello SECRET"],
+        ):
+            with self.subTest(command=command):
+                self.assertNotIn("SECRET", host.redact_command(["yt-dlp", *command]))
+
+    def test_separate_url_value_is_still_redacted(self) -> None:
+        redacted = host.redact_command(["yt-dlp", "--proxy", "http://user:SECRET@proxy:8080"])
+        self.assertEqual(redacted, "yt-dlp --proxy http://***@proxy:8080")
+
+
+class TwitterDuplicateKeyTests(unittest.TestCase):
+    """A post is one video however its URL is spelled; the status id identifies it."""
+
+    def duplicate(self, queued_url: str, new_url: str) -> dict[str, Any] | None:
+        state = {"jobs": [{"id": "a", "url": queued_url, "status": "complete"}]}
+        return host.duplicate_download_for_url(state, host.normalize_url(new_url))
+
+    def test_username_case_does_not_hide_a_duplicate(self) -> None:
+        self.assertIsNotNone(
+            self.duplicate("https://x.com/Foo/status/123", "https://twitter.com/foo/status/123")
+        )
+
+    def test_id_only_link_matches_the_named_one(self) -> None:
+        self.assertIsNotNone(
+            self.duplicate("https://x.com/foo/status/123", "https://x.com/i/status/123")
+        )
+
+    def test_different_posts_are_not_duplicates(self) -> None:
+        self.assertIsNone(
+            self.duplicate("https://x.com/foo/status/123", "https://x.com/foo/status/124")
+        )
+
+    def test_queued_url_keeps_the_username(self) -> None:
+        # The stored URL still names the account: batch validation and the
+        # dashboard title read it.
+        self.assertEqual(
+            host.normalize_url("https://x.com/Foo/status/123"), "https://x.com/Foo/status/123"
+        )
+
+
+class PrivateStateTests(unittest.TestCase):
+    def test_existing_directories_are_made_private(self) -> None:
+        # Older installs created the state directory with the default umask.
+        with tempfile.TemporaryDirectory() as temp:
+            app_dir, state_dir = Path(temp) / "app", Path(temp) / "state"
+            state_dir.mkdir(mode=0o755)
+            with (
+                unittest.mock.patch.object(host, "APP_DIR", app_dir),
+                unittest.mock.patch.object(host, "STATE_DIR", state_dir),
+            ):
+                host.ensure_state()
+            self.assertEqual(os.stat(state_dir).st_mode & 0o777, 0o700)
+            self.assertEqual(os.stat(app_dir).st_mode & 0o777, 0o700)
+
+
+class LoadConfigTests(unittest.TestCase):
+    def test_config_that_is_not_an_object_reads_as_defaults(self) -> None:
+        # Same as malformed JSON: Options must still open so it can be fixed.
+        for text in ["[]", "3", '"chrome"', "null"]:
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as temp:
+                config_path = Path(temp) / "config.json"
+                config_path.write_text(text)
+                with (
+                    unittest.mock.patch.object(host, "CONFIG_PATH", config_path),
+                    unittest.mock.patch.object(host, "ensure_state"),
+                ):
+                    self.assertEqual(host.load_config(), host.DEFAULT_CONFIG)
+
+
+class NotifyTests(unittest.TestCase):
+    def test_a_notifier_that_cannot_run_does_not_fail_the_download(self) -> None:
+        with unittest.mock.patch.object(host.subprocess, "run", side_effect=PermissionError("denied")):
+            host.notify("summary", "body")
+
+
+class InstallerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        import importlib.util
+
+        path = Path(__file__).resolve().parent.parent / "scripts" / "install_native_host.py"
+        spec = importlib.util.spec_from_file_location("install_native_host", path)
+        self.installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.installer)
+
+    def merged(self, existing: dict | None, **overrides: Any) -> dict:
+        options = {"download_dir": None, "cookies_browser": None, "cookies_profile": None,
+                   "yt_dlp_path": None, "extra_arg": None, **overrides}
+        return self.installer.merge_config(existing, unittest.mock.MagicMock(**options))
+
+    def test_relative_download_dir_is_stored_absolute(self) -> None:
+        # The host rejects a relative folder, which would break every request.
+        self.assertEqual(
+            self.merged(None, download_dir="videos")["download_dir"], os.path.abspath("videos")
+        )
+        self.assertEqual(self.merged(None, download_dir="~/Videos")["download_dir"], "~/Videos")
+        self.assertEqual(self.merged(None, download_dir="/srv/v")["download_dir"], "/srv/v")
+
+    def test_existing_config_that_cannot_be_used_gives_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            for text in ["{not json", "[]"]:
+                with self.subTest(text=text):
+                    path.write_text(text)
+                    existing = self.installer.read_existing_config(path)
+                    self.assertEqual(self.merged(existing), self.installer.DEFAULT_CONFIG)
+            with unittest.mock.patch.object(Path, "read_text", side_effect=PermissionError("denied")):
+                self.assertIsNone(self.installer.read_existing_config(path))
+            path.write_text('{"profile": "Profile 1"}')
+            self.assertEqual(
+                self.merged(self.installer.read_existing_config(path))["profile"], "Profile 1"
+            )
+
+    def test_failed_config_write_keeps_the_previous_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config.json"
+            path.write_text('{"profile": "Profile 1"}')
+            with (
+                unittest.mock.patch.object(self.installer, "INSTALL_DIR", Path(temp)),
+                unittest.mock.patch.object(self.installer.json, "dumps", side_effect=OSError("disk full")),
+                self.assertRaises(OSError),
+            ):
+                self.installer.write_private_json(path, {"profile": ""})
+            self.assertEqual(json.loads(path.read_text()), {"profile": "Profile 1"})
+            self.installer.write_private_json(path, {"profile": "Default"})
+            self.assertEqual(json.loads(path.read_text()), {"profile": "Default"})
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.assertEqual(os.listdir(temp), ["config.json"])
+
+
+class CancelKeepsSlotTests(unittest.TestCase):
+    def test_running_download_is_stopped_before_its_slot_is_released(self) -> None:
+        # Releasing the queue first lets a retry start a second yt-dlp on the
+        # same files while the cancelled one is still writing them.
+        state = {"jobs": [{"id": "a", "url": "https://x.com/a/status/1", "status": "running",
+                           "worker_pid": 4242, "worker_start_ticks": 7}]}
+        locked = []
+
+        def mutate(mutator: Any) -> Any:
+            locked.append(True)
+            try:
+                return mutator(state)
+            finally:
+                locked.pop()
+
+        def terminate(pid: Any, ticks: Any) -> bool:
+            self.assertTrue(locked, "the worker must be stopped while the queue is locked")
+            self.assertEqual((pid, ticks), (4242, 7))
+            return True
+
+        with (
+            unittest.mock.patch.object(host, "mutate_jobs", side_effect=mutate),
+            unittest.mock.patch.object(host, "terminate_process_group", side_effect=terminate) as stop,
+            unittest.mock.patch.object(host, "launch_next_queued_job") as launch_next,
+            unittest.mock.patch.object(host, "log_line"),
+        ):
+            self.assertTrue(host.cancel_download_job("a")["ok"])
+        stop.assert_called_once()
+        launch_next.assert_called_once()
+        self.assertEqual(state["jobs"][0]["status"], "cancelled")
+
+
+class WorkerAttemptTests(unittest.TestCase):
+    def update(self, worker_attempt: Any) -> tuple[bool, dict[str, Any]]:
+        state = {"jobs": [{"id": "a", "status": "running", "attempt": "new", "progress": 0}]}
+        with (
+            unittest.mock.patch.object(host, "mutate_jobs", side_effect=lambda mutator: mutator(state)),
+            unittest.mock.patch.object(host, "WORKER_ATTEMPT", worker_attempt),
+        ):
+            applied = host.update_job("a", {"status": "failed"})
+        return applied, state["jobs"][0]
+
+    def test_worker_of_an_older_attempt_cannot_touch_the_retry(self) -> None:
+        # After cancel and retry the old worker may still be running.
+        applied, job = self.update("old")
+        self.assertFalse(applied)
+        self.assertEqual(job["status"], "running")
+
+    def test_current_worker_and_the_host_can_update(self) -> None:
+        for attempt in ("new", None):
+            with self.subTest(attempt=attempt):
+                applied, job = self.update(attempt)
+                self.assertTrue(applied)
+                self.assertEqual(job["status"], "failed")
+
+    def test_worker_error_before_claim_respects_the_attempt(self) -> None:
+        state = {"jobs": [{"id": "job", "status": "running", "attempt": "new"}]}
+        payload = host.encode_worker_payload(
+            {"id": "job", "attempt": "old", "url": "https://x.com/a/status/1"})
+        with (
+            unittest.mock.patch.object(host, "mutate_jobs", side_effect=lambda mutator: mutator(state)),
+            unittest.mock.patch.object(host, "load_config", side_effect=ValueError("bad config")),
+            unittest.mock.patch.object(host, "notify"),
+            unittest.mock.patch.object(host, "log_line"),
+            unittest.mock.patch.object(host, "record_launch_failure"),
+            unittest.mock.patch.object(host, "WORKER_ATTEMPT", None),
+        ):
+            self.assertEqual(host.run_download_worker(payload), 1)
+        self.assertEqual(state["jobs"][0]["status"], "running")
+
+
+class OrphanedDownloadTests(unittest.TestCase):
+    def spawn(self, job_id: str) -> Any:
+        import subprocess
+
+        process = subprocess.Popen(
+            ["sleep", "30"], start_new_session=True,
+            env={**os.environ, host.JOB_ID_ENV: job_id},
+        )
+        self.addCleanup(process.wait)
+        self.addCleanup(process.kill)
+        return process
+
+    def test_reaping_a_dead_worker_kills_the_download_it_left_behind(self) -> None:
+        # Otherwise a retry runs next to the surviving yt-dlp or ffmpeg.
+        process = self.spawn("job-a")
+        host.kill_orphaned_downloads({"id": "job-a", "worker_pid": process.pid})
+        self.assertEqual(process.wait(timeout=5), -9)
+
+    def test_processes_of_other_jobs_are_left_alone(self) -> None:
+        # Pids are recycled, so the group id alone does not prove ownership.
+        process = self.spawn("job-b")
+        host.kill_orphaned_downloads({"id": "job-a", "worker_pid": process.pid})
+        self.assertIsNone(process.poll())
+
+    def test_stale_job_is_reaped_with_its_downloads(self) -> None:
+        state = {"jobs": [{"id": "a", "status": "running", "worker_pid": 4242}]}
+        with (
+            unittest.mock.patch.object(host, "job_worker_is_alive", return_value=False),
+            unittest.mock.patch.object(host, "kill_orphaned_downloads") as kill,
+        ):
+            host.reap_stale_jobs(state)
+        kill.assert_called_once()
+        self.assertEqual(state["jobs"][0]["status"], "failed")
+
+
+class LogRedactionTests(unittest.TestCase):
+    def test_verbose_option_dump_is_kept_out_of_the_log(self) -> None:
+        # yt-dlp --verbose prints its arguments, credentials included.
+        process = unittest.mock.MagicMock()
+        process.stdout = io.StringIO(
+            "[debug] Command-line config: ['--proxy', 'http://user:SECRET@proxy:8080', '-v']\n"
+            "[debug] User config \"/home/u/yt-dlp.conf\": ['--password', 'SECRET']\n"
+            "[debug] yt-dlp version 2026.01.01\n"
+        )
+        process.wait.return_value = 0
+        written: list[str] = []
+        with (
+            unittest.mock.patch.object(host, "open_log_stream", return_value=io.StringIO()),
+            unittest.mock.patch.object(
+                host, "write_log_stream", side_effect=lambda handle, text: written.append(text) or handle),
+            unittest.mock.patch.object(host.subprocess, "Popen", return_value=process),
+            unittest.mock.patch.object(host, "update_job"),
+        ):
+            host.run_yt_dlp(["yt-dlp", "https://example.invalid/"], "test-job")
+        log = "".join(written)
+        self.assertNotIn("SECRET", log)
+        self.assertIn("Command-line config", log)
+        self.assertIn("yt-dlp version", log)
+
+
+class DownloadDirExpansionTests(unittest.TestCase):
+    def test_folder_with_a_variable_reference_is_refused(self) -> None:
+        # yt-dlp expands $NAME in -P, so files would land outside the folder
+        # the host checked and recorded.
+        for folder in ("/srv/videos/$USER", "/srv/${HOME}/v", "~/$x"):
+            with self.subTest(folder=folder), self.assertRaises(ValueError):
+                host.resolve_download_dir(folder)
+
+
+class BatchDuplicateTests(unittest.TestCase):
+    def test_same_post_spelled_twice_in_one_batch_is_queued_once(self) -> None:
+        state = {"jobs": []}
+        with (
+            tempfile.TemporaryDirectory() as temp,
+            unittest.mock.patch.object(host, "mutate_jobs", side_effect=lambda mutator: mutator(state)),
+            unittest.mock.patch.object(host, "launch_next_queued_job", return_value={"started": False}),
+        ):
+            response = host.start_profile_download_jobs(
+                "https://x.com/Foo/media", "test", temp,
+                ["https://x.com/Foo/status/123", "https://x.com/foo/status/123",
+                 "https://x.com/Foo/status/124"],
+            )
+        self.assertEqual(response["queued_count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
