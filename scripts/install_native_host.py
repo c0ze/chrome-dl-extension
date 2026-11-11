@@ -39,13 +39,35 @@ def compute_extension_id(manifest_path: Path) -> str:
     return "".join(chr(ord("a") + int(char, 16)) for char in digest)
 
 
+def absolute_download_dir(value: str) -> str:
+    """The host rejects relative folders; resolve one given on the command line."""
+    if value.startswith("~") or os.path.isabs(value):
+        return value
+    return os.path.abspath(value)
+
+
+def read_existing_config(path: Path) -> dict | None:
+    """The current config, or None when there is none worth keeping."""
+    if not path.exists():
+        return None
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        print(f"Warning: ignoring unreadable {path} ({error}); writing defaults.")
+        return None
+    if not isinstance(config, dict):
+        print(f"Warning: ignoring {path}, which is not a JSON object; writing defaults.")
+        return None
+    return config
+
+
 def merge_config(existing: dict | None, args: argparse.Namespace) -> dict:
     config = DEFAULT_CONFIG.copy()
     if existing:
         config.update(existing)
 
     if args.download_dir is not None:
-        config["download_dir"] = args.download_dir
+        config["download_dir"] = absolute_download_dir(args.download_dir)
     if args.cookies_browser is not None:
         config["browser"] = args.cookies_browser
     if args.cookies_profile is not None:
@@ -72,10 +94,18 @@ def ensure_install_dir() -> None:
 
 def write_private_json(path: Path, payload: dict) -> None:
     ensure_install_dir()
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    os.fchmod(descriptor, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, indent=2) + "\n")
+    # Written beside the config and renamed over it, so a failed write keeps
+    # the previous config and a running worker never reads half of one.
+    temp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2) + "\n")
+        temp_path.replace(path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
 
 
 def install_host_script(source_path: Path) -> None:
@@ -117,11 +147,7 @@ def main() -> int:
 
     install_host_script(source_host_path)
 
-    existing_config = None
-    if CONFIG_PATH.exists():
-        existing_config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-
-    config = merge_config(existing_config, args)
+    config = merge_config(read_existing_config(CONFIG_PATH), args)
     write_private_json(CONFIG_PATH, config)
 
     native_host_dir = NATIVE_HOST_DIRS[args.browser]

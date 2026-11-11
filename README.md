@@ -205,6 +205,8 @@ with 0700.
 - Download folders must be absolute local paths, or start with `~`. A network
   location such as `smb://nas/share` is rejected: mount the share and use its
   mounted path instead.
+- A download folder must not contain `$`: yt-dlp would expand it as a variable
+  and save somewhere else.
 - A download folder must exist, or at least its parent folder must. A path
   whose parent is missing, such as a remembered folder on a network share
   that has since been mounted elsewhere, is refused instead of being rebuilt
