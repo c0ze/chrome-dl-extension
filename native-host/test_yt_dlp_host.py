@@ -1369,6 +1369,9 @@ class HandleStateCase(unittest.TestCase):
         )
         config.start()
         self.addCleanup(config.stop)
+        state_dir = unittest.mock.patch.object(host, "STATE_DIR", self.root)
+        state_dir.start()
+        self.addCleanup(state_dir.stop)
         archive = unittest.mock.patch.object(host, "ARCHIVE_PATH", self.root / "archive.txt")
         archive.start()
         self.addCleanup(archive.stop)
@@ -1931,3 +1934,46 @@ class DownloadArchiveTests(unittest.TestCase):
         self.assertEqual(
             host.parse_progress_line(line), {"skipped": True, "status_detail": "Already downloaded"}
         )
+
+
+class TrashDownloadTests(LibraryCase):
+    def job(self, **fields: Any) -> None:
+        self.write_jobs([{"id": "a" * 32, "url": "https://x.com/alice/status/1", "status": "complete", **fields}])
+
+    def test_a_finished_download_goes_to_the_trash_and_leaves_the_dashboard(self) -> None:
+        video = self.video("hard j/alice/alice-1234567890001.mp4")
+        self.job(filename=str(video))
+
+        response = host.trash_download("a" * 32)
+
+        self.assertTrue(response["ok"])
+        self.assertTrue((self.library / "_trash/hard j/alice/alice-1234567890001.mp4").is_file())
+        self.assertIsNone(host.get_download_job("a" * 32))
+
+    def test_a_file_outside_the_library_is_left_alone(self) -> None:
+        outside = self.root / "elsewhere.mp4"
+        outside.write_bytes(b"x")
+        self.job(filename=str(outside))
+
+        response = host.trash_download("a" * 32)
+
+        self.assertFalse(response["ok"])
+        self.assertTrue(outside.exists())
+        self.assertIsNotNone(host.get_download_job("a" * 32))
+
+    def test_a_download_in_flight_is_not_trashed(self) -> None:
+        video = self.video("hard j/alice/part.mp4")
+        self.job(filename=str(video), status="queued")
+
+        self.assertFalse(host.trash_download("a" * 32)["ok"])
+        self.assertTrue(video.exists())
+
+    def test_library_messages_cannot_reach_outside_the_library(self) -> None:
+        with self.assertRaises(ValueError):
+            host.handle_library_message("play_library_file", {"path": "../../etc/passwd"})
+        with self.assertRaises(ValueError):
+            host.handle_library_message("get_library_report", {"kind": "everything"})
+        self.assertIsNone(host.handle_library_message("download", {}))
+
+    def test_thumbnail_keys_cannot_name_other_files(self) -> None:
+        self.assertEqual(host.library_thumbnails(["../../x", "a" * 39, 5])["thumbs"], {})

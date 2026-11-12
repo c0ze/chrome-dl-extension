@@ -181,3 +181,33 @@ export function folderForTarget(entries, handle, isProfile) {
     directory: isProfile ? entry.base_dir : `${entry.base_dir}/${entry.name}`,
   };
 }
+
+export function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} GB`;
+  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MB`;
+  return `${value > 0 ? Math.max(1, Math.round(value / 1024)) : 0} KB`;
+}
+
+export function formatDuration(seconds) {
+  const total = Math.round(Number(seconds) || 0);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+/** One line for the scan panel, from the host's scan status. */
+export function scanSummary(status) {
+  if (status.state === "running") {
+    const count = status.total ? ` ${status.done} of ${status.total}` : "";
+    return `${status.stage || "Scanning"}${count}…`;
+  }
+  if (status.state === "failed") {
+    return status.error || "The last scan failed.";
+  }
+  if (!status.finished_at) {
+    return "The library has not been scanned yet.";
+  }
+  return (
+    `${status.scanned} videos scanned on ${status.finished_at}. Broken: ${status.broken_count}. ` +
+    `Duplicate sets: ${status.group_count}, taking ${formatBytes(status.duplicate_bytes)} extra.`
+  );
+}

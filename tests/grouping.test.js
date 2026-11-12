@@ -162,3 +162,34 @@ test("a known handle's download is steered to the folder it already has", () => 
   assert.equal(folderForTarget(entries, "stranger", false), null);
   assert.equal(folderForTarget(entries, "", false), null);
 });
+
+import { formatBytes, formatDuration, scanSummary } from "../extension/grouping.js";
+
+test("sizes and lengths read naturally", () => {
+  assert.equal(formatBytes(900), "1 KB");
+  assert.equal(formatBytes(0), "0 KB");
+  assert.equal(formatBytes(5 * 1024 ** 2), "5.0 MB");
+  assert.equal(formatBytes(3.25 * 1024 ** 3), "3.3 GB");
+  assert.equal(formatDuration(75.4), "1:15");
+  assert.equal(formatDuration(null), "0:00");
+});
+
+test("the scan line says what is happening or what the last scan found", () => {
+  assert.equal(scanSummary({ state: "never" }), "The library has not been scanned yet.");
+  assert.equal(
+    scanSummary({ state: "running", stage: "Reading videos", done: 20, total: 300 }),
+    "Reading videos 20 of 300…"
+  );
+  assert.equal(scanSummary({ state: "failed", error: "The share went away." }), "The share went away.");
+  assert.equal(
+    scanSummary({
+      state: "done",
+      finished_at: "2026-11-12 18:00:00",
+      scanned: 100,
+      broken_count: 2,
+      group_count: 5,
+      duplicate_bytes: 2 * 1024 ** 3,
+    }),
+    "100 videos scanned on 2026-11-12 18:00:00. Broken: 2. Duplicate sets: 5, taking 2.0 GB extra."
+  );
+});

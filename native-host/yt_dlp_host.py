@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, TextIO
 from urllib.parse import parse_qsl, parse_qs, unquote, urlencode, urlparse, urlunparse
 
+import library_check
+
 APP_DIR = Path.home() / ".local" / "share" / "yt-dlp-browser-host"
 STATE_DIR = Path.home() / ".local" / "state" / "yt-dlp-browser-host"
 CONFIG_PATH = APP_DIR / "config.json"
@@ -1914,6 +1916,10 @@ def play_download(job_id: str) -> dict[str, Any]:
     if not video or not video.is_file():
         return {"ok": False, "error": "The video file is not there. It may have been moved or deleted."}
 
+    return play_video(video)
+
+
+def play_video(video: Path) -> dict[str, Any]:
     command = player_command(load_config()["player"])
     executable = shutil.which(os.path.expanduser(command[0]))
     if not executable:
@@ -1930,6 +1936,95 @@ def play_download(job_id: str) -> dict[str, Any]:
         start_new_session=True,
     )
     return {"ok": True, "path": str(video)}
+
+
+def trash_download(job_id: str) -> dict[str, Any]:
+    """Move a finished download's file to the library trash and drop it from the dashboard."""
+    job = get_download_job(job_id)
+    if not job:
+        return {"ok": False, "error": "Download job not found."}
+    if job.get("status") in ACTIVE_STATUSES:
+        return {"ok": False, "error": "Cancel the download before removing its file."}
+
+    filename = str(job.get("filename") or "").strip().strip('"')
+    root = library_root()
+    try:
+        relative = str(Path(os.path.expanduser(filename)).relative_to(root)) if filename else ""
+    except ValueError:
+        relative = ""
+    if not relative:
+        return {"ok": False, "error": f"Only videos inside {root} can be moved to its trash folder."}
+
+    response = library_check.trash_files(root, STATE_DIR, [relative])
+    if response["ok"]:
+        remove_download_job(job_id)
+    return response
+
+
+def library_thumbnails(keys: list[Any]) -> dict[str, Any]:
+    thumbs: dict[str, str] = {}
+    used = 0
+    for key in keys:
+        if not re.fullmatch(r"[0-9a-f]{40}", str(key)):
+            continue
+        try:
+            data = (library_check.thumbs_dir(STATE_DIR) / f"{key}.jpg").read_bytes()
+        except OSError:
+            continue
+        encoded = base64.b64encode(data).decode("ascii")
+        if used + len(encoded) > MAX_THUMBNAIL_RESPONSE_BYTES:
+            break
+        used += len(encoded)
+        thumbs[str(key)] = encoded
+    return {"ok": True, "thumbs": thumbs}
+
+
+def handle_library_message(message_type: str, message: dict[str, Any]) -> dict[str, Any] | None:
+    """The library check's messages; None when the message is not one of them."""
+    if message_type == "start_library_scan":
+        return library_check.start_scan(library_root(), STATE_DIR)
+
+    if message_type == "get_library_scan":
+        return {"ok": True, "library_root": str(library_root()), **library_check.scan_status(STATE_DIR)}
+
+    if message_type == "get_library_report":
+        kind = str(message.get("kind") or "")
+        if kind not in {"broken", "identical", "similar"}:
+            raise ValueError("get_library_report expects kind broken, identical or similar.")
+        return library_check.report_page(
+            STATE_DIR, kind, int(message.get("offset") or 0), int(message.get("limit") or 50)
+        )
+
+    if message_type == "trash_library_files":
+        paths = message.get("paths")
+        if message.get("all_identical"):
+            paths = library_check.extra_identical_files(STATE_DIR)
+        if not isinstance(paths, list):
+            raise ValueError("trash_library_files expects a paths list.")
+        return library_check.trash_files(library_root(), STATE_DIR, paths)
+
+    if message_type == "get_library_thumbnails":
+        keys = message.get("keys")
+        if not isinstance(keys, list):
+            raise ValueError("get_library_thumbnails expects a keys list.")
+        return library_thumbnails(keys)
+
+    if message_type in {"play_library_file", "open_library_folder"}:
+        video = library_check.library_file(library_root(), message.get("path"))
+        if not video.is_file():
+            return {"ok": False, "error": "The video file is not there. Scan the library again."}
+        if message_type == "play_library_file":
+            return play_video(video)
+        open_folder(video.parent)
+        return {"ok": True, "path": str(video.parent)}
+
+    if message_type == "trash_download":
+        job_id = str(message.get("job_id", "")).strip()
+        if not job_id:
+            raise ValueError("Missing job_id field.")
+        return trash_download(job_id)
+
+    return None
 
 
 def decode_worker_payload(encoded_payload: str) -> dict[str, Any]:
@@ -3280,6 +3375,10 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
         if not job_id:
             raise ValueError("Missing job_id field.")
         return open_download_folder(job_id)
+
+    library_response = handle_library_message(str(message_type), message)
+    if library_response is not None:
+        return library_response
 
     if message_type == "play_download":
         job_id = str(message.get("job_id", "")).strip()

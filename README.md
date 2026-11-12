@@ -80,6 +80,13 @@ is loaded.
   archive is skipped and shown as `Already downloaded`; confirming the
   duplicate prompt downloads it anyway. Older files named without an id cannot
   be recognised this way.
+- `Library Check` (in the dashboard header) opens a page that scans the
+  download folder for broken videos (empty, unreadable, or cut short) and for
+  duplicates: identical copies, and the same video at another quality. The
+  scan runs in the background, needs `ffmpeg` and `ffprobe`, and only reads
+  new or changed files the next time. Removing a file there, or with `Trash`
+  on a finished download, moves it to `_trash` at the top of the download
+  folder, keeping its group and handle path; nothing is deleted.
 - The handle list holds every X/Twitter account you have downloaded from.
   `Check` (or `Check All`) opens the handle's media page in a background tab,
   scans the top of it and closes it; posts that were not downloaded yet show as

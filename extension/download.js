@@ -530,6 +530,23 @@ async function playDashboardJob(jobId) {
   }
 }
 
+async function trashDashboardJob(job) {
+  if (!window.confirm(`Move ${formatJobTitle(job)} to the trash folder?`)) {
+    return;
+  }
+
+  try {
+    const response = await callHost({ type: "trash_download", job_id: job.id });
+    if (!response?.ok) {
+      throw new Error(response?.error || "Could not move the video to the trash folder.");
+    }
+    showMessage("success", `Moved to ${response.trash}`);
+    void pollDownloads();
+  } catch (error) {
+    showMessage("error", error.message || "Could not move the video to the trash folder.");
+  }
+}
+
 async function openDashboardFolder(jobId) {
   try {
     const response = await callHost({ type: "open_download_folder", job_id: jobId });
@@ -613,9 +630,17 @@ function makeJobActions(job) {
     );
   }
 
+  if (job.status === "complete" && job.filename) {
+    actions.append(
+      makeActionButton("Trash", "Move the video to the library's trash folder", "button-danger", () => {
+        void trashDashboardJob(job);
+      })
+    );
+  }
+
   if (job.status !== "running") {
     actions.append(
-      makeActionButton("Remove", "Remove this item from the dashboard", "button-danger", () => {
+      makeActionButton("Remove", "Remove this item from the dashboard. The file is kept.", "button-muted-small", () => {
         void removeDashboardJob(job.id);
       })
     );
