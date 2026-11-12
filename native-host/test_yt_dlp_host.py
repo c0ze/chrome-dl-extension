@@ -1929,6 +1929,9 @@ class DownloadArchiveTests(unittest.TestCase):
     def test_a_download_asked_for_again_on_purpose_bypasses_the_archive(self) -> None:
         self.assertNotIn("--download-archive", self.command(use_archive=False))
 
+    def test_a_download_missing_segments_fails_instead_of_saving_a_frozen_video(self) -> None:
+        self.assertIn("--abort-on-unavailable-fragments", self.command())
+
     def test_a_skipped_video_is_not_reported_as_a_fresh_download(self) -> None:
         line = "[download] 2063957158568529920: has already been recorded in the archive"
         self.assertEqual(

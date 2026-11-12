@@ -69,6 +69,20 @@ class BrokenFileTests(LibraryCheckCase):
 
         self.assertEqual(broken, ["g/alice/cut.mp4"])
 
+    def test_a_picture_that_stops_while_the_sound_plays_on_says_where(self) -> None:
+        # What a download that skipped video segments leaves behind.
+        path = self.root / "g/alice/frozen.mp4"
+        path.parent.mkdir(parents=True)
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-t", "2", "-i", "testsrc=size=320x240:rate=10",
+             "-f", "lavfi", "-t", "8", "-i", "sine", "-pix_fmt", "yuv420p", str(path)],
+            check=True,
+        )
+
+        broken = self.scan()["broken"]
+
+        self.assertEqual([item["error"] for item in broken], ["picture stops at 0:01 of 0:08"])
+
     def test_a_video_with_only_sound_is_broken(self) -> None:
         path = self.root / "g/alice/sound.mp4"
         path.parent.mkdir(parents=True)
