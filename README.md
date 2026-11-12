@@ -64,7 +64,9 @@ is loaded.
   `<group>/<handle>/`, for example `hard j/someone/`. `Import` reads that
   layout into the handle list: top-level folders are groups, the folders in
   them are handles, and a folder nested inside a handle is one of its former
-  handles. Importing again is safe; it only adds what is new.
+  handles. A creator with a folder in more than one group is one handle that
+  is listed under each of them; its actions apply to the folder in the group
+  you use them from. Importing again is safe; it only adds what is new.
 - `Edit` on a handle renames it or files it under another group. A rename
   creates a folder for the new handle and moves the old handle's folder inside
   it, so one creator's videos stay under their current handle; renaming to a

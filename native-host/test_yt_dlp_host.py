@@ -1705,14 +1705,20 @@ class LibraryImportTests(LibraryCase):
         self.assertEqual(response["archive_added"], 0)
         self.assertEqual(self.handles()["alice"]["pending_count"], 1)
 
-    def test_one_handle_in_two_groups_is_reported(self) -> None:
-        self.video("hard j/alice/a.mp4")
-        self.video("white/alice/b.mp4")
+    def test_a_creator_filed_under_two_groups_is_one_handle_with_both_folders(self) -> None:
+        # Groups sort content, so the same creator can have a folder in several.
+        self.video("dildo j/alice/a.mp4")
+        self.video("hard j/alice/b.mp4")
+        self.video("hard j/alice/c.mp4")
 
         response = host.import_library()
 
-        self.assertEqual(len(response["duplicates"]), 1)
-        self.assertIn("hard j/alice", response["duplicates"][0])
+        self.assertEqual(response["in_several_groups"], 1)
+        entry = self.handles()["alice"]
+        self.assertEqual([folder["group"] for folder in entry["folders"]], ["dildo j", "hard j"])
+        self.assertEqual(entry["video_count"], 3)
+        self.assertEqual(host.import_library()["added"], 0)
+        self.assertEqual(len(self.handles()["alice"]["folders"]), 2)
 
     def test_downloaded_videos_are_recorded_so_they_are_never_fetched_again(self) -> None:
         self.video("hard j/alice/alice-1234567890001.mp4")
@@ -1764,16 +1770,74 @@ class HandleRenameTests(LibraryCase):
         self.assertEqual(response["handle"]["pending_count"], 1)
 
     def test_renaming_to_a_listed_handle_merges_the_two(self) -> None:
+        self.video("hard j/new_name/new_name-1234567890009.mp4")
+        host.import_library()
+
+        host.update_handle("old_name", "new_name", None)
+
+        self.assertTrue((self.library / "hard j/new_name/old_name/old_name-1234567890001.mp4").is_file())
+        entry = self.handles()["new_name"]
+        self.assertEqual(entry["video_count"], 2)
+        self.assertEqual(entry["aliases"], ["old_name"])
+        self.assertEqual(len(entry["folders"]), 1)
+
+    def test_a_merge_keeps_each_folder_in_its_own_group(self) -> None:
+        # The new handle only has a folder in another group, so the old videos
+        # stay in theirs, under a folder for the new handle.
         self.video("white/new_name/new_name-1234567890009.mp4")
         host.import_library()
 
         host.update_handle("old_name", "new_name", None)
 
-        self.assertTrue((self.library / "white/new_name/old_name/old_name-1234567890001.mp4").is_file())
+        self.assertTrue((self.library / "hard j/new_name/old_name/old_name-1234567890001.mp4").is_file())
+        self.assertTrue((self.library / "white/new_name/new_name-1234567890009.mp4").is_file())
         entry = self.handles()["new_name"]
-        self.assertEqual(entry["group"], "white")
-        self.assertEqual(entry["video_count"], 2)
-        self.assertEqual(entry["aliases"], ["old_name"])
+        self.assertEqual([folder["group"] for folder in entry["folders"]], ["white", "hard j"])
+
+    def test_a_rename_applies_in_every_group_the_handle_is_filed_under(self) -> None:
+        self.video("dildo j/old_name/x.mp4")
+        host.import_library()
+
+        host.update_handle("old_name", "new_name", None)
+
+        self.assertTrue((self.library / "hard j/new_name/old_name").is_dir())
+        self.assertTrue((self.library / "dildo j/new_name/old_name/x.mp4").is_file())
+        self.assertEqual(
+            sorted(folder["group"] for folder in self.handles()["new_name"]["folders"]),
+            ["dildo j", "hard j"],
+        )
+
+    def test_only_the_folder_in_the_chosen_group_moves(self) -> None:
+        self.video("dildo j/old_name/x.mp4")
+        host.import_library()
+
+        host.update_handle("old_name", None, "white", "hard j")
+
+        self.assertTrue((self.library / "white/old_name/old_name-1234567890001.mp4").is_file())
+        self.assertTrue((self.library / "dildo j/old_name/x.mp4").is_file())
+        with self.assertRaises(ValueError):
+            host.update_handle("old_name", None, "dildo j", "white")
+
+    def test_new_videos_go_to_the_folder_in_the_group_they_were_asked_from(self) -> None:
+        self.video("dildo j/old_name/x.mp4")
+        host.import_library()
+        host.record_handle_scan("old_name", ["https://x.com/old_name/status/50"])
+
+        with unittest.mock.patch.object(
+            host, "start_profile_download_jobs", return_value={"ok": True}
+        ) as start:
+            host.download_handle_pending("old_name", "hard j")
+
+        self.assertEqual(start.call_args.args[2], str(self.library / "hard j"))
+
+    def test_a_download_into_either_group_uses_the_folder_there(self) -> None:
+        self.video("dildo j/old_name/x.mp4")
+        host.import_library()
+        for group in ("dildo j", "hard j"):
+            self.assertEqual(
+                host.known_handle_folder("old_name", str(self.library / group)), ("old_name", "old_name")
+            )
+        self.assertIsNone(host.known_handle_folder("old_name", str(self.library / "white")))
 
     def test_a_second_rename_keeps_every_former_handle(self) -> None:
         host.update_handle("old_name", "mid_name", None)
