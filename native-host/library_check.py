@@ -212,10 +212,37 @@ def probe_video(path: Path) -> dict[str, Any]:
         return {**facts, "error": "timed out decoding the end"}
 
     if tail.returncode != 0 or not tail.stdout:
+        stops = last_video_timestamp(path)
+        if stops is not None and stops < duration - 1:
+            return {**facts, "error": f"picture stops at {clock(stops)} of {clock(duration)}"}
         reason = last_line(tail.stderr)
         return {**facts, "error": f"the end cannot be decoded (cut short?){': ' + reason if reason else ''}"}
 
     return facts
+
+
+def clock(seconds: float) -> str:
+    total = int(seconds)
+    return f"{total // 60}:{total % 60:02d}"
+
+
+def last_video_timestamp(path: Path) -> float | None:
+    """When the last video packet is shown: where the picture really ends."""
+    try:
+        packets = run_tool(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(path)]
+        )
+    except subprocess.TimeoutExpired:
+        return None
+
+    latest: float | None = None
+    for line in packets.stdout.decode("ascii", errors="replace").split():
+        try:
+            value = float(line.strip(","))
+        except ValueError:
+            continue
+        latest = value if latest is None else max(latest, value)
+    return latest
 
 
 def partial_hash(path: Path, size: int) -> str:
@@ -463,7 +490,10 @@ def scan_library(root: Path, state_dir: Path) -> dict[str, Any]:
         except OSError:
             to_probe.append(path)
             continue
-        if facts and facts.get("size") == stat.st_size and facts.get("mtime") == int(stat.st_mtime):
+        unchanged = facts and facts.get("size") == stat.st_size and facts.get("mtime") == int(stat.st_mtime)
+        # A broken file is read again every time: there are few of them, and
+        # the verdict should not outlive a better way of reaching it.
+        if unchanged and not facts.get("error"):
             files[path] = facts
         else:
             to_probe.append(path)

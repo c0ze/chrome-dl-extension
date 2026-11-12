@@ -1337,6 +1337,10 @@ def build_command(
     command = [
         config["yt_dlp_path"],
         "--newline",
+        # yt-dlp skips a stream segment it cannot fetch and saves the rest,
+        # which leaves a video whose picture stops while the sound plays on.
+        # Failing instead puts the download on the dashboard to retry.
+        "--abort-on-unavailable-fragments",
         "--cookies-from-browser",
         browser_spec(config),
         "-P",
