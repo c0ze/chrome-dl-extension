@@ -50,6 +50,7 @@ CHROMIUM_CONFIG_DIRS = {
 EXTENSION_ID_ENV = "YT_DLP_HOST_EXTENSION_ID"
 # Marks yt-dlp and what it starts (ffmpeg) with the job they belong to.
 JOB_ID_ENV = "YT_DLP_HOST_JOB_ID"
+FILE_MANAGER_TIMEOUT_SECONDS = 5
 # Set in a worker process to the attempt it was launched for; None in the host.
 WORKER_ATTEMPT: Any = None
 EXTENSION_ORIGIN_RE = re.compile(r"chrome-extension://([a-p]{32})/?")
@@ -1780,7 +1781,47 @@ def containing_folder_for_job(job: dict[str, Any]) -> Path:
     raise RuntimeError("This download does not have a known folder yet.")
 
 
+def show_in_file_manager(path: Path) -> bool:
+    """Ask the desktop's file manager for the folder over D-Bus.
+
+    xdg-open hands a folder to whatever application claims inode/directory,
+    which can be a terminal or an editor when no default is set. The
+    FileManager1 interface is only ever implemented by file managers.
+    """
+    gdbus = shutil.which("gdbus")
+    if not gdbus:
+        return False
+
+    try:
+        result = subprocess.run(
+            [
+                gdbus,
+                "call",
+                "--session",
+                "--dest",
+                "org.freedesktop.FileManager1",
+                "--object-path",
+                "/org/freedesktop/FileManager1",
+                "--method",
+                "org.freedesktop.FileManager1.ShowFolders",
+                f"['{path.absolute().as_uri()}']",
+                "",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=FILE_MANAGER_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+    return result.returncode == 0
+
+
 def open_folder(path: Path) -> None:
+    if show_in_file_manager(path):
+        return
+
     for opener in ("xdg-open", "gio", "kde-open", "kde-open5"):
         executable = shutil.which(opener)
         if not executable:
