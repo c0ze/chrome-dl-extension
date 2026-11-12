@@ -1552,3 +1552,59 @@ class ThumbnailTests(HandleStateCase):
 
         self.assertGreater((host.THUMBS_DIR / f"{'a' * 32}.jpg").stat().st_size, 0)
         self.assertTrue(host.get_download_job("a" * 32)["thumb"])
+
+
+class PlayDownloadTests(HandleStateCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.video = self.root / "clip one.mp4"
+        self.video.write_bytes(b"x")
+        self.write_jobs(
+            [{"id": "a" * 32, "url": "https://x.com/a/status/1", "status": "complete", "filename": str(self.video)}]
+        )
+
+    def play(self, player: str) -> tuple[dict[str, Any], unittest.mock.Mock]:
+        config = dict(host.DEFAULT_CONFIG, player=player)
+        with unittest.mock.patch.object(host, "load_config", return_value=config), \
+                unittest.mock.patch.object(host.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"), \
+                unittest.mock.patch.object(host.subprocess, "Popen") as popen:
+            return host.play_download("a" * 32), popen
+
+    def test_the_configured_player_gets_the_file_as_one_argument(self) -> None:
+        response, popen = self.play("haruna")
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(popen.call_args.args[0], ["/usr/bin/haruna", str(self.video)])
+
+    def test_player_arguments_come_before_the_file(self) -> None:
+        _response, popen = self.play('mpv --fs --title="my clip"')
+
+        self.assertEqual(
+            popen.call_args.args[0], ["/usr/bin/mpv", "--fs", "--title=my clip", str(self.video)]
+        )
+
+    def test_a_missing_player_is_reported_not_raised(self) -> None:
+        config = dict(host.DEFAULT_CONFIG, player="no-such-player")
+        with unittest.mock.patch.object(host, "load_config", return_value=config), \
+                unittest.mock.patch.object(host.shutil, "which", return_value=None):
+            response = host.play_download("a" * 32)
+
+        self.assertFalse(response["ok"])
+        self.assertIn("no-such-player", response["error"])
+
+    def test_a_moved_file_is_reported_before_any_player_starts(self) -> None:
+        self.video.unlink()
+
+        response, popen = self.play("mpv")
+
+        self.assertFalse(response["ok"])
+        popen.assert_not_called()
+
+    def test_a_player_command_that_cannot_be_parsed_is_refused_when_saved(self) -> None:
+        with self.assertRaises(ValueError):
+            host.normalize_config(dict(host.DEFAULT_CONFIG, player='mpv "unclosed'))
+
+    def test_an_existing_config_without_a_player_defaults_to_mpv(self) -> None:
+        config = dict(host.DEFAULT_CONFIG)
+        del config["player"]
+        self.assertEqual(host.normalize_config(config)["player"], "mpv")

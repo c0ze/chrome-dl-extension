@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import struct
@@ -38,6 +39,7 @@ DEFAULT_CONFIG = {
     "profile": "",
     "download_dir": "~/Downloads",
     "yt_dlp_path": "yt-dlp",
+    "player": "mpv",
     "extra_args": [],
 }
 VALID_BROWSERS = {"chrome", "chromium", "brave", "edge", "firefox"}
@@ -1142,6 +1144,7 @@ def config_for_response(config: dict[str, Any]) -> dict[str, Any]:
         "profile": config["profile"],
         "download_dir": config["download_dir"],
         "yt_dlp_path": config["yt_dlp_path"],
+        "player": config.get("player", DEFAULT_CONFIG["player"]),
         "extra_args": list(config["extra_args"]),
     }
 
@@ -1162,6 +1165,8 @@ def normalize_config(candidate: dict[str, Any]) -> dict[str, Any]:
     resolve_download_dir(download_dir)
     yt_dlp_path = str(config["yt_dlp_path"]).strip() or "yt-dlp"
     profile = str(config["profile"]).strip()
+    player = str(config["player"]).strip() or DEFAULT_CONFIG["player"]
+    player_command(player)
 
     raw_extra_args = config.get("extra_args", [])
     if not isinstance(raw_extra_args, list):
@@ -1179,6 +1184,7 @@ def normalize_config(candidate: dict[str, Any]) -> dict[str, Any]:
         "profile": profile,
         "download_dir": download_dir,
         "yt_dlp_path": yt_dlp_path,
+        "player": player,
         "extra_args": extra_args,
     }
 
@@ -1869,6 +1875,45 @@ def open_download_folder(job_id: str) -> dict[str, Any]:
 
     open_folder(folder)
     return {"ok": True, "path": str(folder)}
+
+
+def player_command(player: str) -> list[str]:
+    """Split the configured player into a program and its arguments."""
+    try:
+        command = shlex.split(player)
+    except ValueError as error:
+        raise ValueError(f"The video player command is not valid: {error}") from error
+    if not command:
+        raise ValueError("The video player command is empty.")
+    return command
+
+
+def play_download(job_id: str) -> dict[str, Any]:
+    job = get_download_job(job_id)
+    if not job:
+        return {"ok": False, "error": "Download job not found."}
+
+    filename = str(job.get("filename") or "").strip().strip('"')
+    video = Path(os.path.expanduser(filename)) if filename else None
+    if not video or not video.is_file():
+        return {"ok": False, "error": "The video file is not there. It may have been moved or deleted."}
+
+    command = player_command(load_config()["player"])
+    executable = shutil.which(os.path.expanduser(command[0]))
+    if not executable:
+        return {
+            "ok": False,
+            "error": f"Video player '{command[0]}' was not found. Change it on the extension options page.",
+        }
+
+    subprocess.Popen(
+        [executable, *command[1:], str(video)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return {"ok": True, "path": str(video)}
 
 
 def decode_worker_payload(encoded_payload: str) -> dict[str, Any]:
@@ -2793,6 +2838,12 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
         if not job_id:
             raise ValueError("Missing job_id field.")
         return open_download_folder(job_id)
+
+    if message_type == "play_download":
+        job_id = str(message.get("job_id", "")).strip()
+        if not job_id:
+            raise ValueError("Missing job_id field.")
+        return play_download(job_id)
 
     if message_type == "get_thumbnails":
         job_ids = message.get("job_ids")

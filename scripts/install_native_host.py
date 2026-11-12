@@ -19,6 +19,7 @@ DEFAULT_CONFIG = {
     "profile": "",
     "download_dir": "~/Downloads",
     "yt_dlp_path": "yt-dlp",
+    "player": "mpv",
     "extra_args": [],
 }
 NATIVE_HOST_DIRS = {

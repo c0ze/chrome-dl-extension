@@ -9,6 +9,7 @@ const elements = {
   extraArgs: document.getElementById("extra-args"),
   logPath: document.getElementById("log-path"),
   message: document.getElementById("message"),
+  player: document.getElementById("player"),
   profile: document.getElementById("profile"),
   reloadButton: document.getElementById("reload-button"),
   saveButton: document.getElementById("save-button"),
@@ -39,6 +40,7 @@ function renderConfig(config) {
   elements.downloadDir.value = config.download_dir || "~/Downloads";
   elements.profile.value = config.profile || "";
   elements.ytDlpPath.value = config.yt_dlp_path || "yt-dlp";
+  elements.player.value = config.player || "mpv";
   elements.extraArgs.value = (config.extra_args || []).join("\n");
 }
 
@@ -49,6 +51,7 @@ function collectConfig() {
     download_dir: elements.downloadDir.value.trim(),
     profile: elements.profile.value.trim(),
     yt_dlp_path: elements.ytDlpPath.value.trim(),
+    player: elements.player.value.trim(),
     extra_args: parseArgs(elements.extraArgs.value),
   };
 }

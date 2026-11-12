@@ -138,11 +138,15 @@ Default config:
   "profile": "",
   "download_dir": "~/Downloads",
   "yt_dlp_path": "yt-dlp",
+  "player": "mpv",
   "extra_args": []
 }
 ```
 
 You can edit that file manually or use the extension options page.
+
+`player` is the command the dashboard's `Play` button runs with the video file
+as its last argument. It may include arguments, for example `mpv --fs`.
 
 ### Which browser profile supplies the cookies
 
