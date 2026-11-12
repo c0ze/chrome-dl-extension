@@ -25,6 +25,9 @@ CONFIG_PATH = APP_DIR / "config.json"
 LOG_PATH = STATE_DIR / "host.log"
 JOBS_PATH = STATE_DIR / "downloads.json"
 JOBS_LOCK_PATH = STATE_DIR / "downloads.lock"
+HANDLES_PATH = STATE_DIR / "handles.json"
+HANDLES_LOCK_PATH = STATE_DIR / "handles.lock"
+THUMBS_DIR = STATE_DIR / "thumbs"
 MAX_LOG_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_PATH = STATE_DIR / "host.log.1"
 PRIVATE_FILE_MODE = 0o600
@@ -128,7 +131,12 @@ def valid_batch_item(raw_url: str, target: dict[str, Any]) -> bool:
     return False
 
 
-MAX_REMEMBERED_FINISHED_JOBS = 40
+MAX_REMEMBERED_FINISHED_JOBS = 200
+MAX_KNOWN_POSTS_PER_HANDLE = 5000
+THUMBNAIL_WIDTH = 320
+THUMBNAIL_TIMEOUT_SECONDS = 30
+MAX_THUMBNAIL_RESPONSE_BYTES = 640 * 1024
+JOB_ID_RE = re.compile(r"[0-9a-f]{32}")
 MAX_JOBS_IN_RESPONSE = 300
 MAX_RESPONSE_BYTES = 768 * 1024
 MAX_PROFILE_BATCH_JOBS = 500
@@ -341,6 +349,9 @@ def normalize_job(job: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("updated_at", None)
     normalized.setdefault("finished_at", None)
     normalized.setdefault("force_requested_at", None)
+    normalized.setdefault("thumb", False)
+    if not normalized.get("handle"):
+        normalized["handle"] = twitter_status_username(str(normalized.get("url") or "")) or ""
     return normalized
 
 
@@ -1748,7 +1759,9 @@ def remove_download_job(job_id: str) -> dict[str, Any]:
 
         return {"ok": False, "error": "Download job not found."}
 
-    return mutate_jobs(mutator)
+    response = mutate_jobs(mutator)
+    prune_thumbnails()
+    return response
 
 
 def clear_download_jobs() -> dict[str, Any]:
@@ -1757,7 +1770,9 @@ def clear_download_jobs() -> dict[str, Any]:
         state["jobs"] = [job for job in state["jobs"] if job.get("status") == "running"]
         return {"ok": True, "removed": original_count - len(state["jobs"])}
 
-    return mutate_jobs(mutator)
+    response = mutate_jobs(mutator)
+    prune_thumbnails()
+    return response
 
 
 def get_download_job(job_id: str) -> dict[str, Any] | None:
@@ -2079,6 +2094,10 @@ def run_download_worker(encoded_payload: str) -> int:
                 record_launch_failure()
             else:
                 launch_next_queued_job()
+            if return_code == 0:
+                # After the next job is launched, so a slow frame grab from a
+                # network share never holds up the queue.
+                save_job_thumbnail(job_id)
             return return_code
         except (OSError, subprocess.SubprocessError) as e:
             log_line(f"Subprocess error: {e}")
@@ -2171,6 +2190,7 @@ def start_download_job(
     if not response.get("ok"):
         return response
 
+    remember_downloaded_post(normalized_url, normalized_download_dir)
     launch_result = launch_next_queued_job(job_id)
 
     return {
@@ -2260,6 +2280,7 @@ def start_profile_download_jobs(
             "url": video_url,
             "source": source,
             "download_dir": str(profile_dir),
+            "handle": target["key"] if target["provider"] == "twitter" else "",
             "status": "queued",
             "status_detail": "Queued",
             "progress": 0,
@@ -2321,6 +2342,16 @@ def start_profile_download_jobs(
         return response
 
     queued_jobs = response["queued_jobs"]
+    if target["provider"] == "twitter":
+        # Every scanned post counts as seen, whether it was queued now or was
+        # already downloaded, so the next check only reports later posts.
+        remember_handle(
+            target["key"],
+            video_urls,
+            base_dir=base_download_path,
+            name=folder_name,
+            replace_folder=True,
+        )
     launch_result = launch_next_queued_job(queued_jobs[0]["id"])
     return {
         "ok": True,
@@ -2335,6 +2366,353 @@ def start_profile_download_jobs(
         "download_dir": str(profile_dir),
         "log_path": str(LOG_PATH),
     }
+
+
+def thumbnail_path(job_id: str) -> Path | None:
+    # Job ids name files here, so anything that is not one of ours is refused.
+    if not JOB_ID_RE.fullmatch(str(job_id)):
+        return None
+    return THUMBS_DIR / f"{job_id}.jpg"
+
+
+def grab_video_frame(ffmpeg: str, video: Path, target: Path, seek_seconds: int) -> bool:
+    try:
+        subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-loglevel",
+                "error",
+                "-ss",
+                str(seek_seconds),
+                "-i",
+                str(video),
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={THUMBNAIL_WIDTH}:-2",
+                "-q:v",
+                "5",
+                str(target),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=THUMBNAIL_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+    try:
+        return target.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def save_job_thumbnail(job_id: str) -> bool:
+    """Keep one small frame of a finished download for the dashboard's tile view.
+
+    Best effort: a download is complete with or without its picture.
+    """
+    try:
+        target = thumbnail_path(job_id)
+        ffmpeg = shutil.which("ffmpeg")
+        job = get_download_job(job_id)
+        filename = str((job or {}).get("filename") or "").strip().strip('"')
+        if not target or not ffmpeg or not filename:
+            return False
+
+        video = Path(os.path.expanduser(filename))
+        if not video.is_file():
+            return False
+
+        THUMBS_DIR.mkdir(mode=PRIVATE_DIR_MODE, parents=True, exist_ok=True)
+        # One second in skips the black first frame; clips shorter than that
+        # have no frame there, so fall back to the very start.
+        saved = grab_video_frame(ffmpeg, video, target, 1) or grab_video_frame(ffmpeg, video, target, 0)
+        if not saved:
+            target.unlink(missing_ok=True)
+            return False
+
+        target.chmod(PRIVATE_FILE_MODE)
+        update_job(job_id, {"thumb": True})
+        prune_thumbnails()
+        return True
+    except Exception as error:  # noqa: BLE001
+        log_line(f"Thumbnail error: {error}")
+        return False
+
+
+def prune_thumbnails() -> None:
+    """Delete pictures whose download is no longer on the dashboard."""
+    try:
+        remembered = {str(job.get("id")) for job in read_jobs_shared()["jobs"]}
+        for path in THUMBS_DIR.glob("*.jpg"):
+            if path.stem not in remembered:
+                path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def get_thumbnails(job_ids: list[Any]) -> dict[str, Any]:
+    thumbs: dict[str, str] = {}
+    used = 0
+    for job_id in job_ids:
+        path = thumbnail_path(str(job_id))
+        if not path:
+            continue
+        try:
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        except OSError:
+            continue
+        # Chrome caps a native message at 1 MB; the page asks again for the rest.
+        if used + len(encoded) > MAX_THUMBNAIL_RESPONSE_BYTES:
+            break
+        used += len(encoded)
+        thumbs[str(job_id)] = encoded
+
+    return {"ok": True, "thumbs": thumbs}
+
+
+def default_handles_state() -> dict[str, Any]:
+    return {"handles": {}}
+
+
+def read_handles_unlocked() -> dict[str, Any]:
+    try:
+        with HANDLES_PATH.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return default_handles_state()
+
+    handles = data.get("handles") if isinstance(data, dict) else None
+    if not isinstance(handles, dict):
+        return default_handles_state()
+
+    return {"handles": {key: value for key, value in handles.items() if isinstance(value, dict)}}
+
+
+def mutate_handles(mutator: Any) -> Any:
+    # A lock of its own: flock would deadlock against the jobs lock if the two
+    # were ever taken through separate descriptors in one process.
+    ensure_state()
+    with open_private(HANDLES_LOCK_PATH, "a") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        seed = not HANDLES_PATH.exists()
+        state = read_handles_unlocked()
+        if seed:
+            seed_handles_from_jobs(state)
+        result = mutator(state)
+        temp_path = HANDLES_PATH.with_suffix(".json.tmp")
+        with open_private(temp_path, "w") as handle:
+            json.dump(state, handle, indent=2)
+            handle.write("\n")
+        temp_path.replace(HANDLES_PATH)
+        fcntl.flock(lock_handle, fcntl.LOCK_UN)
+    return result
+
+
+def handle_entry(state: dict[str, Any], username: str) -> dict[str, Any]:
+    key = username.lower()
+    entry = state["handles"].get(key)
+    if entry is None:
+        entry = {
+            "handle": username,
+            "name": username,
+            "base_dir": "",
+            "known": [],
+            "pending": [],
+            "added_at": timestamp(),
+            "last_checked": None,
+        }
+        state["handles"][key] = entry
+
+    for field in ("known", "pending"):
+        if not isinstance(entry.get(field), list):
+            entry[field] = []
+    return entry
+
+
+def mark_posts_known(entry: dict[str, Any], urls: list[str]) -> None:
+    known = set(entry["known"])
+    for url in urls:
+        key = normalized_url_key(url)
+        if key not in known:
+            known.add(key)
+            entry["known"].append(key)
+
+    # Oldest first, so the cap drops posts that have long scrolled out of reach.
+    del entry["known"][:-MAX_KNOWN_POSTS_PER_HANDLE]
+    entry["pending"] = [url for url in entry["pending"] if normalized_url_key(url) not in known]
+
+
+def seed_handles_from_jobs(state: dict[str, Any]) -> None:
+    """Start the handle list from the downloads already on the dashboard."""
+    jobs = [
+        job
+        for job in reversed(read_jobs_shared()["jobs"])
+        if job.get("handle") and job.get("status") in DUPLICATE_BLOCKING_STATUSES
+    ]
+    folders: dict[str, list[str]] = {}
+    for job in jobs:
+        folders.setdefault(job["handle"].lower(), []).append(str(job.get("download_dir") or ""))
+
+    for job in jobs:
+        entry = handle_entry(state, job["handle"])
+        mark_posts_known(entry, [job["url"]])
+        if entry["base_dir"]:
+            continue
+
+        folder = str(job.get("download_dir") or "")
+        if not folder:
+            continue
+        if folders[job["handle"].lower()].count(folder) > 1 and Path(folder).name:
+            # Several posts in one folder is a profile batch, which downloads
+            # into <base>/<profile name>.
+            entry["base_dir"] = str(Path(folder).parent)
+            entry["name"] = Path(folder).name
+        else:
+            entry["base_dir"] = folder
+
+
+def remember_handle(
+    username: str,
+    urls: list[str],
+    base_dir: str | None = None,
+    name: str | None = None,
+    replace_folder: bool = False,
+) -> None:
+    """Record downloaded posts under their handle. Never fails a download."""
+
+    def mutator(state: dict[str, Any]) -> None:
+        entry = handle_entry(state, username)
+        mark_posts_known(entry, urls)
+        if base_dir and (replace_folder or not entry["base_dir"]):
+            entry["base_dir"] = base_dir
+            entry["name"] = name or entry["name"]
+
+    try:
+        mutate_handles(mutator)
+    except Exception as error:  # noqa: BLE001
+        log_line(f"Could not record handle {username}: {error}")
+
+
+def remember_downloaded_post(url: str, download_dir: str | None) -> None:
+    username = twitter_status_username(url)
+    if not username:
+        return
+
+    base_dir = None
+    try:
+        base_dir = resolve_download_dir(download_dir or load_config()["download_dir"])
+    except ValueError:
+        pass
+    remember_handle(username, [url], base_dir=base_dir)
+
+
+def handle_for_response(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "handle": entry.get("handle", ""),
+        "name": entry.get("name") or entry.get("handle", ""),
+        "profile_url": f"https://x.com/{entry.get('handle', '')}/media",
+        "base_dir": entry.get("base_dir", ""),
+        "known_count": len(entry.get("known", [])),
+        "pending_count": len(entry.get("pending", [])),
+        "last_checked": entry.get("last_checked"),
+        "added_at": entry.get("added_at"),
+    }
+
+
+def get_handles() -> dict[str, Any]:
+    def mutator(state: dict[str, Any]) -> dict[str, Any]:
+        entries = sorted(state["handles"].values(), key=lambda entry: str(entry.get("handle", "")).lower())
+        return {"ok": True, "handles": [handle_for_response(entry) for entry in entries]}
+
+    return mutate_handles(mutator)
+
+
+def require_handle(state: dict[str, Any], username: str) -> dict[str, Any]:
+    entry = state["handles"].get(username.lower())
+    if entry is None:
+        raise ValueError(f"@{username} is not in the handle list.")
+    return handle_entry(state, username)
+
+
+def record_handle_scan(username: str, urls: list[Any]) -> dict[str, Any]:
+    """Store which posts on a handle's media page have not been downloaded yet."""
+    target = {"provider": "twitter", "key": username}
+
+    def mutator(state: dict[str, Any]) -> dict[str, Any]:
+        entry = require_handle(state, username)
+        known = set(entry["known"])
+        pending: list[str] = []
+        seen: set[str] = set()
+        for raw_url in urls:
+            try:
+                url = normalize_url(str(raw_url))
+            except ValueError:
+                continue
+            key = normalized_url_key(url)
+            if not valid_batch_item(url, target) or key in known or key in seen:
+                continue
+            seen.add(key)
+            pending.append(url)
+
+        entry["pending"] = pending[:MAX_PROFILE_BATCH_JOBS]
+        entry["last_checked"] = timestamp()
+        return {"ok": True, "handle": handle_for_response(entry)}
+
+    return mutate_handles(mutator)
+
+
+def mark_handle_seen(username: str) -> dict[str, Any]:
+    def mutator(state: dict[str, Any]) -> dict[str, Any]:
+        entry = require_handle(state, username)
+        mark_posts_known(entry, list(entry["pending"]))
+        return {"ok": True, "handle": handle_for_response(entry)}
+
+    return mutate_handles(mutator)
+
+
+def remove_handle(username: str) -> dict[str, Any]:
+    def mutator(state: dict[str, Any]) -> dict[str, Any]:
+        removed = state["handles"].pop(username.lower(), None)
+        return {"ok": True, "removed": 1 if removed else 0}
+
+    return mutate_handles(mutator)
+
+
+def download_handle_pending(username: str) -> dict[str, Any]:
+    def mutator(state: dict[str, Any]) -> dict[str, Any]:
+        entry = require_handle(state, username)
+        return {
+            "handle": entry["handle"],
+            "name": entry.get("name") or None,
+            "base_dir": entry.get("base_dir") or None,
+            "pending": list(entry["pending"]),
+        }
+
+    entry = mutate_handles(mutator)
+    if not entry["pending"]:
+        return {"ok": False, "error": f"@{username} has no new videos. Check the profile first."}
+
+    # Queued like a scan of the media page, so the videos land in the same
+    # folder as the handle's earlier downloads and are marked as seen.
+    return start_profile_download_jobs(
+        f"https://x.com/{entry['handle']}/media",
+        "handle-check",
+        entry["base_dir"],
+        entry["pending"],
+        False,
+        entry["name"],
+    )
+
+
+def message_handle(message: dict[str, Any]) -> str:
+    username = valid_twitter_username(str(message.get("handle", "")).strip().lstrip("@"))
+    if not username:
+        raise ValueError("Missing or invalid handle field.")
+    return username
 
 
 def handle_download_message(message: dict[str, Any]) -> dict[str, Any]:
@@ -2415,6 +2793,33 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
         if not job_id:
             raise ValueError("Missing job_id field.")
         return open_download_folder(job_id)
+
+    if message_type == "get_thumbnails":
+        job_ids = message.get("job_ids")
+        if not isinstance(job_ids, list):
+            raise ValueError("get_thumbnails expects a job_ids list.")
+        return get_thumbnails(job_ids)
+
+    if message_type == "get_handles":
+        return get_handles()
+
+    if message_type == "record_handle_scan":
+        urls = message.get("urls")
+        if not isinstance(urls, list):
+            raise ValueError("record_handle_scan expects a urls list.")
+        return record_handle_scan(message_handle(message), urls)
+
+    if message_type == "download_handle_pending":
+        try:
+            return download_handle_pending(message_handle(message))
+        except MissingDownloadDir as error:
+            return {"ok": False, "missing_dir": True, "error": str(error)}
+
+    if message_type == "mark_handle_seen":
+        return mark_handle_seen(message_handle(message))
+
+    if message_type == "remove_handle":
+        return remove_handle(message_handle(message))
 
     if message_type == "choose_download_dir":
         initial_dir = message.get("initial_dir")

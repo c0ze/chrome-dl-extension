@@ -1,9 +1,12 @@
 import { batchTargetForUrl } from "./providers.js";
+import { groupJobsByHandle, groupSummary } from "./grouping.js";
+import { initHandles } from "./handles.js";
 
 const HOST_NAME = "dev.arda.ytdlp_host";
 const RECENT_DIRECTORIES_KEY = "recentDownloadDirectories";
 const MAX_RECENT_DIRECTORIES = 10;
-const MAX_VISIBLE_DOWNLOADS = 8;
+const VIEW_KEY = "downloadsView";
+const THUMBNAIL_BATCH = 24;
 
 // Completion-scheduled polling: a new native host process is spawned per poll,
 // so idle windows must not keep paying for it. Progress bars still read as live
@@ -23,6 +26,7 @@ const TOTAL_JOB_COUNT_KEYS = ["total_count", "total_jobs", "job_count", "total"]
 
 const elements = {
   browseButton: document.getElementById("browse-button"),
+  checkAllButton: document.getElementById("check-all-button"),
   clearButton: document.getElementById("clear-button"),
   dashboardSummary: document.getElementById("dashboard-summary"),
   defaultButton: document.getElementById("default-button"),
@@ -30,11 +34,15 @@ const elements = {
   downloadButton: document.getElementById("download-button"),
   downloadDir: document.getElementById("download-dir"),
   downloadForm: document.getElementById("download-form"),
+  handleList: document.getElementById("handle-list"),
+  handlesSummary: document.getElementById("handles-summary"),
   message: document.getElementById("message"),
   recentList: document.getElementById("recent-list"),
   refreshButton: document.getElementById("refresh-button"),
   rescanButton: document.getElementById("rescan-button"),
   targetUrl: document.getElementById("target-url"),
+  viewList: document.getElementById("view-list"),
+  viewTiles: document.getElementById("view-tiles"),
 };
 
 const state = {
@@ -59,6 +67,17 @@ let pollInFlight = false;
 let pollPending = false;
 let pollStopped = false;
 let scanWatchdogTimer = null;
+
+// Dashboard display state. The view survives reloads; collapsed groups and
+// fetched pictures last as long as the tab.
+let downloadsView = "list";
+let lastJobs = [];
+let lastTotals = { active: 0, queued: 0, total: 0 };
+let lastRenderKey = "";
+let thumbnailsInFlight = false;
+const collapsedGroups = new Set();
+const thumbnails = new Map();
+const missingThumbnails = new Set();
 
 function showMessage(kind, text) {
   elements.message.className = `message ${kind}`;
@@ -641,9 +660,108 @@ function makeDownloadItem(job) {
   return item;
 }
 
+function makeDownloadTile(job) {
+  const tile = document.createElement("article");
+  tile.className = "download-tile";
+
+  const picture = document.createElement("div");
+  picture.className = "tile-picture";
+  const data = thumbnails.get(job.id);
+  if (data) {
+    const image = document.createElement("img");
+    image.src = `data:image/jpeg;base64,${data}`;
+    image.alt = "";
+    picture.append(image);
+  } else {
+    picture.textContent = job.status === "complete" ? "No preview" : formatProgress(job);
+  }
+
+  const actions = makeJobActions(job);
+  // The status reads better on the picture than squeezed in with the buttons.
+  picture.append(actions.querySelector(".download-status"));
+
+  const body = document.createElement("div");
+  body.className = "tile-body";
+
+  const title = document.createElement("p");
+  title.className = "download-title";
+  title.textContent = formatJobTitle(job);
+  title.title = `${formatJobTitle(job)}\n${job.url || ""}`;
+  body.append(title);
+
+  if (job.status === "running") {
+    const track = document.createElement("div");
+    track.className = "progress-track";
+    const fill = document.createElement("div");
+    fill.className = "progress-fill";
+    const progress = typeof job.progress === "number" ? job.progress : 0;
+    fill.style.width = `${Math.max(0, Math.min(100, progress))}%`;
+    track.append(fill);
+
+    const meta = document.createElement("div");
+    meta.className = "download-meta";
+    meta.append(makeMetaItem(formatProgress(job)));
+    if (job.speed) meta.append(makeMetaItem(job.speed));
+    if (job.eta) meta.append(makeMetaItem(`ETA ${job.eta}`));
+    body.append(track, meta);
+  }
+
+  body.append(actions);
+
+  if (job.error) {
+    const error = document.createElement("p");
+    error.className = "download-error";
+    error.textContent = job.error;
+    body.append(error);
+  }
+
+  tile.append(picture, body);
+  return tile;
+}
+
+function makeDownloadGroup(group) {
+  const details = document.createElement("details");
+  details.className = "download-group";
+  details.open = !collapsedGroups.has(group.key);
+  details.addEventListener("toggle", () => {
+    if (details.open) {
+      collapsedGroups.delete(group.key);
+    } else {
+      collapsedGroups.add(group.key);
+    }
+  });
+
+  const summary = document.createElement("summary");
+  const handle = document.createElement("span");
+  handle.className = "group-handle";
+  handle.textContent = group.handle ? `@${group.handle}` : "Other downloads";
+  const counts = document.createElement("span");
+  counts.className = "group-summary";
+  counts.textContent = groupSummary(group);
+  summary.append(handle, counts);
+
+  const items = document.createElement("div");
+  items.className = downloadsView === "tiles" ? "group-items tiles" : "group-items";
+  const makeItem = downloadsView === "tiles" ? makeDownloadTile : makeDownloadItem;
+  group.jobs.forEach((job) => items.append(makeItem(job)));
+
+  details.append(summary, items);
+  return details;
+}
+
 function renderDownloads(jobs, totals) {
+  lastJobs = jobs;
+  lastTotals = totals;
+
+  // The dashboard is polled every few seconds; rebuilding it when nothing
+  // changed would reset scrolling inside it and reload every picture.
+  const renderKey = JSON.stringify([jobs, totals, downloadsView, thumbnails.size]);
+  if (renderKey === lastRenderKey) {
+    return;
+  }
+  lastRenderKey = renderKey;
+
   elements.downloadList.textContent = "";
-  const visibleJobs = jobs.slice(0, MAX_VISIBLE_DOWNLOADS);
   const totalJobs = Math.max(totals.total, jobs.length);
 
   const runningLabel = totals.active === 1 ? "1 running" : `${totals.active} running`;
@@ -651,7 +769,7 @@ function renderDownloads(jobs, totals) {
   const totalLabel = totalJobs ? `, ${totalJobs} total` : "";
   elements.dashboardSummary.textContent = `${runningLabel}, ${queuedLabel}${totalLabel}`;
 
-  if (!visibleJobs.length) {
+  if (!jobs.length) {
     const emptyState = document.createElement("div");
     emptyState.className = "empty-state";
     emptyState.textContent = "No downloads have been started yet.";
@@ -659,16 +777,67 @@ function renderDownloads(jobs, totals) {
     return;
   }
 
-  visibleJobs.forEach((job) => {
-    elements.downloadList.append(makeDownloadItem(job));
+  groupJobsByHandle(jobs).forEach((group) => {
+    elements.downloadList.append(makeDownloadGroup(group));
   });
 
-  if (totalJobs > visibleJobs.length) {
+  if (totalJobs > jobs.length) {
     const note = document.createElement("p");
     note.className = "download-more";
-    note.textContent = `Showing ${visibleJobs.length} of ${totalJobs} downloads.`;
+    note.textContent = `Showing ${jobs.length} of ${totalJobs} downloads.`;
     elements.downloadList.append(note);
   }
+}
+
+function setDownloadsView(view) {
+  downloadsView = view === "tiles" ? "tiles" : "list";
+  elements.viewTiles.classList.toggle("active", downloadsView === "tiles");
+  elements.viewList.classList.toggle("active", downloadsView === "list");
+  try {
+    window.localStorage.setItem(VIEW_KEY, downloadsView);
+  } catch (_error) {
+    // The choice simply does not survive a reload.
+  }
+  renderDownloads(lastJobs, lastTotals);
+  void loadThumbnails();
+}
+
+/** Fetches pictures the tile view is missing, a batch per native message. */
+async function loadThumbnails() {
+  if (downloadsView !== "tiles" || thumbnailsInFlight) {
+    return;
+  }
+
+  const wanted = lastJobs
+    .filter((job) => job.thumb && !thumbnails.has(job.id) && !missingThumbnails.has(job.id))
+    .map((job) => job.id)
+    .slice(0, THUMBNAIL_BATCH);
+  if (!wanted.length) {
+    return;
+  }
+
+  thumbnailsInFlight = true;
+  let received = 0;
+  try {
+    const response = await callHost({ type: "get_thumbnails", job_ids: wanted });
+    const thumbs = response?.ok && response.thumbs ? response.thumbs : {};
+    for (const [jobId, data] of Object.entries(thumbs)) {
+      thumbnails.set(jobId, data);
+      received += 1;
+    }
+    // The host stops early at its size limit; only a batch that came back
+    // empty means these pictures are gone for good.
+    if (!received) {
+      wanted.forEach((jobId) => missingThumbnails.add(jobId));
+    }
+  } catch (_error) {
+    wanted.forEach((jobId) => missingThumbnails.add(jobId));
+  } finally {
+    thumbnailsInFlight = false;
+  }
+
+  renderDownloads(lastJobs, lastTotals);
+  void loadThumbnails();
 }
 
 async function refreshDownloads() {
@@ -686,10 +855,12 @@ async function refreshDownloads() {
     };
 
     renderDownloads(jobs, totals);
+    void loadThumbnails();
     return totals;
   } catch (error) {
     elements.dashboardSummary.textContent = "Download status unavailable";
     elements.downloadList.textContent = "";
+    lastRenderKey = "";
     const emptyState = document.createElement("div");
     emptyState.className = "empty-state";
     emptyState.textContent = error.message || "Could not reach the native host.";
@@ -864,6 +1035,7 @@ async function startDownload(directory, allowDuplicate = false) {
       showMessage("success", `Download queued in ${selectedDirectory}`);
     }
     void pollDownloads();
+    void handlesPanel.refresh();
   } catch (error) {
     showMessage(
       "error",
@@ -996,6 +1168,16 @@ elements.clearButton.addEventListener("click", () => {
   void clearDashboardJobs();
 });
 
+elements.viewTiles.addEventListener("click", () => setDownloadsView("tiles"));
+elements.viewList.addEventListener("click", () => setDownloadsView("list"));
+
+const handlesPanel = initHandles({
+  callHost,
+  showMessage,
+  onQueued: () => void pollDownloads(),
+  elements,
+});
+
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     scheduleNextPoll(0);
@@ -1010,5 +1192,14 @@ window.addEventListener("beforeunload", () => {
   clearScanWatchdog();
 });
 
+let storedView = "list";
+try {
+  storedView = window.localStorage.getItem(VIEW_KEY) || "list";
+} catch (_error) {
+  // Keep the default.
+}
+setDownloadsView(storedView);
+
 void initialize();
 void pollDownloads();
+void handlesPanel.refresh();

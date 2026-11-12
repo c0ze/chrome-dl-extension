@@ -3,11 +3,12 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Choose Download Folder</title>
+    <title>yt-dlp Downloads</title>
     <link rel="stylesheet" href="download.css">
   </head>
   <body>
-    <main class="sheet">
+    <main class="layout">
+      <div class="column column-picker">
       <section class="hero">
         <p class="eyebrow">yt-dlp Bridge</p>
         <h1>Choose Download Folder</h1>
@@ -68,7 +69,9 @@
         </div>
         <div id="recent-list" class="recent-list"></div>
       </section>
+      </div>
 
+      <div class="column column-downloads">
       <section class="panel">
         <div class="panel-header dashboard-header">
           <div>
@@ -76,6 +79,14 @@
             <p id="dashboard-summary" class="hint">Checking current jobs…</p>
           </div>
           <div class="dashboard-actions">
+            <div class="view-toggle" role="group" aria-label="Download view">
+              <button id="view-tiles" type="button" class="view-button" title="Show downloads as tiles">
+                Tiles
+              </button>
+              <button id="view-list" type="button" class="view-button" title="Show downloads as a list">
+                List
+              </button>
+            </div>
             <button id="clear-button" type="button" class="icon-button" title="Remove queued, failed, and completed downloads">
               Remove All
             </button>
@@ -86,6 +97,29 @@
         </div>
         <div id="download-list" class="download-list"></div>
       </section>
+      </div>
+
+      <div class="column column-handles">
+      <section class="panel">
+        <div class="panel-header dashboard-header">
+          <div>
+            <p class="label">Handles</p>
+            <p id="handles-summary" class="hint">Loading handles…</p>
+          </div>
+          <div class="dashboard-actions">
+            <button
+              id="check-all-button"
+              type="button"
+              class="icon-button"
+              title="Open each profile in a background tab and look for videos you have not downloaded"
+            >
+              Check All
+            </button>
+          </div>
+        </div>
+        <div id="handle-list" class="handle-list"></div>
+      </section>
+      </div>
     </main>
 
     <script type="module" src="download.js"></script>

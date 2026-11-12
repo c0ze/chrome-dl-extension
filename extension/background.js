@@ -13,6 +13,11 @@ const PROFILE_BATCH_TTL_MS = 10 * 60 * 1000;
 const PROFILE_SCAN_CHUNK_MS = 4000;
 const PROFILE_SCAN_MAX_PASSES = 36;
 const PROFILE_SCAN_MAX_ROUNDS = 16;
+// A check for new videos only needs the top of the media page, where the
+// newest posts are; the full-depth scan stays with the toolbar button.
+const HANDLE_CHECK_MAX_ROUNDS = 2;
+const HANDLE_CHECK_LOAD_TIMEOUT_MS = 30000;
+const HANDLE_CHECK_SETTLE_MS = 2500;
 
 // Batch keys whose scan is running in this worker instance. Empty after a
 // worker restart, which is exactly when a popup-driven rescan should be allowed.
@@ -105,7 +110,13 @@ async function restoreScrollPosition(tabId, scrollY) {
   }
 }
 
-async function runProfileScan(tabId, provider, expectedUsername, key) {
+async function runProfileScan(
+  tabId,
+  provider,
+  expectedUsername,
+  key,
+  maxRounds = PROFILE_SCAN_MAX_ROUNDS
+) {
   if (activeScans.has(key)) {
     return;
   }
@@ -116,7 +127,7 @@ async function runProfileScan(tabId, provider, expectedUsername, key) {
   const hosts = provider === "facebook" ? FACEBOOK_HOSTS : TWITTER_HOSTS;
 
   try {
-    for (let round = 0; round < PROFILE_SCAN_MAX_ROUNDS; round += 1) {
+    for (let round = 0; round < maxRounds; round += 1) {
       const [injection] = await chrome.scripting.executeScript({
         target: { tabId },
         func: profileScanChunk,
@@ -236,6 +247,60 @@ async function restartProfileScan(message) {
   return { ok: true };
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitForTabLoad(tabId) {
+  const deadline = Date.now() + HANDLE_CHECK_LOAD_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.status === "complete") {
+      // The page is a single-page app: "complete" is the shell, and the media
+      // grid arrives a moment later.
+      await sleep(HANDLE_CHECK_SETTLE_MS);
+      return;
+    }
+    await sleep(500);
+  }
+
+  throw new Error("The profile page took too long to load.");
+}
+
+/**
+ * Looks at one handle's media page for the handle list: opens it in a
+ * background tab, scans the top of it and closes it again. The URL is
+ * validated the same way a toolbar scan's is, so only a real X/Twitter media
+ * page is ever opened and read.
+ */
+async function checkHandle(message) {
+  const url = typeof message?.profileUrl === "string" ? message.profileUrl : "";
+  const target = batchTargetForUrl(url);
+  if (!target || target.provider !== "twitter") {
+    return { ok: false, error: "This profile cannot be checked." };
+  }
+
+  const key = makeProfileBatchKey();
+  let tabId = null;
+  try {
+    const tab = await chrome.tabs.create({ url, active: false });
+    tabId = tab.id;
+    await waitForTabLoad(tabId);
+    await runProfileScan(tabId, target.provider, target.key, key, HANDLE_CHECK_MAX_ROUNDS);
+
+    const record = (await chrome.storage.session.get(key))[key];
+    if (record?.status !== "done") {
+      return { ok: false, error: record?.error || "The profile could not be scanned." };
+    }
+    return { ok: true, urls: Array.isArray(record.urls) ? record.urls : [] };
+  } catch (error) {
+    return { ok: false, error: error?.message || "The profile could not be scanned." };
+  } finally {
+    await chrome.storage.session.remove(key).catch(() => {});
+    if (tabId !== null) {
+      await chrome.tabs.remove(tabId).catch(() => {});
+    }
+  }
+}
+
 async function findPickerTab() {
   const contexts = await chrome.runtime.getContexts({ contextTypes: ["TAB"] });
   const picker = contexts.find(
@@ -314,6 +379,11 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "check-handle") {
+    checkHandle(message).then(sendResponse);
+    return true;
+  }
+
   if (message?.type !== "rescan-profile") {
     return false;
   }
