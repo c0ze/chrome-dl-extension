@@ -7,6 +7,7 @@ import {
 } from "./providers.js";
 
 const MENU_ID = "download-with-ytdlp";
+const PICKER_URL = chrome.runtime.getURL("download.html");
 const PROFILE_BATCH_PREFIX = "profileBatch:";
 const PROFILE_BATCH_TTL_MS = 10 * 60 * 1000;
 const PROFILE_SCAN_CHUNK_MS = 4000;
@@ -235,7 +236,44 @@ async function restartProfileScan(message) {
   return { ok: true };
 }
 
+async function findPickerTab() {
+  const contexts = await chrome.runtime.getContexts({ contextTypes: ["TAB"] });
+  const picker = contexts.find(
+    (context) => context.documentUrl?.startsWith(PICKER_URL) && context.tabId >= 0
+  );
+  return picker ? { tabId: picker.tabId, windowId: picker.windowId } : null;
+}
+
+/**
+ * Shows the picker in a tab next to the page it was opened from. There is only
+ * ever one picker: an open one is pointed at the new target and brought
+ * forward instead of a second one being opened.
+ */
+async function showDownloadPicker(pickerUrl, sourceTab) {
+  const existing = await findPickerTab();
+  if (existing) {
+    try {
+      await chrome.tabs.update(existing.tabId, { url: pickerUrl, active: true });
+      await chrome.windows.update(existing.windowId, { focused: true });
+      return;
+    } catch (_error) {
+      // The picker closed between the lookup and the update; open a new one.
+    }
+  }
+
+  const placement =
+    typeof sourceTab?.id === "number"
+      ? { windowId: sourceTab.windowId, index: sourceTab.index + 1, openerTabId: sourceTab.id }
+      : {};
+  await chrome.tabs.create({ url: pickerUrl, ...placement });
+}
+
 async function openDownloadPicker(url, source, tab) {
+  if (tab?.url?.startsWith(PICKER_URL)) {
+    // The button was clicked on the picker itself; it is already in front.
+    return;
+  }
+
   if (!url) {
     openHelpPage("invalid-url");
     return;
@@ -258,12 +296,7 @@ async function openDownloadPicker(url, source, tab) {
     });
   }
 
-  await chrome.windows.create({
-    url: chrome.runtime.getURL(`download.html?${params.toString()}`),
-    type: "popup",
-    width: 520,
-    height: 720,
-  });
+  await showDownloadPicker(chrome.runtime.getURL(`download.html?${params.toString()}`), tab);
 
   if (batchKey) {
     await runProfileScan(tab.id, target.provider, target.key, batchKey);

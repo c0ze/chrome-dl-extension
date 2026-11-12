@@ -1290,3 +1290,38 @@ class BatchDuplicateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OpenFolderTests(unittest.TestCase):
+    """The Folder button must reach a file manager, not whatever claims folders."""
+
+    def test_file_manager_is_asked_before_the_generic_opener(self) -> None:
+        completed = unittest.mock.Mock(returncode=0)
+        with unittest.mock.patch.object(host.shutil, "which", return_value="/usr/bin/gdbus"), \
+                unittest.mock.patch.object(host.subprocess, "run", return_value=completed) as run, \
+                unittest.mock.patch.object(host.subprocess, "Popen") as popen:
+            host.open_folder(Path("/tmp/it's here/clips"))
+
+        command = run.call_args.args[0]
+        self.assertIn("org.freedesktop.FileManager1.ShowFolders", command)
+        # The quote is percent-encoded, so it cannot end the GVariant string.
+        self.assertIn("['file:///tmp/it%27s%20here/clips']", command)
+        popen.assert_not_called()
+
+    def test_generic_opener_is_the_fallback(self) -> None:
+        failed = unittest.mock.Mock(returncode=1)
+        with unittest.mock.patch.object(host.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"), \
+                unittest.mock.patch.object(host.subprocess, "run", return_value=failed), \
+                unittest.mock.patch.object(host.subprocess, "Popen") as popen:
+            host.open_folder(Path("/tmp/clips"))
+
+        self.assertEqual(popen.call_args.args[0], ["/usr/bin/xdg-open", "/tmp/clips"])
+
+    def test_a_hung_file_manager_does_not_block_the_fallback(self) -> None:
+        timeout = host.subprocess.TimeoutExpired("gdbus", 5)
+        with unittest.mock.patch.object(host.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"), \
+                unittest.mock.patch.object(host.subprocess, "run", side_effect=timeout), \
+                unittest.mock.patch.object(host.subprocess, "Popen") as popen:
+            host.open_folder(Path("/tmp/clips"))
+
+        popen.assert_called_once()

@@ -51,7 +51,7 @@ is loaded.
   URL to a small folder picker, then start `yt-dlp`.
 - Open an X/Twitter profile media URL, such as `https://x.com/username/media`,
   and click the extension button to scan the loaded page for video post links.
-  The picker window opens immediately and reports scan progress while it runs;
+  The picker tab opens immediately and reports scan progress while it runs;
   the page is scrolled automatically and returned to its original position when
   the scan ends. The host queues those videos one by one and downloads them into
   a `username/` folder inside the selected target folder.
