@@ -50,6 +50,11 @@ button {
 }
 
 .column-downloads > .panel:first-child,
+.column-handles .dashboard-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .column-handles > .panel:first-child {
   margin-top: 0;
 }
@@ -547,6 +552,41 @@ input:disabled {
 
 .tile-body .download-action-button {
   padding: 4px 8px;
+}
+
+.handle-tools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.handle-tools input,
+.handle-tools select,
+.handle-input {
+  padding: 8px 10px;
+  font-size: 0.84rem;
+}
+
+.handle-tools select {
+  border: 1px solid rgba(33, 27, 21, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 253, 249, 0.96);
+  color: var(--ink);
+}
+
+.handle-form {
+  display: grid;
+  gap: 8px;
+}
+
+.group-check {
+  margin-left: auto;
+}
+
+.handle-list .group-items {
+  padding: 0 8px 8px;
+  gap: 8px;
 }
 
 .handle-list {

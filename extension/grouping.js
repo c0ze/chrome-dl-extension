@@ -95,3 +95,81 @@ export function formatChecked(lastChecked, now = Date.now()) {
   if (hours < 48) return `checked ${hours} h ago`;
   return `checked ${Math.round(hours / 24)} days ago`;
 }
+
+export const HANDLE_SORTS = ["name", "new", "checked", "videos"];
+
+function checkedTime(entry) {
+  const time = new Date(String(entry.last_checked || "").replace(" ", "T")).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+/** Whether a handle matches a search: by its name or any former name. */
+export function handleMatches(entry, query) {
+  const wanted = query.trim().toLowerCase().replace(/^@/, "");
+  if (!wanted) {
+    return true;
+  }
+  return [entry.handle, ...(entry.aliases || [])].some((name) =>
+    String(name).toLowerCase().includes(wanted)
+  );
+}
+
+export function sortHandles(entries, sort) {
+  const byName = (a, b) => a.handle.toLowerCase().localeCompare(b.handle.toLowerCase());
+  const orders = {
+    name: byName,
+    new: (a, b) => b.pending_count - a.pending_count || byName(a, b),
+    // Never-checked handles first: they are the ones a check is most due for.
+    checked: (a, b) => checkedTime(a) - checkedTime(b) || byName(a, b),
+    videos: (a, b) => b.video_count - a.video_count || byName(a, b),
+  };
+  return [...entries].sort(orders[sort] || byName);
+}
+
+/**
+ * Files handles under their group for display. Groups are in name order with
+ * the ungrouped handles last; empty groups are left out.
+ */
+export function groupHandles(entries, query, sort) {
+  const groups = new Map();
+  for (const entry of entries) {
+    if (!handleMatches(entry, query)) {
+      continue;
+    }
+    const group = entry.group || "";
+    if (!groups.has(group)) {
+      groups.set(group, []);
+    }
+    groups.get(group).push(entry);
+  }
+
+  return [...groups.entries()]
+    .sort(([a], [b]) => (a === "") - (b === "") || a.toLowerCase().localeCompare(b.toLowerCase()))
+    .map(([group, handles]) => ({
+      group,
+      handles: sortHandles(handles, sort),
+      pending: handles.filter((entry) => entry.pending_count).length,
+    }));
+}
+
+/** The folder a download from this URL's handle belongs in, if the handle is known. */
+export function folderForTarget(entries, handle, isProfile) {
+  const wanted = String(handle || "").toLowerCase();
+  if (!wanted) {
+    return null;
+  }
+  const entry = entries.find(
+    (candidate) =>
+      candidate.handle.toLowerCase() === wanted ||
+      (candidate.aliases || []).some((alias) => String(alias).toLowerCase() === wanted)
+  );
+  if (!entry || !entry.base_dir) {
+    return null;
+  }
+  // A profile batch names its base folder and the host adds the handle's own
+  // folder; a single post is saved exactly where the path points.
+  return {
+    entry,
+    directory: isProfile ? entry.base_dir : `${entry.base_dir}/${entry.name}`,
+  };
+}

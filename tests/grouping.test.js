@@ -68,3 +68,82 @@ test("the last check is shown as an age", () => {
   assert.equal(formatChecked("2026-11-12 03:00:00", now), "checked 9 h ago");
   assert.equal(formatChecked("2026-11-02 12:00:00", now), "checked 10 days ago");
 });
+
+import { folderForTarget, groupHandles, handleMatches, sortHandles } from "../extension/grouping.js";
+
+const handle = (name, extra = {}) => ({
+  handle: name,
+  name,
+  group: "",
+  base_dir: "/lib",
+  aliases: [],
+  pending_count: 0,
+  video_count: 0,
+  last_checked: null,
+  ...extra,
+});
+
+test("a search finds a creator by a former handle", () => {
+  const entry = handle("new_name", { aliases: ["old_name"] });
+  assert.equal(handleMatches(entry, "@OLD"), true);
+  assert.equal(handleMatches(entry, "new"), true);
+  assert.equal(handleMatches(entry, "other"), false);
+  assert.equal(handleMatches(entry, "  "), true);
+});
+
+test("handles are listed under their group, ungrouped last, empty groups hidden", () => {
+  const groups = groupHandles(
+    [
+      handle("zed", { group: "hard j" }),
+      handle("amy", { group: "hard j", pending_count: 2 }),
+      handle("loose"),
+      handle("bob", { group: "Hard ch" }),
+    ],
+    "",
+    "name"
+  );
+  assert.deepEqual(
+    groups.map((group) => [group.group, group.handles.map((entry) => entry.handle), group.pending]),
+    [
+      ["Hard ch", ["bob"], 0],
+      ["hard j", ["amy", "zed"], 1],
+      ["", ["loose"], 0],
+    ]
+  );
+  assert.equal(groupHandles([handle("amy", { group: "g" })], "nobody", "name").length, 0);
+});
+
+test("sorting by last check puts never-checked handles first", () => {
+  const sorted = sortHandles(
+    [
+      handle("recent", { last_checked: "2026-11-12 10:00:00" }),
+      handle("never"),
+      handle("old", { last_checked: "2026-10-01 10:00:00" }),
+    ],
+    "checked"
+  );
+  assert.deepEqual(
+    sorted.map((entry) => entry.handle),
+    ["never", "old", "recent"]
+  );
+});
+
+test("sorting by new videos and by library size", () => {
+  const entries = [
+    handle("a", { pending_count: 1, video_count: 5 }),
+    handle("b", { pending_count: 4, video_count: 50 }),
+    handle("c", { pending_count: 0, video_count: 9 }),
+  ];
+  assert.deepEqual(sortHandles(entries, "new").map((entry) => entry.handle), ["b", "a", "c"]);
+  assert.deepEqual(sortHandles(entries, "videos").map((entry) => entry.handle), ["b", "c", "a"]);
+});
+
+test("a known handle's download is steered to the folder it already has", () => {
+  const entries = [handle("New_Name", { aliases: ["old_name"], base_dir: "/lib/hard j" })];
+  // A profile batch: the host appends the handle's folder itself.
+  assert.equal(folderForTarget(entries, "new_name", true).directory, "/lib/hard j");
+  // A single post, reached through the former handle.
+  assert.equal(folderForTarget(entries, "OLD_NAME", false).directory, "/lib/hard j/New_Name");
+  assert.equal(folderForTarget(entries, "stranger", false), null);
+  assert.equal(folderForTarget(entries, "", false), null);
+});

@@ -60,6 +60,24 @@ is loaded.
   dashboard groups downloads by handle and switches between a list and a tile
   view; tiles show a frame of each finished video, which the host saves in
   `~/.local/state/yt-dlp-browser-host/thumbs` (needs `ffmpeg`).
+- The download folder is treated as a library laid out as
+  `<group>/<handle>/`, for example `hard j/someone/`. `Import` reads that
+  layout into the handle list: top-level folders are groups, the folders in
+  them are handles, and a folder nested inside a handle is one of its former
+  handles. Importing again is safe; it only adds what is new.
+- `Edit` on a handle renames it or files it under another group. A rename
+  creates a folder for the new handle and moves the old handle's folder inside
+  it, so one creator's videos stay under their current handle; renaming to a
+  handle that is already listed merges the two the same way. `Add` follows a
+  handle before anything is downloaded from it.
+- A download from a handle that is already in the library is pointed at the
+  folder that handle has, also when the page was reached through a former name.
+- Finished videos are recorded in yt-dlp's download archive
+  (`~/.local/state/yt-dlp-browser-host/archive.txt`), and `Import` adds the
+  videos already on disk whose file names carry their id. A video in the
+  archive is skipped and shown as `Already downloaded`; confirming the
+  duplicate prompt downloads it anyway. Older files named without an id cannot
+  be recognised this way.
 - The handle list holds every X/Twitter account you have downloaded from.
   `Check` (or `Check All`) opens the handle's media page in a background tab,
   scans the top of it and closes it; posts that were not downloaded yet show as

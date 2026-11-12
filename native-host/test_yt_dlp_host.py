@@ -21,6 +21,7 @@ def setUpModule() -> None:
     host.HANDLES_PATH = root / "handles.json"
     host.HANDLES_LOCK_PATH = root / "handles.lock"
     host.THUMBS_DIR = root / "thumbs"
+    host.ARCHIVE_PATH = root / "archive.txt"
     host.HANDLES_PATH.write_text('{"handles": {}}')
 
 
@@ -1361,6 +1362,16 @@ class HandleStateCase(unittest.TestCase):
             patcher = unittest.mock.patch.object(host, name)
             patcher.start()
             self.addCleanup(patcher.stop)
+        self.library = self.root / "library"
+        self.library.mkdir()
+        config = unittest.mock.patch.object(
+            host, "load_config", return_value=dict(host.DEFAULT_CONFIG, download_dir=str(self.library))
+        )
+        config.start()
+        self.addCleanup(config.stop)
+        archive = unittest.mock.patch.object(host, "ARCHIVE_PATH", self.root / "archive.txt")
+        archive.start()
+        self.addCleanup(archive.stop)
 
     def write_jobs(self, jobs: list[dict[str, Any]]) -> None:
         host.JOBS_PATH.write_text(json.dumps({"jobs": jobs}))
@@ -1608,3 +1619,251 @@ class PlayDownloadTests(HandleStateCase):
         config = dict(host.DEFAULT_CONFIG)
         del config["player"]
         self.assertEqual(host.normalize_config(config)["player"], "mpv")
+
+
+class LibraryCase(HandleStateCase):
+    def video(self, relative: str) -> Path:
+        path = self.library / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+        return path
+
+    def handles(self) -> dict[str, dict[str, Any]]:
+        return {entry["handle"]: entry for entry in host.get_handles()["handles"]}
+
+
+class LibraryImportTests(LibraryCase):
+    """The library on disk is <group>/<handle>/, with former handles nested inside."""
+
+    def test_groups_and_handles_come_from_the_folder_layout(self) -> None:
+        self.video("hard j/alice/abcdefghijklmnop.mp4")
+        self.video("hard j/alice/alice-1234567890123.mp4")
+        self.video("hard ch/Bob_2/Bob_2-1234567890999.mp4")
+        self.video("hard j/loose-file.mp4")
+
+        response = host.import_library()
+
+        handles = self.handles()
+        self.assertEqual(response["found"], 2)
+        self.assertEqual(handles["alice"]["group"], "hard j")
+        self.assertEqual(handles["alice"]["video_count"], 2)
+        self.assertEqual(handles["Bob_2"]["group"], "hard ch")
+        self.assertEqual(host.get_handles()["groups"], ["hard ch", "hard j"])
+
+    def test_a_folder_nested_in_a_handle_is_its_former_handle(self) -> None:
+        self.video("hard j/new_name/new_name-1234567890001.mp4")
+        self.video("hard j/new_name/old_name/old_name-1234567890002.mp4")
+
+        host.import_library()
+
+        entry = self.handles()["new_name"]
+        self.assertEqual(entry["aliases"], ["old_name"])
+        self.assertEqual(entry["video_count"], 2)
+        self.assertNotIn("old_name", self.handles())
+
+    def test_a_folder_named_after_a_display_name_is_read_from_its_files(self) -> None:
+        self.video("fem/Some Display Name/real_handle-1234567890001.mp4")
+        self.video("fem/月瑶 Reels/61570702198230-1234567890002.mp4")
+
+        response = host.import_library()
+
+        entry = self.handles()["real_handle"]
+        self.assertEqual(entry["name"], "Some Display Name")
+        # A numeric prefix is a Facebook page id, not a handle.
+        self.assertEqual(response["skipped"], ["fem/月瑶 Reels"])
+
+    def test_a_handle_downloaded_into_the_root_is_not_taken_for_a_group(self) -> None:
+        self.video("solo/solo-1234567890001.mp4")
+        self.video("solo/former/former-1234567890002.mp4")
+
+        host.import_library()
+
+        entry = self.handles()["solo"]
+        self.assertEqual(entry["group"], "")
+        self.assertEqual(entry["aliases"], ["former"])
+        self.assertNotIn("solo", host.get_handles()["groups"])
+
+    def test_synology_metadata_and_the_trash_are_not_library_content(self) -> None:
+        self.video("@eaDir/alice/x.mp4")
+        self.video("_trash/hard j/alice/alice-1234567890001.mp4")
+        self.video("hard j/alice/@eaDir/alice-1234567890002.mp4")
+        self.video("hard j/alice/alice-1234567890003.mp4")
+
+        response = host.import_library()
+
+        self.assertEqual(response["found"], 1)
+        self.assertEqual(self.handles()["alice"]["video_count"], 1)
+
+    def test_importing_again_changes_nothing_and_keeps_what_was_checked(self) -> None:
+        self.video("hard j/alice/alice-1234567890001.mp4")
+        host.import_library()
+        host.record_handle_scan("alice", ["https://x.com/alice/status/5"])
+
+        response = host.import_library()
+
+        self.assertEqual(response["added"], 0)
+        self.assertEqual(response["archive_added"], 0)
+        self.assertEqual(self.handles()["alice"]["pending_count"], 1)
+
+    def test_one_handle_in_two_groups_is_reported(self) -> None:
+        self.video("hard j/alice/a.mp4")
+        self.video("white/alice/b.mp4")
+
+        response = host.import_library()
+
+        self.assertEqual(len(response["duplicates"]), 1)
+        self.assertIn("hard j/alice", response["duplicates"][0])
+
+    def test_downloaded_videos_are_recorded_so_they_are_never_fetched_again(self) -> None:
+        self.video("hard j/alice/alice-1234567890001.mp4")
+        self.video("hard j/alice/old/old-1234567890002.mp4")
+        self.video("hard j/alice/abcdefghijklmnop.mp4")
+
+        response = host.import_library()
+
+        self.assertEqual(response["archive_added"], 2)
+        self.assertEqual(
+            host.ARCHIVE_PATH.read_text().splitlines(),
+            ["twitter 1234567890001", "twitter 1234567890002"],
+        )
+
+    def test_a_missing_share_is_reported_instead_of_emptying_the_list(self) -> None:
+        self.library.rmdir()
+        with self.assertRaises(host.MissingDownloadDir):
+            host.import_library()
+
+
+class HandleRenameTests(LibraryCase):
+    """A creator who changes handle keeps one folder: the old one moves inside the new."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.write_jobs([])
+        self.video("hard j/old_name/old_name-1234567890001.mp4")
+        host.import_library()
+        host.remember_handle("old_name", ["https://x.com/old_name/status/1"])
+
+    def test_rename_nests_the_old_folder_under_the_new_handle(self) -> None:
+        host.update_handle("old_name", "new_name", None)
+
+        self.assertTrue((self.library / "hard j/new_name/old_name/old_name-1234567890001.mp4").is_file())
+        self.assertFalse((self.library / "hard j/old_name").exists())
+        entry = self.handles()["new_name"]
+        self.assertEqual(entry["aliases"], ["old_name"])
+        self.assertEqual(entry["group"], "hard j")
+        self.assertEqual(entry["profile_url"], "https://x.com/new_name/media")
+        self.assertNotIn("old_name", self.handles())
+
+    def test_posts_downloaded_under_the_old_name_are_not_offered_again(self) -> None:
+        host.update_handle("old_name", "new_name", None)
+
+        response = host.record_handle_scan(
+            "new_name", ["https://x.com/new_name/status/1", "https://x.com/new_name/status/2"]
+        )
+
+        self.assertEqual(response["handle"]["pending_count"], 1)
+
+    def test_renaming_to_a_listed_handle_merges_the_two(self) -> None:
+        self.video("white/new_name/new_name-1234567890009.mp4")
+        host.import_library()
+
+        host.update_handle("old_name", "new_name", None)
+
+        self.assertTrue((self.library / "white/new_name/old_name/old_name-1234567890001.mp4").is_file())
+        entry = self.handles()["new_name"]
+        self.assertEqual(entry["group"], "white")
+        self.assertEqual(entry["video_count"], 2)
+        self.assertEqual(entry["aliases"], ["old_name"])
+
+    def test_a_second_rename_keeps_every_former_handle(self) -> None:
+        host.update_handle("old_name", "mid_name", None)
+        host.update_handle("mid_name", "new_name", None)
+
+        self.assertTrue(
+            (self.library / "hard j/new_name/mid_name/old_name/old_name-1234567890001.mp4").is_file()
+        )
+        self.assertEqual(self.handles()["new_name"]["aliases"], ["mid_name", "old_name"])
+
+    def test_moving_to_another_group_moves_the_folder(self) -> None:
+        host.update_handle("old_name", None, "hard ch")
+
+        self.assertTrue((self.library / "hard ch/old_name/old_name-1234567890001.mp4").is_file())
+        self.assertEqual(self.handles()["old_name"]["group"], "hard ch")
+
+    def test_nothing_moves_when_the_destination_is_taken(self) -> None:
+        self.video("hard ch/old_name/other.mp4")
+
+        with self.assertRaises(ValueError):
+            host.update_handle("old_name", None, "hard ch")
+
+        self.assertTrue((self.library / "hard j/old_name/old_name-1234567890001.mp4").is_file())
+        self.assertEqual(self.handles()["old_name"]["group"], "hard j")
+
+    def test_a_handle_with_downloads_in_flight_is_not_moved(self) -> None:
+        self.write_jobs(
+            [
+                {
+                    "id": "a" * 32,
+                    "url": "https://x.com/old_name/status/9",
+                    "status": "queued",
+                    "download_dir": str(self.library / "hard j/old_name"),
+                }
+            ]
+        )
+
+        with self.assertRaises(ValueError):
+            host.update_handle("old_name", "new_name", None)
+
+        self.assertTrue((self.library / "hard j/old_name").is_dir())
+
+    def test_a_group_cannot_point_outside_the_library(self) -> None:
+        for group in ("../elsewhere", "a/b", "..", "_trash", "@eaDir"):
+            with self.assertRaises(ValueError):
+                host.update_handle("old_name", None, group)
+
+    def test_a_download_from_a_former_handle_lands_in_the_current_folder(self) -> None:
+        host.update_handle("old_name", "new_name", None)
+        with unittest.mock.patch.object(host, "launch_next_queued_job", return_value={"started": True}):
+            response = host.start_profile_download_jobs(
+                "https://x.com/old_name/media",
+                "toolbar",
+                str(self.library / "hard j"),
+                ["https://x.com/old_name/status/7"],
+            )
+
+        self.assertEqual(response["download_dir"], str(self.library / "hard j/new_name"))
+        self.assertEqual(set(self.handles()), {"new_name"})
+
+
+class AddHandleTests(LibraryCase):
+    def test_a_handle_can_be_followed_before_anything_is_downloaded(self) -> None:
+        host.add_handle("fresh", "hard j")
+
+        entry = self.handles()["fresh"]
+        self.assertEqual(entry["group"], "hard j")
+        self.assertEqual(entry["known_count"], 0)
+
+    def test_a_former_handle_is_not_added_a_second_time(self) -> None:
+        self.video("hard j/new_name/old_name/x.mp4")
+        host.import_library()
+
+        with self.assertRaises(ValueError):
+            host.add_handle("old_name", "hard j")
+
+
+class DownloadArchiveTests(unittest.TestCase):
+    def command(self, **kwargs: Any) -> list[str]:
+        return host.build_command("https://x.com/a/status/1", dict(host.DEFAULT_CONFIG), "/data", **kwargs)
+
+    def test_downloads_are_checked_against_the_archive(self) -> None:
+        command = self.command()
+        self.assertEqual(command[command.index("--download-archive") + 1], str(host.ARCHIVE_PATH))
+
+    def test_a_download_asked_for_again_on_purpose_bypasses_the_archive(self) -> None:
+        self.assertNotIn("--download-archive", self.command(use_archive=False))
+
+    def test_a_skipped_video_is_not_reported_as_a_fresh_download(self) -> None:
+        line = "[download] 2063957158568529920: has already been recorded in the archive"
+        self.assertEqual(
+            host.parse_progress_line(line), {"skipped": True, "status_detail": "Already downloaded"}
+        )
