@@ -29,6 +29,7 @@ JOBS_LOCK_PATH = STATE_DIR / "downloads.lock"
 HANDLES_PATH = STATE_DIR / "handles.json"
 HANDLES_LOCK_PATH = STATE_DIR / "handles.lock"
 THUMBS_DIR = STATE_DIR / "thumbs"
+ARCHIVE_PATH = STATE_DIR / "archive.txt"
 MAX_LOG_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_PATH = STATE_DIR / "host.log.1"
 PRIVATE_FILE_MODE = 0o600
@@ -139,6 +140,12 @@ THUMBNAIL_WIDTH = 320
 THUMBNAIL_TIMEOUT_SECONDS = 30
 MAX_THUMBNAIL_RESPONSE_BYTES = 640 * 1024
 JOB_ID_RE = re.compile(r"[0-9a-f]{32}")
+VIDEO_SUFFIXES = {".mp4", ".mkv", ".webm", ".mov", ".m4v"}
+# Synology metadata (@eaDir), hidden folders and our own _trash are not library content.
+LIBRARY_SKIP_PREFIXES = ("@", ".", "_")
+# <uploader>-<id>.<ext>, the name PROFILE_OUTPUT_TEMPLATE gives a download.
+PREFIXED_FILE_RE = re.compile(r"^([A-Za-z0-9_]{1,15})-(\d{10,})\.")
+ARCHIVE_SKIP_MARKER = "has already been recorded in the archive"
 MAX_JOBS_IN_RESPONSE = 300
 MAX_RESPONSE_BYTES = 768 * 1024
 MAX_PROFILE_BATCH_JOBS = 500
@@ -1321,6 +1328,7 @@ def build_command(
     url: str,
     config: dict[str, Any],
     download_dir_override: str | None = None,
+    use_archive: bool = True,
 ) -> list[str]:
     download_dir = resolve_download_dir(download_dir_override or config["download_dir"])
 
@@ -1335,6 +1343,10 @@ def build_command(
     provider = provider_for_url(url)
     if provider:
         command.extend(["-o", provider["template"]])
+        if use_archive:
+            # Remembers every finished video for good, so one that is already
+            # in the library is skipped even after its dashboard entry is gone.
+            command.extend(["--download-archive", str(ARCHIVE_PATH)])
     command.extend(config["extra_args"])
     command.append(url)
     return command
@@ -1350,6 +1362,9 @@ def parse_progress_line(line: str) -> dict[str, Any] | None:
             "status_detail": "Merging formats",
             "filename": stripped.removeprefix(MERGE_PREFIX).strip().strip('"'),
         }
+
+    if ARCHIVE_SKIP_MARKER in stripped:
+        return {"skipped": True, "status_detail": "Already downloaded"}
 
     if stripped.startswith(FIXUP_PREFIX):
         return {"status_detail": "Finalizing file"}
@@ -1388,6 +1403,7 @@ def encode_worker_payload(job: dict[str, Any]) -> str:
                 "download_dir": job.get("download_dir"),
                 "url": job["url"],
                 "source": job.get("source", "extension"),
+                "force": bool(job.get("force")),
             }
         ).encode("utf-8")
     ).decode("ascii")
@@ -2074,7 +2090,9 @@ def run_download_worker(encoded_payload: str) -> int:
         source = payload.get("source", "extension")
         download_dir_override = payload.get("download_dir")
         config = load_config()
-        command = build_command(url, config, download_dir_override)
+        command = build_command(
+            url, config, download_dir_override, use_archive=not payload.get("force")
+        )
         download_dir = resolve_download_dir(download_dir_override or config["download_dir"])
         # Checked again here: the folder may have vanished since the job was
         # queued, and the job may come from the config default or a retry.
@@ -2111,11 +2129,12 @@ def run_download_worker(encoded_payload: str) -> int:
             if return_code == 0:
                 notify("yt-dlp download complete", safe_url)
                 log_line(f"Download complete for {safe_url}")
+                skipped = bool((get_download_job(job_id) or {}).get("skipped"))
                 update_job(
                     job_id,
                     {
                         "status": "complete",
-                        "status_detail": "Complete",
+                        "status_detail": "Already downloaded" if skipped else "Complete",
                         "progress": 100,
                         "exit_code": return_code,
                         "finished_at": timestamp(),
@@ -2206,6 +2225,8 @@ def start_download_job(
         "url": normalized_url,
         "source": source,
         "download_dir": normalized_download_dir,
+        # Asked for again on purpose, so the archive must not skip it.
+        "force": allow_duplicate,
         "status": "queued",
         "status_detail": "Queued",
         "progress": 0,
@@ -2315,6 +2336,13 @@ def start_profile_download_jobs(
     folder_name = safe_path_part(
         profile_name_stripped or url_decoded_name or target["key"], fallback=target["key"]
     )
+    owner = target["key"]
+    if target["provider"] == "twitter":
+        # A handle already in the library keeps its folder, including when the
+        # page was reached through one of its former names.
+        known = known_handle_folder(target["key"], base_download_path)
+        if known:
+            owner, folder_name = known
     profile_dir = Path(base_download_path) / folder_name
     started_at = timestamp()
 
@@ -2326,6 +2354,7 @@ def start_profile_download_jobs(
             "source": source,
             "download_dir": str(profile_dir),
             "handle": target["key"] if target["provider"] == "twitter" else "",
+            "force": allow_duplicate,
             "status": "queued",
             "status_detail": "Queued",
             "progress": 0,
@@ -2391,7 +2420,7 @@ def start_profile_download_jobs(
         # Every scanned post counts as seen, whether it was queued now or was
         # already downloaded, so the next check only reports later posts.
         remember_handle(
-            target["key"],
+            owner,
             video_urls,
             base_dir=base_download_path,
             name=folder_name,
@@ -2565,6 +2594,8 @@ def handle_entry(state: dict[str, Any], username: str) -> dict[str, Any]:
             "handle": username,
             "name": username,
             "base_dir": "",
+            "aliases": [],
+            "video_count": 0,
             "known": [],
             "pending": [],
             "added_at": timestamp(),
@@ -2572,7 +2603,7 @@ def handle_entry(state: dict[str, Any], username: str) -> dict[str, Any]:
         }
         state["handles"][key] = entry
 
-    for field in ("known", "pending"):
+    for field in ("known", "pending", "aliases"):
         if not isinstance(entry.get(field), list):
             entry[field] = []
     return entry
@@ -2655,12 +2686,57 @@ def remember_downloaded_post(url: str, download_dir: str | None) -> None:
     remember_handle(username, [url], base_dir=base_dir)
 
 
-def handle_for_response(entry: dict[str, Any]) -> dict[str, Any]:
+def find_handle(state: dict[str, Any], username: str) -> dict[str, Any] | None:
+    """The entry for a handle, also when the name is one of its former handles."""
+    wanted = username.lower()
+    entry = state["handles"].get(wanted)
+    if entry is not None:
+        return entry
+    for candidate in state["handles"].values():
+        if wanted in (str(alias).lower() for alias in candidate.get("aliases") or []):
+            return candidate
+    return None
+
+
+def known_handle_folder(username: str, base_dir: str) -> tuple[str, str] | None:
+    """(current handle, folder name) when the handle already lives in base_dir."""
+    try:
+        entry = find_handle(read_handles(), username)
+    except Exception as error:  # noqa: BLE001
+        log_line(f"Could not read the handle list: {error}")
+        return None
+
+    if not entry or not entry.get("name") or not entry.get("base_dir"):
+        return None
+    if os.path.normpath(str(entry["base_dir"])) != os.path.normpath(base_dir):
+        return None
+    return str(entry["handle"]), str(entry["name"])
+
+
+def library_root() -> Path:
+    return Path(resolve_download_dir(load_config()["download_dir"]))
+
+
+def group_of(base_dir: str, root: Path) -> str:
+    """The folder a handle is filed under, relative to the library root."""
+    if not base_dir:
+        return ""
+    try:
+        relative = Path(base_dir).relative_to(root)
+    except ValueError:
+        return base_dir
+    return "" if str(relative) == "." else str(relative)
+
+
+def handle_for_response(entry: dict[str, Any], root: Path | None = None) -> dict[str, Any]:
     return {
         "handle": entry.get("handle", ""),
         "name": entry.get("name") or entry.get("handle", ""),
         "profile_url": f"https://x.com/{entry.get('handle', '')}/media",
         "base_dir": entry.get("base_dir", ""),
+        "group": group_of(str(entry.get("base_dir") or ""), root) if root else "",
+        "aliases": list(entry.get("aliases") or []),
+        "video_count": int(entry.get("video_count") or 0),
         "known_count": len(entry.get("known", [])),
         "pending_count": len(entry.get("pending", [])),
         "last_checked": entry.get("last_checked"),
@@ -2668,10 +2744,293 @@ def handle_for_response(entry: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def read_handles() -> dict[str, Any]:
+    if not HANDLES_PATH.exists():
+        # First use: let the write path seed the list from the dashboard.
+        return mutate_handles(lambda state: state)
+
+    ensure_state()
+    with open_private(HANDLES_LOCK_PATH, "a") as lock_handle:
+        fcntl.flock(lock_handle, fcntl.LOCK_SH)
+        state = read_handles_unlocked()
+        fcntl.flock(lock_handle, fcntl.LOCK_UN)
+    return state
+
+
+def is_library_dir(entry: os.DirEntry[str]) -> bool:
+    return not entry.name.startswith(LIBRARY_SKIP_PREFIXES) and entry.is_dir()
+
+
+def library_groups(root: Path, state: dict[str, Any]) -> list[str]:
+    """Every group a handle can be filed under: used ones and top-level folders."""
+    groups = {group_of(str(entry.get("base_dir") or ""), root) for entry in state["handles"].values()}
+    handle_folders = {
+        os.path.normpath(os.path.join(str(entry.get("base_dir") or ""), str(entry.get("name") or "")))
+        for entry in state["handles"].values()
+    }
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if is_library_dir(entry) and os.path.normpath(entry.path) not in handle_folders:
+                    groups.add(entry.name)
+    except OSError:
+        pass  # The share is offline; the groups in use are still worth showing.
+
+    groups.discard("")
+    return sorted(groups, key=str.lower)
+
+
 def get_handles() -> dict[str, Any]:
+    state = read_handles()
+    root = library_root()
+    entries = sorted(state["handles"].values(), key=lambda entry: str(entry.get("handle", "")).lower())
+    return {
+        "ok": True,
+        "handles": [handle_for_response(entry, root) for entry in entries],
+        "groups": library_groups(root, state),
+        "library_root": str(root),
+    }
+
+
+def scan_handle_folder(folder: str) -> dict[str, Any]:
+    """Count a handle folder's videos and read what its file names give away."""
+    videos = 0
+    ids: set[str] = set()
+    prefixes: dict[str, int] = {}
+    aliases: list[str] = []
+    for current, directories, files in os.walk(folder):
+        directories[:] = [name for name in directories if not name.startswith(LIBRARY_SKIP_PREFIXES)]
+        if current == folder:
+            # A former handle's folder is kept inside the current handle's.
+            aliases = [name for name in directories if valid_twitter_username(name)]
+        for name in files:
+            if os.path.splitext(name)[1].lower() not in VIDEO_SUFFIXES:
+                continue
+            videos += 1
+            match = PREFIXED_FILE_RE.match(name)
+            if match and not match.group(1).isdigit():
+                ids.add(match.group(2))
+                if current == folder:
+                    prefix = match.group(1).lower()
+                    prefixes[prefix] = prefixes.get(prefix, 0) + 1
+
+    return {"videos": videos, "ids": ids, "prefixes": prefixes, "aliases": aliases}
+
+
+def handle_for_folder(name: str, scan: dict[str, Any]) -> str | None:
+    username = valid_twitter_username(name)
+    if username:
+        return username
+    # A folder named after the display name: its files still carry the handle.
+    for prefix, _count in sorted(scan["prefixes"].items(), key=lambda item: -item[1]):
+        if valid_twitter_username(prefix):
+            return prefix
+    return None
+
+
+def add_to_archive(ids: set[str]) -> int:
+    """Record downloaded twitter video ids in yt-dlp's archive; returns how many were new."""
+    try:
+        existing = set(ARCHIVE_PATH.read_text(encoding="utf-8").split("\n"))
+    except OSError:
+        existing = set()
+
+    lines = sorted(f"twitter {video_id}" for video_id in ids)
+    new_lines = [line for line in lines if line not in existing]
+    if new_lines:
+        ensure_state()
+        with open_private(ARCHIVE_PATH, "a") as handle:
+            handle.write("".join(f"{line}\n" for line in new_lines))
+    return len(new_lines)
+
+
+def import_library() -> dict[str, Any]:
+    """Build the handle list from the folders under the download folder.
+
+    The layout is <group>/<handle>/ with a former handle's folder nested inside
+    the current one; a handle folder may also sit at the top level.
+    """
+    root = library_root()
+    if not root.is_dir():
+        raise MissingDownloadDir(f"The download folder is not available: {root}")
+
+    found: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    archive_ids: set[str] = set()
+
+    def consider(path: str, name: str, base_dir: str) -> bool:
+        scan = scan_handle_folder(path)
+        username = handle_for_folder(name, scan)
+        if not username:
+            return False
+        archive_ids.update(scan["ids"])
+        found.append(
+            {
+                "handle": username,
+                "base_dir": base_dir,
+                "name": name,
+                "aliases": [alias for alias in scan["aliases"] if alias.lower() != username.lower()],
+                "video_count": scan["videos"],
+            }
+        )
+        return True
+
+    with os.scandir(root) as top_entries:
+        top_level = sorted((entry for entry in top_entries if is_library_dir(entry)), key=lambda e: e.name.lower())
+    for top in top_level:
+        with os.scandir(top.path) as child_entries:
+            children = sorted((entry for entry in child_entries if is_library_dir(entry)), key=lambda e: e.name.lower())
+
+        # A top-level folder whose own files carry its name is a handle that
+        # was downloaded straight into the library root, not a group.
+        own_prefix = any(
+            (match := PREFIXED_FILE_RE.match(name)) and match.group(1).lower() == top.name.lower()
+            for name in os.listdir(top.path)
+        )
+        if own_prefix and valid_twitter_username(top.name):
+            consider(top.path, top.name, str(root))
+            continue
+
+        for child in children:
+            if not consider(child.path, child.name, top.path):
+                skipped.append(f"{top.name}/{child.name}")
+
+    duplicates: list[str] = []
+
     def mutator(state: dict[str, Any]) -> dict[str, Any]:
-        entries = sorted(state["handles"].values(), key=lambda entry: str(entry.get("handle", "")).lower())
-        return {"ok": True, "handles": [handle_for_response(entry) for entry in entries]}
+        added = 0
+        seen: dict[str, str] = {}
+        for item in found:
+            key = item["handle"].lower()
+            location = f"{group_of(item['base_dir'], root) or '.'}/{item['name']}"
+            if key in seen:
+                duplicates.append(f"@{item['handle']}: {seen[key]} and {location}")
+                continue
+            seen[key] = location
+            if key not in state["handles"]:
+                added += 1
+            entry = handle_entry(state, item["handle"])
+            entry["handle"] = item["handle"]
+            entry["base_dir"] = item["base_dir"]
+            entry["name"] = item["name"]
+            entry["video_count"] = item["video_count"]
+            known_aliases = {alias.lower() for alias in entry["aliases"]}
+            entry["aliases"].extend(alias for alias in item["aliases"] if alias.lower() not in known_aliases)
+        return {"added": added, "total": len(state["handles"])}
+
+    counts = mutate_handles(mutator)
+    return {
+        "ok": True,
+        "found": len(found),
+        "added": counts["added"],
+        "total": counts["total"],
+        "videos": sum(item["video_count"] for item in found),
+        "archive_added": add_to_archive(archive_ids),
+        "skipped": skipped[:50],
+        "skipped_count": len(skipped),
+        "duplicates": duplicates[:50],
+    }
+
+
+def valid_group(group: Any) -> str:
+    """A group is one folder name directly under the library root; "" is the root."""
+    name = str(group or "").strip()
+    if not name:
+        return ""
+    if name in {".", ".."} or "/" in name or "\x00" in name or "$" in name or name.startswith(LIBRARY_SKIP_PREFIXES):
+        raise ValueError(f"'{name}' cannot be used as a group name.")
+    return name
+
+
+def add_handle(username: str, group: Any) -> dict[str, Any]:
+    root = library_root()
+    base_dir = root / valid_group(group)
+
+    def mutator(state: dict[str, Any]) -> dict[str, Any]:
+        existing = find_handle(state, username)
+        if existing:
+            raise ValueError(f"@{username} is already in the list as @{existing['handle']}.")
+        entry = handle_entry(state, username)
+        entry["base_dir"] = str(base_dir)
+        return {"ok": True, "handle": handle_for_response(entry, root)}
+
+    return mutate_handles(mutator)
+
+
+def handle_folder_is_busy(folder: Path) -> bool:
+    prefix = os.path.normpath(str(folder))
+    for job in read_jobs_shared()["jobs"]:
+        if job.get("status") not in ACTIVE_STATUSES:
+            continue
+        job_dir = os.path.normpath(str(job.get("download_dir") or ""))
+        if job_dir == prefix or job_dir.startswith(prefix + os.sep):
+            return True
+    return False
+
+
+def move_folder(source: Path, destination: Path) -> None:
+    if destination.exists():
+        raise ValueError(f"{destination} already exists; nothing was moved.")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source.rename(destination)
+
+
+def update_handle(username: str, new_handle: str | None, group: Any | None) -> dict[str, Any]:
+    """Rename a handle and/or file it under another group, moving its folder.
+
+    A rename follows the library's convention: the new handle gets a folder and
+    the old handle's folder moves inside it, so one person's videos stay under
+    their current handle. Renaming to a handle that is already listed merges
+    the two the same way.
+    """
+    root = library_root()
+
+    def mutator(state: dict[str, Any]) -> dict[str, Any]:
+        entry = require_handle(state, username)
+        old_key = entry["handle"].lower()
+        old_base = Path(str(entry.get("base_dir") or root))
+        old_folder = old_base / str(entry.get("name") or entry["handle"])
+        target_base = old_base if group is None else root / valid_group(group)
+        renamed = bool(new_handle) and new_handle.lower() != old_key
+
+        if (renamed or target_base != old_base) and handle_folder_is_busy(old_folder):
+            raise ValueError(f"@{entry['handle']} has downloads queued or running. Try again when they finish.")
+
+        if not renamed:
+            if target_base != old_base:
+                if old_folder.is_dir():
+                    move_folder(old_folder, target_base / old_folder.name)
+                entry["base_dir"] = str(target_base)
+            if new_handle:
+                entry["handle"] = new_handle  # Only the capitalisation changed.
+            return {"ok": True, "handle": handle_for_response(entry, root)}
+
+        target = state["handles"].get(new_handle.lower())
+        if target is not None:
+            # Merging into a handle that already has a place in the library.
+            target = handle_entry(state, target["handle"])
+            new_folder = Path(str(target.get("base_dir") or root)) / str(target.get("name") or target["handle"])
+        else:
+            new_folder = target_base / new_handle
+
+        if old_folder.is_dir():
+            move_folder(old_folder, new_folder / old_folder.name)
+
+        del state["handles"][old_key]
+        if target is None:
+            target = handle_entry(state, new_handle)
+            target["base_dir"] = str(target_base)
+            target["name"] = new_handle
+            target["added_at"] = entry.get("added_at") or target["added_at"]
+            target["last_checked"] = entry.get("last_checked")
+
+        former = [entry["handle"], *entry["aliases"]]
+        listed = {alias.lower() for alias in target["aliases"]} | {target["handle"].lower()}
+        target["aliases"].extend(alias for alias in former if alias.lower() not in listed)
+        target["video_count"] = int(target.get("video_count") or 0) + int(entry.get("video_count") or 0)
+        mark_posts_known(target, list(entry["known"]))
+        # What was pending is addressed to the old name; the next check finds it again.
+        return {"ok": True, "handle": handle_for_response(target, root)}
 
     return mutate_handles(mutator)
 
@@ -2853,6 +3212,21 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
 
     if message_type == "get_handles":
         return get_handles()
+
+    if message_type == "import_library":
+        try:
+            return import_library()
+        except MissingDownloadDir as error:
+            return {"ok": False, "missing_dir": True, "error": str(error)}
+
+    if message_type == "add_handle":
+        return add_handle(message_handle(message), message.get("group"))
+
+    if message_type == "update_handle":
+        new_handle = message.get("new_handle")
+        if new_handle is not None:
+            new_handle = message_handle({"handle": new_handle})
+        return update_handle(message_handle(message), new_handle, message.get("group"))
 
     if message_type == "record_handle_scan":
         urls = message.get("urls")

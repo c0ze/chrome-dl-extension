@@ -1,5 +1,5 @@
 import { batchTargetForUrl } from "./providers.js";
-import { groupJobsByHandle, groupSummary } from "./grouping.js";
+import { folderForTarget, groupJobsByHandle, groupSummary, jobHandle } from "./grouping.js";
 import { initHandles } from "./handles.js";
 
 const HOST_NAME = "dev.arda.ytdlp_host";
@@ -25,6 +25,7 @@ const SCAN_WATCHDOG_MS = 20000;
 const TOTAL_JOB_COUNT_KEYS = ["total_count", "total_jobs", "job_count", "total"];
 
 const elements = {
+  addHandleButton: document.getElementById("add-handle-button"),
   browseButton: document.getElementById("browse-button"),
   checkAllButton: document.getElementById("check-all-button"),
   clearButton: document.getElementById("clear-button"),
@@ -34,8 +35,12 @@ const elements = {
   downloadButton: document.getElementById("download-button"),
   downloadDir: document.getElementById("download-dir"),
   downloadForm: document.getElementById("download-form"),
+  handleGroups: document.getElementById("handle-groups"),
   handleList: document.getElementById("handle-list"),
+  handleSearch: document.getElementById("handle-search"),
+  handleSort: document.getElementById("handle-sort"),
   handlesSummary: document.getElementById("handles-summary"),
+  importButton: document.getElementById("import-button"),
   message: document.getElementById("message"),
   recentList: document.getElementById("recent-list"),
   refreshButton: document.getElementById("refresh-button"),
@@ -1190,10 +1195,42 @@ elements.clearButton.addEventListener("click", () => {
 elements.viewTiles.addEventListener("click", () => setDownloadsView("tiles"));
 elements.viewList.addEventListener("click", () => setDownloadsView("list"));
 
+/**
+ * A handle that is already in the library downloads into the folder it has
+ * there, so one creator's videos stay together. Applied once, when the handle
+ * list first loads, and never over a folder the user has typed.
+ */
+let knownFolderApplied = false;
+let folderEdited = false;
+elements.downloadDir.addEventListener("input", () => {
+  folderEdited = true;
+});
+
+function applyKnownHandleFolder(handles) {
+  if (knownFolderApplied || folderEdited || !state.targetUrl) {
+    return;
+  }
+  knownFolderApplied = true;
+
+  const target = batchTargetForUrl(state.targetUrl);
+  const handle = target?.provider === "twitter" ? target.key : jobHandle({ url: state.targetUrl });
+  const known = folderForTarget(handles, handle, Boolean(target));
+  if (!known) {
+    return;
+  }
+
+  elements.downloadDir.value = known.directory;
+  if (elements.message.classList.contains("hidden")) {
+    const group = known.entry.group ? ` in "${known.entry.group}"` : "";
+    showMessage("info", `@${known.entry.handle} is already in your library${group}; the folder is set to it.`);
+  }
+}
+
 const handlesPanel = initHandles({
   callHost,
   showMessage,
   onQueued: () => void pollDownloads(),
+  onLoaded: applyKnownHandleFolder,
   elements,
 });
 
@@ -1219,6 +1256,7 @@ try {
 }
 setDownloadsView(storedView);
 
-void initialize();
+// The handle list loads after the folder field has its default, so a known
+// handle's folder is what ends up in it.
+void initialize().finally(() => handlesPanel.refresh());
 void pollDownloads();
-void handlesPanel.refresh();

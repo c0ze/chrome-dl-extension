@@ -107,6 +107,12 @@
             <p id="handles-summary" class="hint">Loading handles…</p>
           </div>
           <div class="dashboard-actions">
+            <button id="add-handle-button" type="button" class="icon-button" title="Follow a handle you have not downloaded from yet">
+              Add
+            </button>
+            <button id="import-button" type="button" class="icon-button" title="Read the handles and groups already in your download folder">
+              Import
+            </button>
             <button
               id="check-all-button"
               type="button"
@@ -117,6 +123,16 @@
             </button>
           </div>
         </div>
+        <div class="handle-tools">
+          <input id="handle-search" type="search" placeholder="Search handles" autocomplete="off" spellcheck="false">
+          <select id="handle-sort" title="Order of handles inside a group">
+            <option value="name">By name</option>
+            <option value="new">New videos first</option>
+            <option value="checked">Longest unchecked first</option>
+            <option value="videos">Most videos first</option>
+          </select>
+        </div>
+        <datalist id="handle-groups"></datalist>
         <div id="handle-list" class="handle-list"></div>
       </section>
       </div>
