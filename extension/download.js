@@ -514,6 +514,17 @@ async function clearDashboardJobs() {
   }
 }
 
+async function playDashboardJob(jobId) {
+  try {
+    const response = await callHost({ type: "play_download", job_id: jobId });
+    if (!response?.ok) {
+      throw new Error(response?.error || "Could not open the video.");
+    }
+  } catch (error) {
+    showMessage("error", error.message || "Could not open the video.");
+  }
+}
+
 async function openDashboardFolder(jobId) {
   try {
     const response = await callHost({ type: "open_download_folder", job_id: jobId });
@@ -577,6 +588,14 @@ function makeJobActions(job) {
     actions.append(
       makeActionButton("Cancel", "Stop this running download", "button-danger", () => {
         void cancelDashboardJob(job.id);
+      })
+    );
+  }
+
+  if (job.status === "complete" && job.filename) {
+    actions.append(
+      makeActionButton("Play", "Open this video in the configured player", "", () => {
+        void playDashboardJob(job.id);
       })
     );
   }
