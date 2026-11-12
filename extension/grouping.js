@@ -126,9 +126,16 @@ export function sortHandles(entries, sort) {
   return [...entries].sort(orders[sort] || byName);
 }
 
+/** The groups a handle is filed under; one creator may have a folder in several. */
+export function handleGroups(entry) {
+  const groups = (entry.folders || []).map((folder) => folder.group || "");
+  return groups.length ? [...new Set(groups)] : [entry.group || ""];
+}
+
 /**
- * Files handles under their group for display. Groups are in name order with
- * the ungrouped handles last; empty groups are left out.
+ * Files handles under their groups for display: a handle with folders in two
+ * groups is listed in both. Groups are in name order with the ungrouped
+ * handles last; empty groups are left out.
  */
 export function groupHandles(entries, query, sort) {
   const groups = new Map();
@@ -136,11 +143,12 @@ export function groupHandles(entries, query, sort) {
     if (!handleMatches(entry, query)) {
       continue;
     }
-    const group = entry.group || "";
-    if (!groups.has(group)) {
-      groups.set(group, []);
+    for (const group of handleGroups(entry)) {
+      if (!groups.has(group)) {
+        groups.set(group, []);
+      }
+      groups.get(group).push(entry);
     }
-    groups.get(group).push(entry);
   }
 
   return [...groups.entries()]

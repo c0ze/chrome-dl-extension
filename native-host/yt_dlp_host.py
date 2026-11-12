@@ -2663,9 +2663,12 @@ def remember_handle(
     def mutator(state: dict[str, Any]) -> None:
         entry = handle_entry(state, username)
         mark_posts_known(entry, urls)
-        if base_dir and (replace_folder or not entry["base_dir"]):
-            entry["base_dir"] = base_dir
-            entry["name"] = name or entry["name"]
+        if base_dir and not folder_in_base(entry, base_dir) and (replace_folder or not entry["base_dir"]):
+            # A batch into a folder the handle does not have yet adds that
+            # folder; the ones it already has are kept.
+            set_entry_folders(
+                entry, [*entry_folders(entry), {"base_dir": base_dir, "name": name or entry["handle"]}]
+            )
 
     try:
         mutate_handles(mutator)
@@ -2684,6 +2687,42 @@ def remember_downloaded_post(url: str, download_dir: str | None) -> None:
     except ValueError:
         pass
     remember_handle(username, [url], base_dir=base_dir)
+
+
+def entry_folders(entry: dict[str, Any]) -> list[dict[str, str]]:
+    """Every folder a handle has, its main one first.
+
+    One creator may be filed under several groups; each of those folders is
+    <base_dir>/<name>.
+    """
+    folders: list[dict[str, str]] = []
+    if entry.get("base_dir"):
+        folders.append(
+            {"base_dir": str(entry["base_dir"]), "name": str(entry.get("name") or entry.get("handle") or "")}
+        )
+    for extra in entry.get("extra_folders") or []:
+        if isinstance(extra, dict) and extra.get("base_dir") and extra.get("name"):
+            folders.append({"base_dir": str(extra["base_dir"]), "name": str(extra["name"])})
+    return folders
+
+
+def set_entry_folders(entry: dict[str, Any], folders: list[dict[str, str]]) -> None:
+    unique: list[dict[str, str]] = []
+    for folder in folders:
+        if not any(os.path.normpath(folder["base_dir"]) == os.path.normpath(kept["base_dir"]) for kept in unique):
+            unique.append(folder)
+
+    entry["base_dir"] = unique[0]["base_dir"] if unique else ""
+    entry["name"] = unique[0]["name"] if unique else entry.get("handle", "")
+    entry["extra_folders"] = unique[1:]
+
+
+def folder_in_base(entry: dict[str, Any], base_dir: str) -> dict[str, str] | None:
+    wanted = os.path.normpath(base_dir)
+    for folder in entry_folders(entry):
+        if os.path.normpath(folder["base_dir"]) == wanted:
+            return folder
+    return None
 
 
 def find_handle(state: dict[str, Any], username: str) -> dict[str, Any] | None:
@@ -2706,11 +2745,10 @@ def known_handle_folder(username: str, base_dir: str) -> tuple[str, str] | None:
         log_line(f"Could not read the handle list: {error}")
         return None
 
-    if not entry or not entry.get("name") or not entry.get("base_dir"):
+    folder = folder_in_base(entry, base_dir) if entry else None
+    if not folder:
         return None
-    if os.path.normpath(str(entry["base_dir"])) != os.path.normpath(base_dir):
-        return None
-    return str(entry["handle"]), str(entry["name"])
+    return str(entry["handle"]), folder["name"]
 
 
 def library_root() -> Path:
@@ -2735,6 +2773,10 @@ def handle_for_response(entry: dict[str, Any], root: Path | None = None) -> dict
         "profile_url": f"https://x.com/{entry.get('handle', '')}/media",
         "base_dir": entry.get("base_dir", ""),
         "group": group_of(str(entry.get("base_dir") or ""), root) if root else "",
+        "folders": [
+            {**folder, "group": group_of(folder["base_dir"], root) if root else ""}
+            for folder in entry_folders(entry)
+        ],
         "aliases": list(entry.get("aliases") or []),
         "video_count": int(entry.get("video_count") or 0),
         "known_count": len(entry.get("known", [])),
@@ -2763,11 +2805,9 @@ def is_library_dir(entry: os.DirEntry[str]) -> bool:
 
 def library_groups(root: Path, state: dict[str, Any]) -> list[str]:
     """Every group a handle can be filed under: used ones and top-level folders."""
-    groups = {group_of(str(entry.get("base_dir") or ""), root) for entry in state["handles"].values()}
-    handle_folders = {
-        os.path.normpath(os.path.join(str(entry.get("base_dir") or ""), str(entry.get("name") or "")))
-        for entry in state["handles"].values()
-    }
+    folders = [folder for entry in state["handles"].values() for folder in entry_folders(entry)]
+    groups = {group_of(folder["base_dir"], root) for folder in folders}
+    handle_folders = {os.path.normpath(os.path.join(folder["base_dir"], folder["name"])) for folder in folders}
     try:
         with os.scandir(root) as entries:
             for entry in entries:
@@ -2895,28 +2935,28 @@ def import_library() -> dict[str, Any]:
             if not consider(child.path, child.name, top.path):
                 skipped.append(f"{top.name}/{child.name}")
 
-    duplicates: list[str] = []
-
     def mutator(state: dict[str, Any]) -> dict[str, Any]:
         added = 0
-        seen: dict[str, str] = {}
+        totals: dict[str, int] = {}
+        several: set[str] = set()
         for item in found:
             key = item["handle"].lower()
-            location = f"{group_of(item['base_dir'], root) or '.'}/{item['name']}"
-            if key in seen:
-                duplicates.append(f"@{item['handle']}: {seen[key]} and {location}")
-                continue
-            seen[key] = location
             if key not in state["handles"]:
                 added += 1
             entry = handle_entry(state, item["handle"])
-            entry["handle"] = item["handle"]
-            entry["base_dir"] = item["base_dir"]
-            entry["name"] = item["name"]
-            entry["video_count"] = item["video_count"]
+            if key in totals:
+                # The same creator filed under another group as well.
+                several.add(key)
+            else:
+                entry["handle"] = item["handle"]
+            totals[key] = totals.get(key, 0) + item["video_count"]
+            entry["video_count"] = totals[key]
+            set_entry_folders(
+                entry, [*entry_folders(entry), {"base_dir": item["base_dir"], "name": item["name"]}]
+            )
             known_aliases = {alias.lower() for alias in entry["aliases"]}
             entry["aliases"].extend(alias for alias in item["aliases"] if alias.lower() not in known_aliases)
-        return {"added": added, "total": len(state["handles"])}
+        return {"added": added, "total": len(state["handles"]), "several": len(several)}
 
     counts = mutate_handles(mutator)
     return {
@@ -2928,7 +2968,7 @@ def import_library() -> dict[str, Any]:
         "archive_added": add_to_archive(archive_ids),
         "skipped": skipped[:50],
         "skipped_count": len(skipped),
-        "duplicates": duplicates[:50],
+        "in_several_groups": counts["several"],
     }
 
 
@@ -2975,32 +3015,61 @@ def move_folder(source: Path, destination: Path) -> None:
     source.rename(destination)
 
 
-def update_handle(username: str, new_handle: str | None, group: Any | None) -> dict[str, Any]:
-    """Rename a handle and/or file it under another group, moving its folder.
+def update_handle(
+    username: str,
+    new_handle: str | None,
+    group: Any | None,
+    from_group: Any | None = None,
+) -> dict[str, Any]:
+    """Rename a handle and/or file one of its folders under another group.
 
     A rename follows the library's convention: the new handle gets a folder and
     the old handle's folder moves inside it, so one person's videos stay under
-    their current handle. Renaming to a handle that is already listed merges
-    the two the same way.
+    their current handle. A handle filed under several groups is renamed in
+    each of them. Renaming to a handle that is already listed merges the two
+    the same way. A group change moves the folder the handle has in
+    from_group (its main folder when that is not given).
     """
     root = library_root()
+
+    def folder_path(folder: dict[str, str]) -> Path:
+        return Path(folder["base_dir"]) / folder["name"]
 
     def mutator(state: dict[str, Any]) -> dict[str, Any]:
         entry = require_handle(state, username)
         old_key = entry["handle"].lower()
-        old_base = Path(str(entry.get("base_dir") or root))
-        old_folder = old_base / str(entry.get("name") or entry["handle"])
-        target_base = old_base if group is None else root / valid_group(group)
+        folders = entry_folders(entry)
         renamed = bool(new_handle) and new_handle.lower() != old_key
 
-        if (renamed or target_base != old_base) and handle_folder_is_busy(old_folder):
+        moving: dict[str, str] | None = None
+        target_base = ""
+        if group is not None and folders:
+            source_base = str(root / valid_group(from_group)) if from_group is not None else folders[0]["base_dir"]
+            moving = next(
+                (f for f in folders if os.path.normpath(f["base_dir"]) == os.path.normpath(source_base)), None
+            )
+            if moving is None:
+                raise ValueError(f"@{entry['handle']} has no folder in that group.")
+            target_base = str(root / valid_group(group))
+            if os.path.normpath(target_base) == os.path.normpath(moving["base_dir"]):
+                moving = None
+            elif folder_in_base(entry, target_base):
+                raise ValueError(f"@{entry['handle']} already has a folder in that group.")
+
+        touched = folders if renamed else ([moving] if moving else [])
+        if any(handle_folder_is_busy(folder_path(folder)) for folder in touched):
             raise ValueError(f"@{entry['handle']} has downloads queued or running. Try again when they finish.")
 
+        if moving:
+            if folder_path(moving).is_dir():
+                move_folder(folder_path(moving), Path(target_base) / moving["name"])
+            moving["base_dir"] = target_base
+            set_entry_folders(entry, folders)
+        elif group is not None and not folders:
+            # Only listed so far: nothing on disk to move.
+            entry["base_dir"] = str(root / valid_group(group))
+
         if not renamed:
-            if target_base != old_base:
-                if old_folder.is_dir():
-                    move_folder(old_folder, target_base / old_folder.name)
-                entry["base_dir"] = str(target_base)
             if new_handle:
                 entry["handle"] = new_handle  # Only the capitalisation changed.
             return {"ok": True, "handle": handle_for_response(entry, root)}
@@ -3009,20 +3078,27 @@ def update_handle(username: str, new_handle: str | None, group: Any | None) -> d
         if target is not None:
             # Merging into a handle that already has a place in the library.
             target = handle_entry(state, target["handle"])
-            new_folder = Path(str(target.get("base_dir") or root)) / str(target.get("name") or target["handle"])
-        else:
-            new_folder = target_base / new_handle
 
-        if old_folder.is_dir():
-            move_folder(old_folder, new_folder / old_folder.name)
+        new_folders = entry_folders(target) if target is not None else []
+        for folder in entry_folders(entry):
+            # In each group, the old folder goes inside the new handle's folder
+            # there, which is created when the new handle has none yet.
+            home = (folder_in_base(target, folder["base_dir"]) if target is not None else None) or {
+                "base_dir": folder["base_dir"],
+                "name": new_handle,
+            }
+            if folder_path(folder).is_dir():
+                move_folder(folder_path(folder), folder_path(home) / folder["name"])
+            new_folders.append(home)
 
         del state["handles"][old_key]
         if target is None:
             target = handle_entry(state, new_handle)
-            target["base_dir"] = str(target_base)
-            target["name"] = new_handle
             target["added_at"] = entry.get("added_at") or target["added_at"]
             target["last_checked"] = entry.get("last_checked")
+            if not new_folders and entry.get("base_dir"):
+                new_folders.append({"base_dir": str(entry["base_dir"]), "name": new_handle})
+        set_entry_folders(target, new_folders)
 
         former = [entry["handle"], *entry["aliases"]]
         listed = {alias.lower() for alias in target["aliases"]} | {target["handle"].lower()}
@@ -3086,13 +3162,20 @@ def remove_handle(username: str) -> dict[str, Any]:
     return mutate_handles(mutator)
 
 
-def download_handle_pending(username: str) -> dict[str, Any]:
+def download_handle_pending(username: str, group: Any | None = None) -> dict[str, Any]:
     def mutator(state: dict[str, Any]) -> dict[str, Any]:
         entry = require_handle(state, username)
+        folders = entry_folders(entry)
+        folder = folders[0] if folders else None
+        if group is not None:
+            # Filed under several groups: the videos go where they were asked for.
+            folder = folder_in_base(entry, str(library_root() / valid_group(group)))
+            if folder is None and folders:
+                raise ValueError(f"@{entry['handle']} has no folder in that group.")
         return {
             "handle": entry["handle"],
-            "name": entry.get("name") or None,
-            "base_dir": entry.get("base_dir") or None,
+            "name": folder["name"] if folder else None,
+            "base_dir": folder["base_dir"] if folder else None,
             "pending": list(entry["pending"]),
         }
 
@@ -3226,7 +3309,9 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
         new_handle = message.get("new_handle")
         if new_handle is not None:
             new_handle = message_handle({"handle": new_handle})
-        return update_handle(message_handle(message), new_handle, message.get("group"))
+        return update_handle(
+            message_handle(message), new_handle, message.get("group"), message.get("from_group")
+        )
 
     if message_type == "record_handle_scan":
         urls = message.get("urls")
@@ -3236,7 +3321,7 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
 
     if message_type == "download_handle_pending":
         try:
-            return download_handle_pending(message_handle(message))
+            return download_handle_pending(message_handle(message), message.get("group"))
         except MissingDownloadDir as error:
             return {"ok": False, "missing_dir": True, "error": str(error)}
 

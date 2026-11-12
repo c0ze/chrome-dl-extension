@@ -1,7 +1,7 @@
 // The handle list: every X/Twitter account in the library, filed under its
 // group, with a check that looks at a profile for videos not downloaded yet.
 
-import { formatChecked, groupHandles, pendingLabel } from "./grouping.js";
+import { formatChecked, groupHandles, handleGroups, pendingLabel } from "./grouping.js";
 
 const SCAN_ORIGINS = ["https://x.com/*"];
 const SORT_KEY = "handlesSort";
@@ -52,11 +52,11 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
   }
 
   /** The inline form used both to add a handle and to rename or move one. */
-  function makeForm(entry) {
+  function makeForm(entry, rowGroup = "") {
     const form = document.createElement("form");
     form.className = "handle-form";
     const handleInput = makeHandleInput(entry ? entry.handle : "");
-    const groupInput = makeGroupInput(entry ? entry.group : "");
+    const groupInput = makeGroupInput(entry ? rowGroup : "");
 
     const note = document.createElement("p");
     note.className = "handle-meta";
@@ -88,12 +88,15 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
         handleInput.focus();
         return;
       }
-      void (entry ? saveEdit(entry, handle, group) : addHandle(handle, group));
+      void (entry ? saveEdit(entry, rowGroup, handle, group) : addHandle(handle, group));
     });
     return form;
   }
 
-  function makeHandleItem(entry) {
+  const rowKey = (entry, rowGroup) => `${entry.handle}\n${rowGroup}`;
+
+  /** One handle as listed under rowGroup; its actions apply to its folder there. */
+  function makeHandleItem(entry, rowGroup) {
     const item = document.createElement("article");
     item.className = entry.pending_count ? "handle-item has-new" : "handle-item";
 
@@ -106,7 +109,8 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
     name.target = "_blank";
     name.rel = "noreferrer";
     name.textContent = `@${entry.handle}`;
-    name.title = entry.base_dir ? `${entry.base_dir}/${entry.name}` : entry.profile_url;
+    const folder = (entry.folders || []).find((candidate) => candidate.group === rowGroup);
+    name.title = folder ? `${folder.base_dir}/${folder.name}` : entry.profile_url;
     head.append(name);
 
     if (entry.pending_count) {
@@ -129,8 +133,16 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
       item.append(former);
     }
 
-    if (editing === entry.handle) {
-      item.append(makeForm(entry));
+    const elsewhere = handleGroups(entry).filter((group) => group !== rowGroup);
+    if (elsewhere.length) {
+      const also = document.createElement("p");
+      also.className = "handle-meta";
+      also.textContent = `Also in ${elsewhere.map((group) => group || UNGROUPED_LABEL).join(", ")}`;
+      item.append(also);
+    }
+
+    if (editing === rowKey(entry, rowGroup)) {
+      item.append(makeForm(entry, rowGroup));
       return item;
     }
 
@@ -138,9 +150,14 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
     actions.className = "handle-actions";
     if (entry.pending_count) {
       actions.append(
-        makeButton("Download", `Queue the ${entry.pending_count} new videos`, "", () => {
-          void downloadPending(entry);
-        }),
+        makeButton(
+          "Download",
+          `Queue the ${entry.pending_count} new videos into this handle's folder in ${rowGroup || "the library"}`,
+          "",
+          () => {
+            void downloadPending(entry, rowGroup);
+          }
+        ),
         makeButton("Seen", "Mark the new videos as seen without downloading them", "button-muted-small", () => {
           void simpleAction("mark_handle_seen", entry);
         })
@@ -151,7 +168,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
         void checkHandles([entry]);
       }),
       makeButton("Edit", "Change the handle or its group", "button-muted-small", () => {
-        editing = entry.handle;
+        editing = rowKey(entry, rowGroup);
         adding = false;
         render();
       }),
@@ -166,7 +183,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
   function makeGroup(group, searching) {
     const details = document.createElement("details");
     details.className = "download-group";
-    const holdsEdit = group.handles.some((entry) => entry.handle === editing);
+    const holdsEdit = group.handles.some((entry) => rowKey(entry, group.group) === editing);
     details.open = searching || holdsEdit || (openGroups.get(group.group) ?? false);
     details.addEventListener("toggle", () => {
       if (!searching) {
@@ -189,7 +206,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
 
     const items = document.createElement("div");
     items.className = "group-items";
-    group.handles.forEach((entry) => items.append(makeHandleItem(entry)));
+    group.handles.forEach((entry) => items.append(makeHandleItem(entry, group.group)));
 
     details.append(summary, items);
     return details;
@@ -283,20 +300,21 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
     await refresh();
   }
 
-  async function saveEdit(entry, handle, group) {
+  async function saveEdit(entry, rowGroup, handle, group) {
     const payload = { type: "update_handle", handle: entry.handle };
     if (handle !== entry.handle) {
       payload.new_handle = handle;
     }
-    if (group !== entry.group) {
+    if (group !== rowGroup) {
       payload.group = group;
+      payload.from_group = rowGroup;
     }
 
     const renamed = handle.toLowerCase() !== entry.handle.toLowerCase();
     if (renamed || "group" in payload) {
       const moves = renamed
-        ? `Rename @${entry.handle} to @${handle}? Its folder moves inside the @${handle} folder.`
-        : `Move @${entry.handle} to "${group || UNGROUPED_LABEL}"? Its folder moves with it.`;
+        ? `Rename @${entry.handle} to @${handle}? Its folder moves inside the @${handle} folder, in every group it is filed under.`
+        : `Move @${entry.handle} from "${rowGroup || UNGROUPED_LABEL}" to "${group || UNGROUPED_LABEL}"? Its folder moves with it.`;
       if (!window.confirm(moves)) {
         return;
       }
@@ -308,8 +326,9 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
     try {
       const response = await hostAction(payload, "The handle could not be changed.");
       editing = null;
-      openGroups.set(response.handle.group, true);
-      showMessage("success", `@${response.handle.handle} is in ${response.handle.base_dir}/${response.handle.name}`);
+      const folders = response.handle.folders.map((folder) => `${folder.base_dir}/${folder.name}`);
+      response.handle.folders.forEach((folder) => openGroups.set(folder.group, true));
+      showMessage("success", `@${response.handle.handle} is in ${folders.join(" and ")}`);
     } catch (error) {
       showMessage("error", error.message);
     } finally {
@@ -329,10 +348,10 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
       if (response.skipped_count) {
         notes.push(`Folders that are not handles: ${response.skipped_count}, for example ${response.skipped.slice(0, 3).join(", ")}.`);
       }
-      if (response.duplicates.length) {
-        notes.push(`In more than one place: ${response.duplicates.slice(0, 3).join("; ")}.`);
+      if (response.in_several_groups) {
+        notes.push(`Handles with a folder in more than one group: ${response.in_several_groups}.`);
       }
-      showMessage(response.duplicates.length ? "warning" : "success", notes.join(" "));
+      showMessage("success", notes.join(" "));
     } catch (error) {
       showMessage("error", error.message);
     } finally {
@@ -342,10 +361,10 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
     await refresh();
   }
 
-  async function downloadPending(entry) {
+  async function downloadPending(entry, rowGroup) {
     try {
       const response = await hostAction(
-        { type: "download_handle_pending", handle: entry.handle },
+        { type: "download_handle_pending", handle: entry.handle, group: rowGroup },
         "Could not queue the new videos."
       );
       showMessage(

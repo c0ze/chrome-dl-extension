@@ -113,6 +113,21 @@ test("handles are listed under their group, ungrouped last, empty groups hidden"
   assert.equal(groupHandles([handle("amy", { group: "g" })], "nobody", "name").length, 0);
 });
 
+test("a creator with folders in two groups is listed in both", () => {
+  const both = handle("amy", {
+    group: "group a",
+    folders: [{ group: "group a" }, { group: "group d" }],
+  });
+  const groups = groupHandles([both, handle("zed", { group: "group d" })], "", "name");
+  assert.deepEqual(
+    groups.map((group) => [group.group, group.handles.map((entry) => entry.handle)]),
+    [
+      ["group a", ["amy"]],
+      ["group d", ["amy", "zed"]],
+    ]
+  );
+});
+
 test("sorting by last check puts never-checked handles first", () => {
   const sorted = sortHandles(
     [
