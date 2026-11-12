@@ -12,6 +12,21 @@ from typing import Any
 
 import yt_dlp_host as host
 
+_HANDLE_STATE = tempfile.TemporaryDirectory()
+
+
+def setUpModule() -> None:
+    # Downloads record their handle, so no test may reach the real handle list.
+    root = Path(_HANDLE_STATE.name)
+    host.HANDLES_PATH = root / "handles.json"
+    host.HANDLES_LOCK_PATH = root / "handles.lock"
+    host.THUMBS_DIR = root / "thumbs"
+    host.HANDLES_PATH.write_text('{"handles": {}}')
+
+
+def tearDownModule() -> None:
+    _HANDLE_STATE.cleanup()
+
 
 class NormalizeUrlTwitterTests(unittest.TestCase):
     def test_canonicalises_status_variants_to_one_key(self) -> None:
@@ -1325,3 +1340,215 @@ class OpenFolderTests(unittest.TestCase):
             host.open_folder(Path("/tmp/clips"))
 
         popen.assert_called_once()
+
+
+class HandleStateCase(unittest.TestCase):
+    def setUp(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        for name, value in (
+            ("HANDLES_PATH", self.root / "handles.json"),
+            ("HANDLES_LOCK_PATH", self.root / "handles.lock"),
+            ("THUMBS_DIR", self.root / "thumbs"),
+            ("JOBS_PATH", self.root / "downloads.json"),
+            ("JOBS_LOCK_PATH", self.root / "downloads.lock"),
+        ):
+            patcher = unittest.mock.patch.object(host, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for name in ("ensure_state", "log_line"):
+            patcher = unittest.mock.patch.object(host, name)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def write_jobs(self, jobs: list[dict[str, Any]]) -> None:
+        host.JOBS_PATH.write_text(json.dumps({"jobs": jobs}))
+
+    def only_handle(self) -> dict[str, Any]:
+        handles = host.get_handles()["handles"]
+        self.assertEqual(len(handles), 1)
+        return handles[0]
+
+
+class HandleListTests(HandleStateCase):
+    """The handle list exists to answer one question: what is new since I last downloaded?"""
+
+    def post(self, post_id: int, username: str = "Someone") -> str:
+        return f"https://x.com/{username}/status/{post_id}"
+
+    def test_a_check_reports_only_posts_that_were_never_downloaded(self) -> None:
+        host.remember_handle("Someone", [self.post(1), self.post(2)], base_dir="/data")
+
+        response = host.record_handle_scan("someone", [self.post(1), self.post(2), self.post(3)])
+
+        self.assertEqual(response["handle"]["pending_count"], 1)
+        self.assertEqual(response["handle"]["known_count"], 2)
+        self.assertIsNotNone(response["handle"]["last_checked"])
+
+    def test_a_post_reached_through_another_spelling_is_not_new(self) -> None:
+        host.remember_handle("Someone", [self.post(1)])
+
+        response = host.record_handle_scan(
+            "Someone", ["https://twitter.com/SOMEONE/status/1?s=20", self.post(2), self.post(2)]
+        )
+
+        self.assertEqual(response["handle"]["pending_count"], 1)
+
+    def test_posts_by_other_accounts_are_never_offered(self) -> None:
+        # A media page also links reposts; those belong to someone else's folder.
+        host.remember_handle("Someone", [self.post(1)])
+
+        response = host.record_handle_scan("Someone", [self.post(9, "Other"), "not a url"])
+
+        self.assertEqual(response["handle"]["pending_count"], 0)
+
+    def test_marking_seen_stops_the_posts_being_reported_again(self) -> None:
+        host.remember_handle("Someone", [self.post(1)])
+        host.record_handle_scan("Someone", [self.post(2)])
+
+        host.mark_handle_seen("Someone")
+        response = host.record_handle_scan("Someone", [self.post(1), self.post(2)])
+
+        self.assertEqual(response["handle"]["pending_count"], 0)
+
+    def test_new_videos_download_into_the_folder_the_handle_already_uses(self) -> None:
+        host.remember_handle("Someone", [self.post(1)], base_dir="/data/x", name="Some One", replace_folder=True)
+        host.record_handle_scan("Someone", [self.post(2), self.post(3)])
+
+        with unittest.mock.patch.object(
+            host, "start_profile_download_jobs", return_value={"ok": True}
+        ) as start:
+            host.download_handle_pending("someone")
+
+        url, _source, base_dir, urls, allow_duplicate, name = start.call_args.args
+        self.assertEqual(url, "https://x.com/Someone/media")
+        self.assertEqual(base_dir, "/data/x")
+        self.assertEqual(urls, [self.post(2), self.post(3)])
+        self.assertFalse(allow_duplicate)
+        self.assertEqual(name, "Some One")
+
+    def test_queued_batch_marks_its_posts_as_seen(self) -> None:
+        self.write_jobs([])
+        with unittest.mock.patch.object(host, "launch_next_queued_job", return_value={"started": True}):
+            host.start_profile_download_jobs(
+                "https://x.com/Someone/media",
+                "toolbar",
+                str(self.root),
+                [self.post(1), self.post(2)],
+            )
+
+        entry = self.only_handle()
+        self.assertEqual(entry["known_count"], 2)
+        self.assertEqual(entry["base_dir"], str(self.root))
+        response = host.record_handle_scan("Someone", [self.post(1), self.post(2)])
+        self.assertEqual(response["handle"]["pending_count"], 0)
+
+    def test_a_single_post_download_adds_its_handle(self) -> None:
+        self.write_jobs([])
+        with unittest.mock.patch.object(host, "launch_next_queued_job", return_value={"started": True}):
+            host.start_download_job(self.post(5), "toolbar", str(self.root))
+
+        self.assertEqual(self.only_handle()["handle"], "Someone")
+
+    def test_nothing_to_download_is_reported_instead_of_queueing_an_empty_batch(self) -> None:
+        host.remember_handle("Someone", [self.post(1)])
+
+        response = host.download_handle_pending("Someone")
+
+        self.assertFalse(response["ok"])
+
+    def test_unknown_handle_is_refused(self) -> None:
+        host.HANDLES_PATH.write_text('{"handles": {}}')
+        with self.assertRaises(ValueError):
+            host.record_handle_scan("Stranger", [self.post(1, "Stranger")])
+
+    def test_first_use_starts_from_the_downloads_already_on_the_dashboard(self) -> None:
+        folder = "/data/x/Some One"
+        self.write_jobs(
+            [
+                {"id": "a" * 32, "url": self.post(1), "status": "complete", "download_dir": folder},
+                {"id": "b" * 32, "url": self.post(2), "status": "complete", "download_dir": folder},
+                {"id": "c" * 32, "url": self.post(7, "Solo"), "status": "complete", "download_dir": "/data/misc"},
+                {"id": "d" * 32, "url": self.post(8, "Gone"), "status": "failed", "download_dir": "/data/misc"},
+            ]
+        )
+
+        handles = {entry["handle"]: entry for entry in host.get_handles()["handles"]}
+
+        self.assertEqual(set(handles), {"Someone", "Solo"})
+        self.assertEqual(handles["Someone"]["base_dir"], "/data/x")
+        self.assertEqual(handles["Someone"]["name"], "Some One")
+        self.assertEqual(handles["Someone"]["known_count"], 2)
+        self.assertEqual(handles["Solo"]["base_dir"], "/data/misc")
+
+    def test_a_handle_that_cannot_be_recorded_does_not_fail_the_download(self) -> None:
+        with unittest.mock.patch.object(host, "mutate_handles", side_effect=OSError("read-only")):
+            host.remember_handle("Someone", [self.post(1)])
+
+    def test_message_handle_rejects_paths(self) -> None:
+        with self.assertRaises(ValueError):
+            host.message_handle({"handle": "../etc"})
+        self.assertEqual(host.message_handle({"handle": "@Someone"}), "Someone")
+
+
+class ThumbnailTests(HandleStateCase):
+    def test_only_job_ids_name_thumbnail_files(self) -> None:
+        self.assertIsNone(host.thumbnail_path("../../etc/passwd"))
+        self.assertIsNone(host.thumbnail_path("A" * 32))
+        self.assertEqual(host.thumbnail_path("a" * 32), host.THUMBS_DIR / f"{'a' * 32}.jpg")
+
+    def test_thumbnails_are_returned_for_known_ids_only(self) -> None:
+        host.THUMBS_DIR.mkdir()
+        (host.THUMBS_DIR / f"{'a' * 32}.jpg").write_bytes(b"jpeg")
+
+        response = host.get_thumbnails(["a" * 32, "b" * 32, "../x", 7])
+
+        self.assertEqual(response["thumbs"], {"a" * 32: "anBlZw=="})
+
+    def test_a_response_stops_before_chromes_message_limit(self) -> None:
+        host.THUMBS_DIR.mkdir()
+        for job_id in ("a" * 32, "b" * 32):
+            (host.THUMBS_DIR / f"{job_id}.jpg").write_bytes(b"x" * 300 * 1024)
+
+        response = host.get_thumbnails(["a" * 32, "b" * 32])
+
+        self.assertEqual(list(response["thumbs"]), ["a" * 32])
+
+    def test_pictures_of_forgotten_downloads_are_deleted(self) -> None:
+        host.THUMBS_DIR.mkdir()
+        kept = host.THUMBS_DIR / f"{'a' * 32}.jpg"
+        stale = host.THUMBS_DIR / f"{'b' * 32}.jpg"
+        kept.write_bytes(b"x")
+        stale.write_bytes(b"x")
+        self.write_jobs([{"id": "a" * 32, "url": "https://x.com/a/status/1", "status": "complete"}])
+
+        host.prune_thumbnails()
+
+        self.assertTrue(kept.exists())
+        self.assertFalse(stale.exists())
+
+    def test_a_missing_video_or_ffmpeg_leaves_the_download_complete(self) -> None:
+        self.write_jobs(
+            [{"id": "a" * 32, "url": "https://x.com/a/status/1", "status": "complete", "filename": "/nope.mp4"}]
+        )
+        self.assertFalse(host.save_job_thumbnail("a" * 32))
+        with unittest.mock.patch.object(host.shutil, "which", return_value=None):
+            self.assertFalse(host.save_job_thumbnail("a" * 32))
+
+    @unittest.skipUnless(host.shutil.which("ffmpeg"), "ffmpeg is not installed")
+    def test_a_frame_is_saved_for_a_finished_download(self) -> None:
+        video = self.root / "clip.mp4"
+        host.subprocess.run(
+            ["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=0.5:size=640x360:rate=10", str(video)],
+            check=True,
+        )
+        self.write_jobs(
+            [{"id": "a" * 32, "url": "https://x.com/a/status/1", "status": "complete", "filename": str(video)}]
+        )
+
+        # Half a second long, so this also covers the fallback to the first frame.
+        self.assertTrue(host.save_job_thumbnail("a" * 32))
+
+        self.assertGreater((host.THUMBS_DIR / f"{'a' * 32}.jpg").stat().st_size, 0)
+        self.assertTrue(host.get_download_job("a" * 32)["thumb"])

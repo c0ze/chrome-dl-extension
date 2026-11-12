@@ -55,6 +55,19 @@ is loaded.
   the page is scrolled automatically and returned to its original position when
   the scan ends. The host queues those videos one by one and downloads them into
   a `username/` folder inside the selected target folder.
+- The picker is one tab with three columns: the folder picker on the left, the
+  download dashboard in the middle and the handle list on the right. The
+  dashboard groups downloads by handle and switches between a list and a tile
+  view; tiles show a frame of each finished video, which the host saves in
+  `~/.local/state/yt-dlp-browser-host/thumbs` (needs `ffmpeg`).
+- The handle list holds every X/Twitter account you have downloaded from.
+  `Check` (or `Check All`) opens the handle's media page in a background tab,
+  scans the top of it and closes it; posts that were not downloaded yet show as
+  `N new`. `Download` queues them into the folder that handle already uses,
+  `Seen` dismisses them. Chrome asks once for permission to read x.com the
+  first time you check. A handle that was only seen in the dashboard history
+  starts with just those posts as known, so its first check can report older
+  videos as new: use `Seen` once to set the baseline.
 - A scan that hits its round limit is reported as partial, and starting a
   partial download asks for confirmation first. Scroll the media page further
   and use `Scan Again` to pick up older posts.
