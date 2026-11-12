@@ -14,6 +14,7 @@ HOST_NAME = "dev.arda.ytdlp_host"
 INSTALL_DIR = Path.home() / ".local" / "share" / "yt-dlp-browser-host"
 CONFIG_PATH = INSTALL_DIR / "config.json"
 HOST_SCRIPT_PATH = INSTALL_DIR / "yt_dlp_host.py"
+HOST_MODULES = ("library_check.py",)
 DEFAULT_CONFIG = {
     "browser": "chrome",
     "profile": "",
@@ -112,6 +113,9 @@ def write_private_json(path: Path, payload: dict) -> None:
 def install_host_script(source_path: Path) -> None:
     ensure_install_dir()
     shutil.copy2(source_path, HOST_SCRIPT_PATH)
+    for module in HOST_MODULES:
+        # The host imports these, so they must sit next to it.
+        shutil.copy2(source_path.with_name(module), INSTALL_DIR / module)
     current_mode = HOST_SCRIPT_PATH.stat().st_mode
     HOST_SCRIPT_PATH.chmod(current_mode | stat.S_IXUSR)
 

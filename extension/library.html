@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Library Check</title>
+    <link rel="stylesheet" href="download.css">
+  </head>
+  <body>
+    <main class="library">
+      <section class="hero">
+        <p class="eyebrow">yt-dlp Bridge</p>
+        <h1>Library Check</h1>
+        <p class="lead">
+          Finds videos that cannot be played and videos you have more than once.
+          Nothing is deleted: removed files go to the <code>_trash</code> folder
+          at the top of the library.
+        </p>
+      </section>
+
+      <section id="message" class="message hidden"></section>
+
+      <section class="panel">
+        <div class="panel-header dashboard-header">
+          <div>
+            <p class="label">Scan</p>
+            <p id="scan-summary" class="hint">Loading…</p>
+            <p id="library-root" class="hint"></p>
+          </div>
+          <div class="dashboard-actions">
+            <button id="scan-button" type="button" class="button button-small">Scan Library</button>
+          </div>
+        </div>
+        <div id="scan-progress" class="progress-track hidden"><div id="scan-fill" class="progress-fill"></div></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header dashboard-header">
+          <div class="view-toggle" role="group" aria-label="Report section">
+            <button id="tab-broken" type="button" class="view-button">Broken</button>
+            <button id="tab-identical" type="button" class="view-button">Identical</button>
+            <button id="tab-similar" type="button" class="view-button">Similar</button>
+          </div>
+          <div class="dashboard-actions">
+            <button id="bulk-button" type="button" class="icon-button link-button hidden"></button>
+          </div>
+        </div>
+        <p id="tab-hint" class="hint"></p>
+        <div id="report-list" class="download-list"></div>
+        <button id="more-button" type="button" class="button button-muted hidden">Show More</button>
+      </section>
+    </main>
+
+    <script type="module" src="library.js"></script>
+  </body>
+</html>

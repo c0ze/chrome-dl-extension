@@ -430,6 +430,35 @@ input:disabled {
   display: none;
 }
 
+.library {
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 22px 18px 24px;
+}
+
+.group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.file-path {
+  white-space: normal !important;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+#more-button {
+  margin-top: 14px;
+}
+
+.link-button {
+  padding: 0 12px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
 .view-toggle {
   display: flex;
   border-radius: 8px;
