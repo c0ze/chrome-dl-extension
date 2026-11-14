@@ -241,3 +241,13 @@ class FingerprintTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FavoriteLinksAreNotLibraryContentTests(LibraryCheckCase):
+    def test_links_are_not_scanned_as_more_copies(self):
+        (self.root / "group d/alice").mkdir(parents=True)
+        (self.root / "group d/alice/a.mp4").write_bytes(b"x")
+        (self.root / "group d/0 ★ Favorites").mkdir()
+        (self.root / "group d/0 ★ Favorites/a.mp4").symlink_to("../alice/a.mp4")
+
+        self.assertEqual(check.library_videos(self.root), ["group d/alice/a.mp4"])

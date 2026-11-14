@@ -103,6 +103,12 @@ is loaded.
   installer): Haruna's custom command `vtag fav`, bound to a mouse button,
   and the `☆` button on a download mark the same favorite. Each group in the
   handle list shows its favorites; `Play All` opens them as a playlist.
+- Each group folder in the download folder gets a `0 ★ Favorites` folder,
+  which sorts above everything else in a file manager. It holds a link to each
+  favorite video in that group (videos inside a handle folder) and is rewritten
+  whenever a favorite changes; only links are created or deleted there. Library
+  Check and Import ignore links, and favoriting a video opened through a link
+  favorites the video itself. `vtag sync` rebuilds the folders and playlists.
 - The handle list holds every X/Twitter account you have downloaded from.
   `Check` (or `Check All`, or a group's `Check`) opens the handle's Posts tab
   in a background tab, reads down it and closes it; posts that were not

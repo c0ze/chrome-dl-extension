@@ -161,3 +161,112 @@ class VtagTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FavoriteLinksTest(unittest.TestCase):
+    """Each group folder shows its favorite videos first, as links in FAVORITES_DIR."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "library"
+        self.db = vtag.connect(Path(self.tmp.name) / "vtag.db")
+        self.saved = (vtag.ROOT, vtag.PLAYLIST_DIR)
+        vtag.ROOT = self.root
+        vtag.PLAYLIST_DIR = Path(self.tmp.name) / "playlists"
+
+    def tearDown(self):
+        vtag.ROOT, vtag.PLAYLIST_DIR = self.saved
+        self.db.close()
+        self.tmp.cleanup()
+
+    def video(self, relative, data=b"x" * 1000):
+        p = self.root / relative
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+        return str(p)
+
+    def favorite(self, path, on=True):
+        tags = vtag.tags_of(self.db, path)
+        vtag.set_tags(self.db, path, tags + ["favorite"] if on else [t for t in tags if t != "favorite"])
+        vtag.publish(self.db)
+
+    def folder(self, group):
+        return self.root / group / vtag.FAVORITES_DIR
+
+    def test_a_favorite_appears_as_a_link_in_its_groups_favorites_folder(self):
+        v = self.video("group d/alice/alice-1.mp4")
+
+        self.favorite(v)
+
+        link = self.folder("group d") / "alice-1.mp4"
+        self.assertTrue(link.is_symlink())
+        # Relative, so it works from every machine that mounts the share elsewhere.
+        self.assertEqual(os.readlink(link), "../alice/alice-1.mp4")
+        self.assertEqual(link.resolve(), Path(v).resolve())
+
+    def test_unfavoriting_removes_the_link_and_the_empty_folder(self):
+        v = self.video("group d/alice/alice-1.mp4")
+        self.favorite(v)
+
+        self.favorite(v, on=False)
+
+        self.assertFalse(self.folder("group d").exists())
+
+    def test_the_folder_sorts_before_every_handle(self):
+        names = sorted([vtag.FAVORITES_DIR, "0abc", "1234_name", "Alice", "_x"], key=str.lower)
+        self.assertEqual(names[0], vtag.FAVORITES_DIR)
+
+    def test_two_favorites_with_the_same_name_both_get_a_link(self):
+        self.favorite(self.video("group d/alice/clip.mp4"))
+        self.favorite(self.video("group d/bob/clip.mp4", b"y" * 1000))
+
+        self.assertEqual(sorted(p.name for p in self.folder("group d").iterdir()), ["clip (2).mp4", "clip.mp4"])
+
+    def test_each_group_has_its_own_folder(self):
+        self.favorite(self.video("group d/alice/a.mp4"))
+        self.favorite(self.video("group c/bob/b.mp4", b"y" * 1000))
+
+        self.assertEqual([p.name for p in self.folder("group d").iterdir()], ["a.mp4"])
+        self.assertEqual([p.name for p in self.folder("group c").iterdir()], ["b.mp4"])
+
+    def test_anything_that_is_not_a_link_is_left_alone(self):
+        v = self.video("group d/alice/a.mp4")
+        self.favorite(v)
+        (self.folder("group d") / "notes.txt").write_text("mine")
+
+        self.favorite(v, on=False)
+
+        self.assertEqual([p.name for p in self.folder("group d").iterdir()], ["notes.txt"])
+
+    def test_a_video_that_is_not_in_a_handle_folder_or_is_gone_gets_no_link(self):
+        loose = self.video("group d/loose.mp4")
+        gone = self.video("group d/alice/gone.mp4")
+        self.favorite(loose)
+        self.favorite(gone)
+        os.remove(gone)
+
+        vtag.publish(self.db)
+
+        self.assertFalse(self.folder("group d").exists())
+
+    def test_favoriting_through_a_link_favorites_the_video_itself(self):
+        v = self.video("group d/alice/a.mp4")
+        self.favorite(v)
+        link = str(self.folder("group d") / "a.mp4")
+
+        # Haruna reports the path it opened, which may be the link.
+        self.assertEqual(vtag.tags_of(self.db, link), ["favorite"])
+
+    def test_an_offline_share_does_not_lose_the_favorite(self):
+        v = self.video("group d/alice/a.mp4")
+        original = vtag.write_favorite_links
+
+        def offline(db, root=None):
+            raise OSError("share is offline")
+
+        vtag.write_favorite_links = offline
+        try:
+            self.favorite(v)
+        finally:
+            vtag.write_favorite_links = original
+        self.assertEqual(vtag.tags_of(self.db, v), ["favorite"])

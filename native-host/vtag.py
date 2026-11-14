@@ -6,7 +6,8 @@ playing file comes from Haruna's MPRIS metadata, so Haruna passes nothing.
 Tags live in SQLite (the NAS share is NFS 4.1, which has no user xattrs).
 Tags are grouped by collection: the first folder under ROOT (group c, group d,
 ...), so each collection has its own favorites. Every change rewrites one
-.m3u per collection and tag in ~/Videos/Tags/<collection>/<tag>.m3u.
+.m3u per collection and tag in ~/Videos/Tags/<collection>/<tag>.m3u, and the
+links in each group folder's FAVORITES_DIR (see write_favorite_links).
 
 ROOT is the downloader's download folder, so a collection is a group of the
 downloader's library. The downloader's native host imports this module for
@@ -44,6 +45,9 @@ ROOT = default_root()
 OTHER = "other"  # collection of files that are not in a folder under ROOT
 OMARCHY_BIN = HOME / ".local/share/omarchy/bin"
 FAVORITE = "favorite"
+# A folder in each group (ROOT/<group>/) with links to the group's favorite
+# videos. File managers can't group a listing, so it is named to sort first.
+FAVORITES_DIR = "0 ★ Favorites"
 NEW_TAG = "New tag…"
 FP_CHUNK = 64 * 1024
 
@@ -207,6 +211,64 @@ def write_playlists(db, out_dir=None):
             d.rmdir()
 
 
+def link_name(path, taken):
+    """The video's own name, made unique within one favorites folder."""
+    name = Path(path).name
+    stem, suffix, n = Path(path).stem, Path(path).suffix, 2
+    while name in taken:
+        name, n = f"{stem} ({n}){suffix}", n + 1
+    taken.add(name)
+    return name
+
+
+def write_favorite_links(db, root=None):
+    """Make each group's FAVORITES_DIR hold exactly one link per favorite video
+    in that group. Only links are ever created or deleted there; anything else
+    in the folder is left alone. A favorite counts for a group when it sits in
+    a handle folder below it (ROOT/<group>/<handle>/...)."""
+    root = Path(root or ROOT)
+    wanted = {}
+    for (coll, tag), paths in groups(db).items():
+        if tag != FAVORITE:
+            continue
+        for p in paths:
+            try:
+                parts = Path(p).relative_to(root).parts
+            except ValueError:
+                continue
+            if len(parts) >= 3 and parts[0] == coll and os.path.exists(p):
+                wanted.setdefault(coll, []).append(p)
+    present = {d.parent.name for d in root.glob(f"*/{FAVORITES_DIR}") if d.is_dir()}
+    for coll in sorted(set(wanted) | present):
+        folder = root / coll / FAVORITES_DIR
+        taken, links = set(), {}
+        for p in sorted(wanted.get(coll, [])):
+            links[link_name(p, taken)] = os.path.relpath(p, folder)
+        if links:
+            folder.mkdir(exist_ok=True)
+        if not folder.is_dir():
+            continue
+        for entry in folder.iterdir():
+            if entry.is_symlink() and os.readlink(entry) != links.get(entry.name):
+                entry.unlink()
+        for name, target in links.items():
+            if not (folder / name).is_symlink():
+                (folder / name).symlink_to(target)
+        if not links and not any(folder.iterdir()):
+            folder.rmdir()
+
+
+def publish(db):
+    """Everything that shows the tags outside the database: the playlists and
+    the favorites folders. A folder that can't be written (the share is
+    offline) is reported, never fatal: the tag itself is saved."""
+    write_playlists(db)
+    try:
+        write_favorite_links(db)
+    except OSError as e:
+        print(f"vtag: could not update the favorites folders: {e}", file=sys.stderr)
+
+
 # --- desktop -----------------------------------------------------------------
 
 def current_file():
@@ -286,7 +348,7 @@ def pick_tag(db):
 
 
 def open_tag(db, coll, tag):
-    write_playlists(db)
+    publish(db)
     pl = playlist_path(coll, tag)
     if not pl.exists():
         raise VtagError(f"No videos tagged {tag!r} in {coll!r}")
@@ -301,7 +363,7 @@ def cmd_fav(db, args):
     tags = tags_of(db, path)
     on = FAVORITE not in tags
     set_tags(db, path, tags + [FAVORITE] if on else [t for t in tags if t != FAVORITE])
-    write_playlists(db)
+    publish(db)
     coll = collection(path)
     notify(f"★ Favorited in {coll}" if on else f"☆ Unfavorited in {coll}", Path(path).name)
 
@@ -314,7 +376,7 @@ def cmd_tag(db, args):
     if new is None:
         return
     added, removed = set_tags(db, path, new)
-    write_playlists(db)
+    publish(db)
     if added or removed:
         notify("Tags: " + (", ".join(tags_of(db, path)) or "none"),
                " ".join([f"+{t}" for t in added] + [f"−{t}" for t in removed]))
@@ -332,7 +394,7 @@ def cmd_add(db, args):
     if len(args) < 2:
         raise VtagError("usage: vtag add FILE TAG...")
     set_tags(db, args[0], tags_of(db, args[0]) + args[1:])
-    write_playlists(db)
+    publish(db)
 
 
 def cmd_rm(db, args):
@@ -340,7 +402,7 @@ def cmd_rm(db, args):
         raise VtagError("usage: vtag rm FILE TAG...")
     drop = {clean_tag(t) for t in args[1:]}
     set_tags(db, args[0], [t for t in tags_of(db, args[0]) if t not in drop])
-    write_playlists(db)
+    publish(db)
 
 
 def cmd_show(db, args):
@@ -365,7 +427,7 @@ def cmd_list(db, args):
 
 
 def cmd_sync(db, args):
-    write_playlists(db)
+    publish(db)
     print(PLAYLIST_DIR)
 
 

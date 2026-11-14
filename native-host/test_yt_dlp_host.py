@@ -2210,3 +2210,19 @@ class InstalledModulesTests(unittest.TestCase):
                 local.update(name for name in names if (here / f"{name}.py").is_file())
 
         self.assertEqual(local - {Path(m).stem for m in installer.HOST_MODULES}, set())
+
+
+class FavoritesFolderImportTests(LibraryCase):
+    def test_the_favorites_folder_is_not_taken_for_a_handle(self):
+        # Its links carry handle names, which would make it look like one.
+        self.video("group d/alice/alice-1234567890001.mp4")
+        folder = self.library / "group d" / host.curation.vtag.FAVORITES_DIR
+        folder.mkdir()
+        (folder / "alice-1234567890001.mp4").symlink_to("../alice/alice-1234567890001.mp4")
+
+        response = host.import_library()
+
+        self.assertEqual(response["found"], 1)
+        self.assertEqual(response["skipped"], [])
+        self.assertEqual(self.handles()["alice"]["video_count"], 1)
+        self.assertNotIn(host.curation.vtag.FAVORITES_DIR, host.get_handles()["groups"])

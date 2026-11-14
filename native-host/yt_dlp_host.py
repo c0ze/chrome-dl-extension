@@ -2101,7 +2101,7 @@ def handle_curation_message(message_type: str, message: dict[str, Any]) -> dict[
     if message_type == "play_favorites":
         group = str(message.get("group") or "")
         with curation.open_favorites(library_root()) as db:
-            curation.vtag.write_playlists(db)
+            curation.vtag.publish(db)
         playlist = curation.playlist_for(group)
         if not group or not playlist.is_file():
             return {"ok": False, "error": "That group has no favorites to play."}
@@ -3089,7 +3089,12 @@ def read_handles() -> dict[str, Any]:
 
 
 def is_library_dir(entry: os.DirEntry[str]) -> bool:
-    return not entry.name.startswith(LIBRARY_SKIP_PREFIXES) and entry.is_dir()
+    # The favorites folder holds links to videos elsewhere in the group.
+    return (
+        not entry.name.startswith(LIBRARY_SKIP_PREFIXES)
+        and entry.name != curation.vtag.FAVORITES_DIR
+        and entry.is_dir(follow_symlinks=False)
+    )
 
 
 def library_groups(root: Path, state: dict[str, Any]) -> list[str]:
@@ -3135,6 +3140,8 @@ def scan_handle_folder(folder: str) -> dict[str, Any]:
         for name in files:
             if os.path.splitext(name)[1].lower() not in VIDEO_SUFFIXES:
                 continue
+            if os.path.islink(os.path.join(current, name)):
+                continue  # A link is another file's, not this folder's.
             videos += 1
             match = PREFIXED_FILE_RE.match(name)
             if match and not match.group(1).isdigit():

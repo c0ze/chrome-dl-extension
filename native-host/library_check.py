@@ -99,8 +99,10 @@ def library_videos(root: Path) -> list[str]:
     for current, directories, files in os.walk(root):
         directories[:] = [name for name in directories if not name.startswith(SKIP_PREFIXES)]
         for name in files:
-            if os.path.splitext(name)[1].lower() in VIDEO_SUFFIXES:
-                found.append(os.path.relpath(os.path.join(current, name), root))
+            full = os.path.join(current, name)
+            # Links (such as the favorites folders) point at videos listed already.
+            if os.path.splitext(name)[1].lower() in VIDEO_SUFFIXES and not os.path.islink(full):
+                found.append(os.path.relpath(full, root))
     found.sort()
     return found
 

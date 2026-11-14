@@ -72,7 +72,7 @@ def set_favorite(db, path: Path, on: bool) -> bool:
         vtag.set_tags(db, str(path), [*tags, FAVORITE])
     elif not on and FAVORITE in tags:
         vtag.set_tags(db, str(path), [tag for tag in tags if tag != FAVORITE])
-    vtag.write_playlists(db)
+    vtag.publish(db)
     return on
 
 
