@@ -106,7 +106,9 @@ is loaded.
 - Each group folder in the download folder gets a `0 ★ Favorites` folder,
   which sorts above everything else in a file manager. It holds a link to each
   favorite video in that group (videos inside a handle folder) and is rewritten
-  whenever a favorite changes; only links are created or deleted there. Library
+  whenever a favorite changes. A favorite in a site folder next to the download
+  folder (`../othersite/<handle>/...`) gets its link in that site folder's own
+  `0 ★ Favorites`. Only links are created or deleted there. Library
   Check and Import ignore links, and favoriting a video opened through a link
   favorites the video itself. `vtag sync` rebuilds the folders and playlists.
 - The handle list holds every X/Twitter account you have downloaded from.

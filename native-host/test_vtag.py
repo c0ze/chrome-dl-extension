@@ -249,6 +249,31 @@ class FavoriteLinksTest(unittest.TestCase):
 
         self.assertFalse(self.folder("group d").exists())
 
+    def outside(self, relative, data=b"z" * 1000):
+        """A video in a site folder next to the library (<site>/<handle>/...)."""
+        p = self.root.parent / relative
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+        return str(p)
+
+    def test_a_favorite_next_to_the_library_gets_a_link_in_its_own_site_folder(self):
+        v = self.outside("othersite/carol/a.ts")
+
+        self.favorite(v)
+
+        link = self.root.parent / "othersite" / vtag.FAVORITES_DIR / "a.ts"
+        self.assertEqual(os.readlink(link), "../carol/a.ts")
+        self.favorite(v, on=False)
+        self.assertFalse(link.parent.exists())
+
+    def test_a_loose_video_next_to_the_library_gets_no_link(self):
+        # Directly in a site folder, or directly beside the library: there is no
+        # handle folder, so no folder above it to show it in.
+        self.favorite(self.outside("othersite/loose.ts"))
+        self.favorite(self.outside("loose.ts", b"w" * 1000))
+
+        self.assertEqual(list(self.root.parent.rglob(vtag.FAVORITES_DIR)), [])
+
     def test_favoriting_through_a_link_favorites_the_video_itself(self):
         v = self.video("group d/alice/a.mp4")
         self.favorite(v)

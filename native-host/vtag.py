@@ -7,7 +7,7 @@ Tags live in SQLite (the NAS share is NFS 4.1, which has no user xattrs).
 Tags are grouped by collection: the first folder under ROOT (group c, group d,
 ...), so each collection has its own favorites. Every change rewrites one
 .m3u per collection and tag in ~/Videos/Tags/<collection>/<tag>.m3u, and the
-links in each group folder's FAVORITES_DIR (see write_favorite_links).
+links in each group folder's FAVORITES_DIR (see favorites_folder).
 
 ROOT is the downloader's download folder, so a collection is a group of the
 downloader's library. The downloader's native host imports this module for
@@ -221,28 +221,41 @@ def link_name(path, taken):
     return name
 
 
+def favorites_folder(root, path):
+    """The folder whose FAVORITES_DIR shows this favorite: its group inside the
+    library (ROOT/<group>/<handle>/...), or, for a video in a site folder next
+    to the library (ROOT/../<site>/<handle>/...), that site folder. A video not
+    in a handle folder has none."""
+    path = Path(path)
+    try:
+        parts = path.relative_to(root).parts
+    except ValueError:
+        above = path.parent.parent
+        try:
+            beside = len(above.relative_to(root.parent).parts) > 0
+        except ValueError:
+            beside = False
+        return above if beside else None
+    return root / parts[0] if len(parts) >= 3 else None
+
+
 def write_favorite_links(db, root=None):
-    """Make each group's FAVORITES_DIR hold exactly one link per favorite video
-    in that group. Only links are ever created or deleted there; anything else
-    in the folder is left alone. A favorite counts for a group when it sits in
-    a handle folder below it (ROOT/<group>/<handle>/...)."""
+    """Make each FAVORITES_DIR hold exactly one link per favorite video below
+    it (see favorites_folder). Only links are ever created or deleted there;
+    anything else in the folder is left alone."""
     root = Path(root or ROOT)
     wanted = {}
     for (coll, tag), paths in groups(db).items():
         if tag != FAVORITE:
             continue
         for p in paths:
-            try:
-                parts = Path(p).relative_to(root).parts
-            except ValueError:
-                continue
-            if len(parts) >= 3 and parts[0] == coll and os.path.exists(p):
-                wanted.setdefault(coll, []).append(p)
-    present = {d.parent.name for d in root.glob(f"*/{FAVORITES_DIR}") if d.is_dir()}
-    for coll in sorted(set(wanted) | present):
-        folder = root / coll / FAVORITES_DIR
+            folder = favorites_folder(root, p)
+            if folder is not None and os.path.exists(p):
+                wanted.setdefault(folder / FAVORITES_DIR, []).append(p)
+    present = {d for base in (root, root.parent) for d in base.glob(f"*/{FAVORITES_DIR}") if d.is_dir()}
+    for folder in sorted(set(wanted) | present):
         taken, links = set(), {}
-        for p in sorted(wanted.get(coll, [])):
+        for p in sorted(wanted.get(folder, [])):
             links[link_name(p, taken)] = os.path.relpath(p, folder)
         if links:
             folder.mkdir(exist_ok=True)
