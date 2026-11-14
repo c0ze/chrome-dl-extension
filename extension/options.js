@@ -91,14 +91,6 @@ async function loadConfig() {
       return;
     }
 
-    if (reason === "invalid-url") {
-      showMessage(
-        "error",
-        "The current page or clicked link was not a valid http(s) URL."
-      );
-      return;
-    }
-
     showMessage("success", "Native host detected. Settings are ready to edit.");
   } catch (error) {
     elements.configPath.textContent = "Not installed";

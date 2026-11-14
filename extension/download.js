@@ -237,7 +237,7 @@ function isScanning() {
 }
 
 function applyBusyState() {
-  const blocked = downloadBusy || isScanning();
+  const blocked = downloadBusy || isScanning() || !state.targetUrl;
   elements.downloadButton.disabled = blocked;
   elements.defaultButton.disabled = blocked;
   elements.browseButton.disabled = downloadBusy;
@@ -1105,13 +1105,11 @@ async function loadDefaultDirectory() {
 }
 
 async function initialize() {
-  elements.targetUrl.textContent = state.targetUrl || "Missing URL";
-
-  if (!state.targetUrl) {
-    showMessage("error", "No target URL was provided.");
-    setBusy(true);
-    return;
-  }
+  // Opened from a page with nothing to download: the dashboard and the handle
+  // list work as usual, and the download buttons wait for a page.
+  elements.targetUrl.textContent =
+    state.targetUrl || "Nothing to download. Open a post or profile and click the extension button there.";
+  applyBusyState();
 
   if (state.scanKey) {
     state.scanStatus = "scanning";

@@ -49,6 +49,9 @@ is loaded.
 
 - Open an X/Twitter post and click the extension button to send the current tab
   URL to a small folder picker, then start `yt-dlp`.
+- Click the extension button on a page with nothing to download, such as a new
+  tab, to open the downloads screen on its own (or bring an open one forward)
+  without queueing anything.
 - Open an X/Twitter profile media URL, such as `https://x.com/username/media`,
   and click the extension button to scan the profile for video posts. The scan
   switches that tab to the profile's Posts tab (`https://x.com/username`) and

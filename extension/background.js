@@ -50,11 +50,6 @@ function normalizeUrl(rawUrl) {
 }
 
 
-function openHelpPage(reason) {
-  const url = chrome.runtime.getURL(`options.html?reason=${encodeURIComponent(reason)}`);
-  chrome.tabs.create({ url });
-}
-
 function getTargetUrl(info, tab) {
   return normalizeUrl(info.linkUrl || info.pageUrl || info.srcUrl || tab?.url || "");
 }
@@ -364,11 +359,12 @@ async function findPickerTab() {
  * ever one picker: an open one is pointed at the new target and brought
  * forward instead of a second one being opened.
  */
-async function showDownloadPicker(pickerUrl, sourceTab) {
+async function showDownloadPicker(pickerUrl, sourceTab, { keepTarget = false } = {}) {
   const existing = await findPickerTab();
   if (existing) {
     try {
-      await chrome.tabs.update(existing.tabId, { url: pickerUrl, active: true });
+      // With nothing new to download, an open picker keeps what it shows.
+      await chrome.tabs.update(existing.tabId, keepTarget ? { active: true } : { url: pickerUrl, active: true });
       await chrome.windows.update(existing.windowId, { focused: true });
       return;
     } catch (_error) {
@@ -390,7 +386,9 @@ async function openDownloadPicker(url, source, tab) {
   }
 
   if (!url) {
-    openHelpPage("invalid-url");
+    // Nothing to download on this page (a new tab, a settings page): show the
+    // downloads screen on its own.
+    await showDownloadPicker(PICKER_URL, tab, { keepTarget: true });
     return;
   }
 
