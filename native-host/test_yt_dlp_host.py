@@ -2188,3 +2188,25 @@ class StaleHandleTests(LibraryCase):
         host.set_handle_stale("gone_user", True)
         host.set_handle_stale("gone_user", False)
         self.assertIsNone(self.handles()["gone_user"]["stale"])
+
+
+class InstalledModulesTests(unittest.TestCase):
+    def test_every_module_the_host_imports_is_installed_next_to_it(self) -> None:
+        # A module left out of the installer makes the installed host fail to start.
+        import ast
+        import importlib.util
+
+        here = Path(__file__).resolve().parent
+        spec = importlib.util.spec_from_file_location("installer", here.parent / "scripts" / "install_native_host.py")
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+
+        local = set()
+        for source in ["yt_dlp_host.py", *installer.HOST_MODULES]:
+            for node in ast.walk(ast.parse((here / source).read_text())):
+                names = [alias.name for alias in node.names] if isinstance(node, ast.Import) else (
+                    [node.module] if isinstance(node, ast.ImportFrom) and node.module else []
+                )
+                local.update(name for name in names if (here / f"{name}.py").is_file())
+
+        self.assertEqual(local - {Path(m).stem for m in installer.HOST_MODULES}, set())

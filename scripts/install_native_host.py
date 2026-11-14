@@ -15,7 +15,7 @@ HOST_NAME = "dev.arda.ytdlp_host"
 INSTALL_DIR = Path.home() / ".local" / "share" / "yt-dlp-browser-host"
 CONFIG_PATH = INSTALL_DIR / "config.json"
 HOST_SCRIPT_PATH = INSTALL_DIR / "yt_dlp_host.py"
-HOST_MODULES = ("library_check.py", "vtag.py")
+HOST_MODULES = ("curation.py", "library_check.py", "vtag.py")
 # Haruna's custom commands run `vtag`; it links to the installed copy so it
 # keeps working wherever the repository lives.
 VTAG_COMMAND = Path.home() / ".local" / "bin" / "vtag"
