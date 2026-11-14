@@ -50,10 +50,13 @@ is loaded.
 - Open an X/Twitter post and click the extension button to send the current tab
   URL to a small folder picker, then start `yt-dlp`.
 - Open an X/Twitter profile media URL, such as `https://x.com/username/media`,
-  and click the extension button to scan the loaded page for video post links.
-  The picker tab opens immediately and reports scan progress while it runs;
-  the page is scrolled automatically and returned to its original position when
-  the scan ends. The host queues those videos one by one and downloads them into
+  and click the extension button to scan the profile for video posts. The scan
+  switches that tab to the profile's Posts tab (`https://x.com/username`) and
+  reads that: X's Videos tab only lists posts holding exactly one video and
+  nothing else, so posts with two videos, or a video and photos, are missing
+  there. The picker tab opens immediately and reports scan progress while it
+  runs; the page is scrolled automatically and returned to its original
+  position when the scan ends. The host queues those videos one by one and downloads them into
   a `username/` folder inside the selected target folder.
 - The picker is one tab with three columns: the folder picker on the left, the
   download dashboard in the middle and the handle list on the right. The
@@ -88,9 +91,14 @@ is loaded.
   on a finished download, moves it to `_trash` at the top of the download
   folder, keeping its group and handle path; nothing is deleted.
 - The handle list holds every X/Twitter account you have downloaded from.
-  `Check` (or `Check All`) opens the handle's media page in a background tab,
-  scans the top of it and closes it; posts that were not downloaded yet show as
-  `N new`. `Download` queues them into the folder that handle already uses,
+  `Check` (or `Check All`, or a group's `Check`) opens the handle's Posts tab
+  in a background tab, reads down it and closes it; posts that were not
+  downloaded yet show as `N new`. A check remembers the newest post it saw and
+  the next one stops when it gets back there, so a regular check only reads
+  what was posted since. A check cut short by the scroll limit does not move
+  that mark, so the next one covers the rest. An account that no longer exists
+  is marked `Stale`; `Check All` and group checks skip it, and a check that
+  finds the account again, or `Not Stale`, clears the mark. `Download` queues them into the folder that handle already uses,
   `Seen` dismisses them. Chrome asks once for permission to read x.com the
   first time you check. A handle that was only seen in the dashboard history
   starts with just those posts as known, so its first check can report older

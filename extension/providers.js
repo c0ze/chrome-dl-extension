@@ -42,6 +42,15 @@ export function twitterProfileMediaUsername(rawUrl) {
   }
 }
 
+/**
+ * The page a Twitter profile scan reads: the Posts tab. X's Videos tab
+ * (/<handle>/media) only lists posts holding exactly one video and nothing
+ * else, so a post with two videos, or a video and photos, never shows there.
+ */
+export function twitterPostsUrl(username) {
+  return `https://x.com/${username}`;
+}
+
 export const FACEBOOK_RESERVED_SEGMENTS = [
   "reel", "reels", "watch", "groups", "marketplace", "events", "pages",
   "profile.php", "story.php", "photo", "share", "people", "login",
@@ -544,7 +553,9 @@ export async function profileScanChunk(options) {
   const usernamePattern = /^[A-Za-z0-9_]{1,15}$/;
   const videoSelector = "video,[data-testid='videoPlayer'],[data-testid='videoComponent']";
 
-  function mediaUsername(rawUrl) {
+  // The profile's Posts tab (/<handle>), which the scan reads, or its
+  // Videos tab (/<handle>/media), the page a scan is started from.
+  function profileUsername(rawUrl) {
     try {
       const url = new URL(rawUrl);
       if (!hosts.has(url.hostname)) {
@@ -552,7 +563,7 @@ export async function profileScanChunk(options) {
       }
 
       const parts = url.pathname.split("/").filter(Boolean);
-      if (parts.length < 2 || parts[1].toLowerCase() !== "media") {
+      if (parts.length === 0 || parts.length > 2 || (parts.length === 2 && parts[1].toLowerCase() !== "media")) {
         return null;
       }
 
@@ -567,9 +578,9 @@ export async function profileScanChunk(options) {
     }
   }
 
-  const username = mediaUsername(window.location.href);
+  const username = profileUsername(window.location.href);
   if (!username) {
-    return { ok: false, error: "Open an X/Twitter profile media page first." };
+    return { ok: false, error: "Open an X/Twitter profile page first." };
   }
 
   const expectedUsername = options.expectedUsername || "";
@@ -578,6 +589,13 @@ export async function profileScanChunk(options) {
       ok: false,
       error: "Open the matching X/Twitter profile media page before starting a profile download.",
     };
+  }
+
+  // A profile that no longer exists (deleted, suspended, or renamed away)
+  // shows X's empty-state block and no profile header. Both are found by test
+  // id, so this works whatever language the page is in.
+  if (document.querySelector("[data-testid='emptyState']") && !document.querySelector("[data-testid='UserName']")) {
+    return { ok: false, gone: true, error: `@${username} does not exist any more, or is suspended.` };
   }
 
   const progress = Object.assign(
@@ -688,6 +706,22 @@ export async function profileScanChunk(options) {
     return fallback;
   }
 
+  // Where the scan has got to in the timeline, by post id (X ids grow over
+  // time). A pinned post or a repost sits out of date order, so it says
+  // nothing about where the scan is; both carry a social-context line.
+  const stopAtId = /^\d+$/.test(String(options.stopAtId || "")) ? BigInt(options.stopAtId) : null;
+  function notePostPosition(article, id) {
+    if (article.querySelector("[data-testid='socialContext']") || !/^\d+$/.test(id)) {
+      return;
+    }
+    if (!progress.newestId || BigInt(id) > BigInt(progress.newestId)) {
+      progress.newestId = id;
+    }
+    if (stopAtId !== null && BigInt(id) <= stopAtId) {
+      progress.reachedStop = true;
+    }
+  }
+
   function collectVisibleLinks() {
     document.querySelectorAll("article").forEach((article) => {
       if (isEmbeddedContent(article, document.body)) {
@@ -699,6 +733,7 @@ export async function profileScanChunk(options) {
       if (!permalink) {
         return;
       }
+      notePostPosition(article, permalink.id);
 
       const hasVideoAnchor = entries.some(
         (entry) => entry.status.isVideoPath && entry.status.id === permalink.id
@@ -737,6 +772,11 @@ export async function profileScanChunk(options) {
   collectVisibleLinks();
 
   while (true) {
+    if (progress.reachedStop) {
+      // Everything from here down was looked at by the previous check.
+      done = true;
+      break;
+    }
     if (progress.stablePasses >= 4) {
       done = true;
       break;
@@ -754,10 +794,10 @@ export async function profileScanChunk(options) {
     window.scrollBy(0, Math.max(700, Math.floor(window.innerHeight * 0.86)));
     await sleep(900);
     // The tab may have moved on during the wait.
-    if (mediaUsername(window.location.href) !== username) {
+    if (profileUsername(window.location.href) !== username) {
       return {
         ok: false,
-        error: "The page changed during the scan. Open the profile media page again and rescan.",
+        error: "The page changed during the scan. Open the profile again and rescan.",
       };
     }
     collectVisibleLinks();
@@ -772,5 +812,14 @@ export async function profileScanChunk(options) {
 
   progress.urls = Array.from(links.values());
 
-  return { ok: true, username, done, capped, progress, urls: progress.urls };
+  return {
+    ok: true,
+    username,
+    done,
+    capped,
+    progress,
+    urls: progress.urls,
+    newestId: progress.newestId || null,
+    reachedStop: Boolean(progress.reachedStop),
+  };
 }

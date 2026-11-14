@@ -4,6 +4,7 @@ import {
   RESERVED_PROFILE_USERNAMES,
   batchTargetForUrl,
   profileScanChunk,
+  twitterPostsUrl,
 } from "./providers.js";
 
 const MENU_ID = "download-with-ytdlp";
@@ -15,7 +16,6 @@ const PROFILE_SCAN_MAX_PASSES = 36;
 const PROFILE_SCAN_MAX_ROUNDS = 16;
 // A check for new videos only needs the top of the media page, where the
 // newest posts are; the full-depth scan stays with the toolbar button.
-const HANDLE_CHECK_MAX_ROUNDS = 2;
 const HANDLE_CHECK_LOAD_TIMEOUT_MS = 30000;
 const HANDLE_CHECK_SETTLE_MS = 2500;
 
@@ -110,12 +110,30 @@ async function restoreScrollPosition(tabId, scrollY) {
   }
 }
 
+async function scanProfileTab(tabId, provider, username, key) {
+  if (provider === "twitter") {
+    try {
+      await showTwitterPosts(tabId, username);
+    } catch (error) {
+      await writeScanRecord(key, {
+        status: "error",
+        provider,
+        username,
+        error: error?.message || "Could not open the profile's Posts tab.",
+      });
+      return;
+    }
+  }
+  await runProfileScan(tabId, provider, username, key);
+}
+
 async function runProfileScan(
   tabId,
   provider,
   expectedUsername,
   key,
-  maxRounds = PROFILE_SCAN_MAX_ROUNDS
+  maxRounds = PROFILE_SCAN_MAX_ROUNDS,
+  stopAtId = null
 ) {
   if (activeScans.has(key)) {
     return;
@@ -139,6 +157,7 @@ async function runProfileScan(
             expectedUsername,
             budgetMs: PROFILE_SCAN_CHUNK_MS,
             maxPasses: PROFILE_SCAN_MAX_PASSES,
+            stopAtId,
             progress,
           },
         ],
@@ -153,6 +172,7 @@ async function runProfileScan(
           status: "error",
           provider,
           username: expectedUsername,
+          gone: Boolean(result.gone),
           error: result.error || "Could not scan the profile media page.",
         });
         return;
@@ -172,6 +192,8 @@ async function runProfileScan(
           urls,
           found: urls.length,
           partial: Boolean(result.capped),
+          newestId: result.newestId,
+          reachedStop: result.reachedStop,
           profileName,
         });
         return;
@@ -243,7 +265,7 @@ async function restartProfileScan(message) {
   }
 
   await writeScanRecord(key, { status: "scanning", provider, username });
-  void runProfileScan(tabId, provider, username, key);
+  void scanProfileTab(tabId, provider, username, key);
   return { ok: true };
 }
 
@@ -266,6 +288,21 @@ async function waitForTabLoad(tabId) {
 }
 
 /**
+ * Puts a Twitter profile tab on the Posts tab, which is what a scan reads (see
+ * twitterPostsUrl); a scan started from the Videos tab moves the tab there.
+ */
+async function showTwitterPosts(tabId, username) {
+  const postsUrl = twitterPostsUrl(username);
+  const tab = await chrome.tabs.get(tabId);
+  if (String(tab.url || "").replace(/\/$/, "").toLowerCase() === postsUrl.toLowerCase()) {
+    return;
+  }
+  await chrome.tabs.update(tabId, { url: postsUrl });
+  await sleep(300); // Let the navigation start before waiting for it to finish.
+  await waitForTabLoad(tabId);
+}
+
+/**
  * Looks at one handle's media page for the handle list: opens it in a
  * background tab, scans the top of it and closes it again. The URL is
  * validated the same way a toolbar scan's is, so only a real X/Twitter media
@@ -281,16 +318,29 @@ async function checkHandle(message) {
   const key = makeProfileBatchKey();
   let tabId = null;
   try {
-    const tab = await chrome.tabs.create({ url, active: false });
+    const tab = await chrome.tabs.create({ url: twitterPostsUrl(target.key), active: false });
     tabId = tab.id;
     await waitForTabLoad(tabId);
-    await runProfileScan(tabId, target.provider, target.key, key, HANDLE_CHECK_MAX_ROUNDS);
+    // A check reads down the timeline until it reaches the newest post the
+    // previous complete check saw, so a regular check only reads what is new.
+    const stopAtId = /^\d+$/.test(String(message.stopAtId || "")) ? String(message.stopAtId) : null;
+    await runProfileScan(tabId, target.provider, target.key, key, PROFILE_SCAN_MAX_ROUNDS, stopAtId);
 
     const record = (await chrome.storage.session.get(key))[key];
     if (record?.status !== "done") {
-      return { ok: false, error: record?.error || "The profile could not be scanned." };
+      return {
+        ok: false,
+        gone: Boolean(record?.gone),
+        error: record?.error || "The profile could not be scanned.",
+      };
     }
-    return { ok: true, urls: Array.isArray(record.urls) ? record.urls : [] };
+    return {
+      ok: true,
+      urls: Array.isArray(record.urls) ? record.urls : [],
+      newestId: record.newestId || null,
+      // Reached the previous check's place, or the end of the timeline.
+      complete: Boolean(record.reachedStop) || !record.partial,
+    };
   } catch (error) {
     return { ok: false, error: error?.message || "The profile could not be scanned." };
   } finally {
@@ -364,7 +414,7 @@ async function openDownloadPicker(url, source, tab) {
   await showDownloadPicker(chrome.runtime.getURL(`download.html?${params.toString()}`), tab);
 
   if (batchKey) {
-    await runProfileScan(tab.id, target.provider, target.key, batchKey);
+    await scanProfileTab(tab.id, target.provider, target.key, batchKey);
   }
 }
 

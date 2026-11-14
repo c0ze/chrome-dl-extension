@@ -1980,3 +1980,68 @@ class TrashDownloadTests(LibraryCase):
 
     def test_thumbnail_keys_cannot_name_other_files(self) -> None:
         self.assertEqual(host.library_thumbnails(["../../x", "a" * 39, 5])["thumbs"], {})
+
+
+class CheckedThroughTests(LibraryCase):
+    """A check stops where the previous complete one began, so its marker must never skip posts."""
+
+    def post(self, post_id: int) -> str:
+        return f"https://x.com/alice/status/{post_id}"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.write_jobs([])
+        host.add_handle("alice", "")
+
+    def entry(self) -> dict[str, Any]:
+        return self.handles()["alice"]
+
+    def test_a_complete_check_moves_the_marker_to_the_newest_post(self) -> None:
+        host.record_handle_scan("alice", [self.post(5)], "9", True)
+        self.assertEqual(self.entry()["checked_through"], "9")
+
+    def test_a_check_cut_short_leaves_the_marker_so_the_gap_is_read_next_time(self) -> None:
+        host.record_handle_scan("alice", [], "9", True)
+
+        host.record_handle_scan("alice", [self.post(20)], "25", False)
+
+        self.assertEqual(self.entry()["checked_through"], "9")
+
+    def test_the_marker_never_moves_back(self) -> None:
+        host.record_handle_scan("alice", [], "100", True)
+        host.record_handle_scan("alice", [], "99", True)
+        self.assertEqual(self.entry()["checked_through"], "100")
+
+    def test_new_videos_from_a_short_check_add_to_those_still_waiting(self) -> None:
+        # The later check stops before reaching the older new post; it must not vanish.
+        host.record_handle_scan("alice", [self.post(5)], "6", True)
+
+        host.record_handle_scan("alice", [self.post(8)], "9", True)
+
+        self.assertEqual(self.entry()["pending_count"], 2)
+
+    def test_a_renamed_handle_keeps_its_marker(self) -> None:
+        host.record_handle_scan("alice", [], "50", True)
+        host.update_handle("alice", "alice_new", None)
+        self.assertEqual(self.handles()["alice_new"]["checked_through"], "50")
+
+
+class StaleHandleTests(LibraryCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.write_jobs([])
+        host.add_handle("gone_user", "g")
+
+    def test_a_gone_account_is_marked_stale(self) -> None:
+        host.set_handle_stale("gone_user", True)
+        self.assertIsNotNone(self.handles()["gone_user"]["stale"])
+
+    def test_a_check_that_finds_the_profile_clears_stale(self) -> None:
+        host.set_handle_stale("gone_user", True)
+        host.record_handle_scan("gone_user", [], None, False)
+        self.assertIsNone(self.handles()["gone_user"]["stale"])
+
+    def test_stale_can_be_cleared_by_hand(self) -> None:
+        host.set_handle_stale("gone_user", True)
+        host.set_handle_stale("gone_user", False)
+        self.assertIsNone(self.handles()["gone_user"]["stale"])

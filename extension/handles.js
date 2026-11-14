@@ -12,6 +12,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
   let groups = [];
   let busy = false;
   let progressText = "";
+  let staleFound = [];
   let editing = null;
   let adding = false;
   // Groups start closed (a library has hundreds of handles); a group the user
@@ -119,6 +120,13 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
       badge.textContent = pendingLabel(entry.pending_count);
       head.append(badge);
     }
+    if (entry.stale) {
+      const badge = document.createElement("span");
+      badge.className = "handle-new handle-stale";
+      badge.textContent = "Stale";
+      badge.title = `The account was gone on ${entry.stale}. Group checks and Check All skip it.`;
+      head.append(badge);
+    }
 
     const meta = document.createElement("p");
     meta.className = "handle-meta";
@@ -163,6 +171,15 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
         })
       );
     }
+    if (entry.stale) {
+      actions.append(
+        makeButton("Not Stale", "Include this handle in group checks again", "button-muted-small", () => {
+          void hostAction({ type: "set_handle_stale", handle: entry.handle, stale: false }, "Could not update the handle.")
+            .catch((error) => showMessage("error", error.message))
+            .then(refresh);
+        })
+      );
+    }
     actions.append(
       makeButton("Check", "Look at this profile for new videos", "button-muted-small", () => {
         void checkHandles([entry]);
@@ -197,10 +214,15 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
     label.textContent = group.group || UNGROUPED_LABEL;
     const counts = document.createElement("span");
     counts.className = "group-summary";
-    counts.textContent = `${group.handles.length}${group.pending ? `, ${group.pending} with new` : ""}`;
-    const check = makeButton("Check", `Check the ${group.handles.length} handles in this group`, "button-muted-small group-check", (event) => {
+    const live = group.handles.filter((entry) => !entry.stale);
+    const staleCount = group.handles.length - live.length;
+    counts.textContent =
+      `${group.handles.length}` +
+      (group.pending ? `, ${group.pending} with new` : "") +
+      (staleCount ? `, ${staleCount} stale` : "");
+    const check = makeButton("Check", `Check the ${live.length} handles in this group that are not stale`, "button-muted-small group-check", (event) => {
       event.preventDefault();
-      void checkHandles(group.handles);
+      void checkHandles(live);
     });
     summary.append(label, counts, check);
 
@@ -382,13 +404,25 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
     const scan = await chrome.runtime.sendMessage({
       type: "check-handle",
       profileUrl: entry.profile_url,
+      stopAtId: entry.checked_through || null,
     });
     if (!scan?.ok) {
+      if (scan?.gone) {
+        await hostAction({ type: "set_handle_stale", handle: entry.handle, stale: true }, "Could not mark the handle stale.");
+        staleFound.push(entry.handle);
+        return 0;
+      }
       throw new Error(scan?.error || "The profile could not be scanned.");
     }
 
     const response = await hostAction(
-      { type: "record_handle_scan", handle: entry.handle, urls: scan.urls },
+      {
+        type: "record_handle_scan",
+        handle: entry.handle,
+        urls: scan.urls,
+        newest_id: scan.newestId,
+        complete: scan.complete,
+      },
       "The check could not be saved."
     );
     return response.handle.pending_count;
@@ -415,6 +449,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
     busy = true;
     let found = 0;
     const failures = [];
+    staleFound = [];
     try {
       for (const [index, entry] of entries.entries()) {
         progressText = `Checking ${index + 1} of ${entries.length}: @${entry.handle}`;
@@ -431,14 +466,17 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
     }
 
     await refresh();
-    if (failures.length) {
-      showMessage("error", `Could not check ${failures.length} of ${entries.length}. ${failures[0]}`);
-    } else {
-      showMessage(
-        found ? "success" : "info",
-        found ? `Found ${found} new videos.` : "No new videos."
+    const parts = [found ? `Found ${found} new videos.` : "No new videos."];
+    if (staleFound.length) {
+      parts.push(
+        `Gone, marked stale: ${staleFound.slice(0, 5).map((handle) => `@${handle}`).join(", ")}` +
+          (staleFound.length > 5 ? ` and ${staleFound.length - 5} more.` : ".")
       );
     }
+    if (failures.length) {
+      parts.push(`Could not check ${failures.length} of ${entries.length}. ${failures[0]}`);
+    }
+    showMessage(failures.length ? "error" : found ? "success" : "info", parts.join(" "));
   }
 
   try {
@@ -448,7 +486,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
   }
 
   elements.checkAllButton.addEventListener("click", () => {
-    void checkHandles(handles);
+    void checkHandles(handles.filter((entry) => !entry.stale));
   });
   elements.importButton.addEventListener("click", () => {
     void importLibrary();

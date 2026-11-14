@@ -2854,6 +2854,13 @@ def library_root() -> Path:
     return Path(resolve_download_dir(load_config()["download_dir"]))
 
 
+def library_root_or_none() -> Path | None:
+    try:
+        return library_root()
+    except ValueError:
+        return None
+
+
 def group_of(base_dir: str, root: Path) -> str:
     """The folder a handle is filed under, relative to the library root."""
     if not base_dir:
@@ -2881,6 +2888,8 @@ def handle_for_response(entry: dict[str, Any], root: Path | None = None) -> dict
         "known_count": len(entry.get("known", [])),
         "pending_count": len(entry.get("pending", [])),
         "last_checked": entry.get("last_checked"),
+        "checked_through": entry.get("checked_through"),
+        "stale": entry.get("stale"),
         "added_at": entry.get("added_at"),
     }
 
@@ -3195,6 +3204,7 @@ def update_handle(
             target = handle_entry(state, new_handle)
             target["added_at"] = entry.get("added_at") or target["added_at"]
             target["last_checked"] = entry.get("last_checked")
+            target["checked_through"] = entry.get("checked_through")
             if not new_folders and entry.get("base_dir"):
                 new_folders.append({"base_dir": str(entry["base_dir"]), "name": new_handle})
         set_entry_folders(target, new_folders)
@@ -3217,8 +3227,19 @@ def require_handle(state: dict[str, Any], username: str) -> dict[str, Any]:
     return handle_entry(state, username)
 
 
-def record_handle_scan(username: str, urls: list[Any]) -> dict[str, Any]:
-    """Store which posts on a handle's media page have not been downloaded yet."""
+def record_handle_scan(
+    username: str,
+    urls: list[Any],
+    newest_id: Any = None,
+    complete: bool = False,
+) -> dict[str, Any]:
+    """Store which posts on a handle's profile have not been downloaded yet.
+
+    A check stops where the previous complete check began (checked_through),
+    so it only sees the newest posts: what it finds is added to what is still
+    pending, and checked_through moves up only when the check got all the way
+    down to it. A check cut short leaves it, so the next one covers the gap.
+    """
     target = {"provider": "twitter", "key": username}
 
     def mutator(state: dict[str, Any]) -> dict[str, Any]:
@@ -3226,7 +3247,7 @@ def record_handle_scan(username: str, urls: list[Any]) -> dict[str, Any]:
         known = set(entry["known"])
         pending: list[str] = []
         seen: set[str] = set()
-        for raw_url in urls:
+        for raw_url in [*entry["pending"], *urls]:
             try:
                 url = normalize_url(str(raw_url))
             except ValueError:
@@ -3239,7 +3260,24 @@ def record_handle_scan(username: str, urls: list[Any]) -> dict[str, Any]:
 
         entry["pending"] = pending[:MAX_PROFILE_BATCH_JOBS]
         entry["last_checked"] = timestamp()
-        return {"ok": True, "handle": handle_for_response(entry)}
+        entry["stale"] = None  # The profile was there after all.
+        newest = str(newest_id or "")
+        if complete and newest.isdigit():
+            current = str(entry.get("checked_through") or "")
+            if not current.isdigit() or int(newest) > int(current):
+                entry["checked_through"] = newest
+        return {"ok": True, "handle": handle_for_response(entry, library_root_or_none())}
+
+    return mutate_handles(mutator)
+
+
+def set_handle_stale(username: str, stale: bool) -> dict[str, Any]:
+    """Mark a handle whose account is gone, so group checks pass it by."""
+
+    def mutator(state: dict[str, Any]) -> dict[str, Any]:
+        entry = require_handle(state, username)
+        entry["stale"] = timestamp() if stale else None
+        return {"ok": True, "handle": handle_for_response(entry, library_root_or_none())}
 
     return mutate_handles(mutator)
 
@@ -3420,13 +3458,18 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
         urls = message.get("urls")
         if not isinstance(urls, list):
             raise ValueError("record_handle_scan expects a urls list.")
-        return record_handle_scan(message_handle(message), urls)
+        return record_handle_scan(
+            message_handle(message), urls, message.get("newest_id"), bool(message.get("complete"))
+        )
 
     if message_type == "download_handle_pending":
         try:
             return download_handle_pending(message_handle(message), message.get("group"))
         except MissingDownloadDir as error:
             return {"ok": False, "missing_dir": True, "error": str(error)}
+
+    if message_type == "set_handle_stale":
+        return set_handle_stale(message_handle(message), bool(message.get("stale")))
 
     if message_type == "mark_handle_seen":
         return mark_handle_seen(message_handle(message))

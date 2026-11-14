@@ -774,3 +774,109 @@ test("a Twitter scan stops when the tab navigates to another profile mid-scan", 
   assert.equal(result.ok, false);
   assert.match(result.error, /changed/);
 });
+
+test("a Twitter scan on the Posts tab finds the posts X's Videos tab leaves out", async () => {
+  // The Videos tab only lists posts holding exactly one video; posts with two
+  // videos, or a video and photos, are only on the Posts tab.
+  withPage(
+    `<div role="main">
+       <article>
+         <div data-testid="tweetPhoto"><img></div>
+         <div data-testid="videoPlayer"><video></video></div>
+         <a href="/alice/status/2001"><time></time></a>
+       </article>
+       <article>
+         <div data-testid="videoPlayer"><video></video></div>
+         <div data-testid="videoPlayer"><video></video></div>
+         <a href="/alice/status/2002"><time></time></a>
+       </article>
+       <article>
+         <div data-testid="socialContext">alice reposted</div>
+         <div data-testid="videoPlayer"><video></video></div>
+         <a href="/bob/status/9002"><time></time></a>
+       </article>
+       <article>
+         <div data-testid="tweetPhoto"><img></div>
+         <a href="/alice/status/2003"><time></time></a>
+       </article>
+     </div>`,
+    "https://x.com/alice"
+  );
+
+  const result = await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, maxPasses: 1 });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.progress.urls.sort(), [
+    "https://x.com/alice/status/2001",
+    "https://x.com/alice/status/2002",
+  ]);
+});
+
+test("a Twitter scan refuses pages that are not the profile", async () => {
+  for (const url of ["https://x.com/alice/likes", "https://x.com/home", "https://x.com/alice/status/1"]) {
+    withPage("<div role='main'></div>", url);
+    const result = await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, maxPasses: 1 });
+    assert.equal(result.ok, false, url);
+  }
+});
+
+test("the Posts tab of a profile is its bare handle URL", async () => {
+  const { twitterPostsUrl } = await import("../extension/providers.js");
+  assert.equal(twitterPostsUrl("SomeHandle"), "https://x.com/SomeHandle");
+});
+
+test("a Twitter scan of an account that is gone says so instead of finding nothing", async () => {
+  withPage(
+    `<div role="main"><div data-testid="emptyState"><span data-testid="empty_state_header_text">gone</span></div></div>`,
+    "https://x.com/alice"
+  );
+  const result = await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, maxPasses: 1 });
+  assert.equal(result.ok, false);
+  assert.equal(result.gone, true);
+});
+
+test("a profile with no posts yet is not taken for a gone account", async () => {
+  withPage(
+    `<div role="main"><div data-testid="UserName">Alice</div><div data-testid="emptyState">no posts</div></div>`,
+    "https://x.com/alice"
+  );
+  const result = await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, maxPasses: 1 });
+  assert.equal(result.ok, true);
+});
+
+test("a check stops at the newest post the previous check saw, ignoring the pinned post", async () => {
+  // The pinned post is old but sits on top; stopping there would skip everything new.
+  withPage(
+    `<div role="main">
+       <article><div data-testid="socialContext">Pinned</div><video></video><a href="/alice/status/100"><time></time></a></article>
+       <article><video></video><a href="/alice/status/505"><time></time></a></article>
+       <article><a href="/alice/status/500"><time></time></a></article>
+       <article><video></video><a href="/alice/status/400"><time></time></a></article>
+     </div>`,
+    "https://x.com/alice"
+  );
+
+  const result = await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, stopAtId: "500" });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.done, true);
+  assert.equal(result.reachedStop, true);
+  assert.equal(result.newestId, "505");
+  assert.ok(result.urls.includes("https://x.com/alice/status/505"));
+});
+
+test("without a marker a check reads on and reports the newest post it saw", async () => {
+  withPage(
+    `<div role="main">
+       <article><div data-testid="socialContext">alice reposted</div><video></video><a href="/alice/status/900"><time></time></a></article>
+       <article><video></video><a href="/alice/status/505"><time></time></a></article>
+     </div>`,
+    "https://x.com/alice"
+  );
+
+  const result = await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, maxPasses: 1 });
+
+  assert.equal(result.reachedStop, false);
+  // A repost of an old post is not where the timeline is.
+  assert.equal(result.newestId, "505");
+});

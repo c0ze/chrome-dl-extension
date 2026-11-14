@@ -668,6 +668,10 @@ input:disabled {
   font-weight: 700;
 }
 
+.handle-stale {
+  background: var(--muted);
+}
+
 .handle-meta {
   margin: 0;
   color: var(--muted);
