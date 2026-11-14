@@ -2,13 +2,15 @@
 // group, with a check that looks at a profile for videos not downloaded yet.
 
 import { formatChecked, groupHandles, handleGroups, pendingLabel } from "./grouping.js";
+import { favoritesGroupFor } from "./library-views.js";
 
 const SCAN_ORIGINS = ["https://x.com/*"];
 const SORT_KEY = "handlesSort";
 const UNGROUPED_LABEL = "No group";
 
-export function initHandles({ callHost, showMessage, onQueued, onLoaded, elements }) {
+export function initHandles({ callHost, showMessage, onQueued, onLoaded, onOpenFavorites, elements }) {
   let handles = [];
+  let favoriteCounts = {};
   let groups = [];
   let busy = false;
   let progressText = "";
@@ -189,7 +191,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
         adding = false;
         render();
       }),
-      makeButton("Remove", "Remove this handle from the list. Its folder and videos are kept.", "button-danger", () => {
+      makeButton("Unlist", "Take this handle off the list. Its folder and videos are kept.", "button-muted-small", () => {
         void simpleAction("remove_handle", entry);
       })
     );
@@ -215,19 +217,37 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
     const counts = document.createElement("span");
     counts.className = "group-summary";
     const live = group.handles.filter((entry) => !entry.stale);
+    const favoriteCount = favoriteCounts[favoritesGroupFor(group.group)] || 0;
     const staleCount = group.handles.length - live.length;
     counts.textContent =
       `${group.handles.length}` +
       (group.pending ? `, ${group.pending} with new` : "") +
-      (staleCount ? `, ${staleCount} stale` : "");
+      (staleCount ? `, ${staleCount} stale` : "") +
+      (favoriteCount ? `, ★ ${favoriteCount}` : "");
     const check = makeButton("Check", `Check the ${live.length} handles in this group that are not stale`, "button-muted-small group-check", (event) => {
       event.preventDefault();
       void checkHandles(live);
     });
-    summary.append(label, counts, check);
+    summary.append(label, counts);
+    if (live.length) {
+      summary.append(check);
+    }
 
     const items = document.createElement("div");
     items.className = "group-items";
+    const favorites = favoriteCounts[favoritesGroupFor(group.group)] || 0;
+    if (favorites) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "handle-favorites";
+      row.title = "Show this group's favorites";
+      row.textContent = `★ Favorites`;
+      const count = document.createElement("span");
+      count.textContent = `${favorites} ${favorites === 1 ? "video" : "videos"}`;
+      row.append(count);
+      row.addEventListener("click", () => onOpenFavorites(group.group));
+      items.append(row);
+    }
     group.handles.forEach((entry) => items.append(makeHandleItem(entry, group.group)));
 
     details.append(summary, items);
@@ -264,6 +284,16 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
 
     const query = elements.handleSearch.value;
     const grouped = groupHandles(handles, query, elements.handleSort.value);
+    if (!query.trim()) {
+      // A group can hold favorites without any listed handle, such as videos
+      // saved straight into the library folder.
+      const listed = new Set(grouped.map((group) => favoritesGroupFor(group.group)));
+      for (const name of Object.keys(favoriteCounts).sort()) {
+        if (!listed.has(name)) {
+          grouped.push({ group: name, handles: [], pending: 0 });
+        }
+      }
+    }
     if (!grouped.length) {
       const emptyState = document.createElement("div");
       emptyState.className = "empty-state";
@@ -285,6 +315,8 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, element
       }
       handles = Array.isArray(response.handles) ? response.handles : [];
       groups = Array.isArray(response.groups) ? response.groups : [];
+      const favorites = await callHost({ type: "get_favorites" });
+      favoriteCounts = favorites?.ok ? favorites.groups || {} : {};
       onLoaded(handles);
     } catch (error) {
       handles = [];

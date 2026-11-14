@@ -90,9 +90,19 @@ is loaded.
   download folder for broken videos (empty, unreadable, or cut short) and for
   duplicates: identical copies, and the same video at another quality. The
   scan runs in the background, needs `ffmpeg` and `ffprobe`, and only reads
-  new or changed files the next time. Removing a file there, or with `Trash`
-  on a finished download, moves it to `_trash` at the top of the download
-  folder, keeping its group and handle path; nothing is deleted.
+  new or changed files the next time.
+- `Remove` on a finished download, a favorite or in Library Check deletes the
+  video from disk. It is listed under `Removed` on the downloads screen with
+  its thumbnail, post link, size and length, and its id stays in the download
+  archive, so it is not downloaded again; a single post you removed is refused
+  even through the duplicate prompt. `Allow Again` there lifts that. `Remove`
+  on a failed or queued download only takes it off the list, and `Clear List`
+  takes everything but running downloads off the list without touching files.
+- Favorites are shared with `vtag`, the Haruna helper that lives in this
+  repository (`native-host/vtag.py`, linked as `~/.local/bin/vtag` by the
+  installer): Haruna's custom command `vtag fav`, bound to a mouse button,
+  and the `☆` button on a download mark the same favorite. Each group in the
+  handle list shows its favorites; `Play All` opens them as a playlist.
 - The handle list holds every X/Twitter account you have downloaded from.
   `Check` (or `Check All`, or a group's `Check`) opens the handle's Posts tab
   in a background tab, reads down it and closes it; posts that were not
@@ -140,8 +150,8 @@ is loaded.
 - Use `Folder` on a dashboard item to open the containing folder. Completed
   downloads use the final filename reported by `yt-dlp`; otherwise the selected
   download folder is opened.
-- Use `Remove` or `Remove All` to clear finished items from the dashboard.
-  Running downloads are kept.
+- Use `Clear List` to take finished, failed and queued items off the
+  dashboard without touching their files. Running downloads are kept.
 - If a download is interrupted because its worker process died, for example on
   reboot or if the process was killed, the host detects this on the next
   dashboard refresh, marks the job `Interrupted`, and resumes the queue.

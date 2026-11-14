@@ -668,6 +668,35 @@ input:disabled {
   font-weight: 700;
 }
 
+.favorite-button {
+  background: #eadfce;
+  color: var(--accent-strong);
+}
+
+.favorite-button.active {
+  background: var(--accent);
+  color: white;
+}
+
+.dashboard-actions .icon-button.active {
+  background: var(--accent);
+  color: white;
+}
+
+.handle-favorites {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid rgba(200, 110, 51, 0.35);
+  border-radius: 8px;
+  background: rgba(255, 248, 238, 0.9);
+  color: var(--accent-strong);
+  font-weight: 700;
+  cursor: pointer;
+}
+
 .handle-stale {
   background: var(--muted);
 }

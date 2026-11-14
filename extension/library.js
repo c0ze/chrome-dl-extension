@@ -1,5 +1,5 @@
 // The Library Check page: starts a scan of the download folder and shows what
-// it found: broken videos and sets of duplicates, with removal to the trash.
+// it found: broken videos and sets of duplicates, with removal of files.
 
 import { formatBytes, formatDuration, scanSummary } from "./grouping.js";
 
@@ -74,8 +74,8 @@ function fileActions(path) {
     makeButton("Folder", "Open the containing folder", "button-muted-small", () => {
       void fileAction("open_library_folder", path);
     }),
-    makeButton("Trash", "Move this video to the trash folder", "button-danger", () => {
-      void trash([path]);
+    makeButton("Remove", "Delete this video from disk; it is listed under Removed", "button-danger", () => {
+      void remove([path]);
     })
   );
   return actions;
@@ -149,11 +149,11 @@ function makeGroup(group) {
   head.append(
     summary,
     makeButton(
-      extras.length === 1 ? "Trash the Other" : `Trash the Other ${extras.length}`,
-      "Keep the first copy and move the rest to the trash folder",
+      extras.length === 1 ? "Remove the Other" : `Remove the Other ${extras.length}`,
+      "Keep the first copy and delete the rest from disk",
       "button-danger group-check",
       () => {
-        void trash(extras.map((file) => file.path));
+        void remove(extras.map((file) => file.path));
       }
     )
   );
@@ -184,7 +184,7 @@ function render() {
 
   const bulk = tab === "identical" && total > 0 && !running;
   elements["bulk-button"].classList.toggle("hidden", !bulk);
-  elements["bulk-button"].textContent = "Trash All Extra Copies";
+  elements["bulk-button"].textContent = "Remove All Extra Copies";
 
   elements["report-list"].textContent = "";
   if (!items.length) {
@@ -281,10 +281,17 @@ async function fileAction(type, path) {
   }
 }
 
-async function trash(paths, payload = { paths }) {
+async function remove(paths, payload = { paths }) {
+  const count = payload.all_identical ? "these" : paths.length === 1 ? "this video" : `these ${paths.length} videos`;
+  if (!payload.all_identical && !window.confirm(`Delete ${count} from disk? Removed videos are listed on the downloads screen.`)) {
+    return;
+  }
   try {
-    const response = await hostAction({ type: "trash_library_files", ...payload }, "The files could not be moved.");
-    showMessage("success", `Moved ${response.moved} ${response.moved === 1 ? "file" : "files"} to ${response.trash}`);
+    const response = await hostAction(
+      { type: "remove_library_files", reason: tab === "broken" ? "broken" : "duplicate", ...payload },
+      "The files could not be removed."
+    );
+    showMessage("success", `Deleted ${response.removed} ${response.removed === 1 ? "file" : "files"}. They are listed under Removed on the downloads screen.`);
   } catch (error) {
     showMessage("error", error.message);
   }
@@ -296,8 +303,8 @@ elements["scan-button"].addEventListener("click", () => void startScan());
 elements["more-button"].addEventListener("click", () => void loadReport(true));
 elements["bulk-button"].addEventListener("click", () => {
   const sets = status.identical_count || 0;
-  if (window.confirm(`Keep one copy of each of the ${sets} sets of identical videos and move the rest to the trash folder?`)) {
-    void trash([], { all_identical: true });
+  if (window.confirm(`Keep one copy of each of the ${sets} sets of identical videos and delete the rest from disk?`)) {
+    void remove([], { all_identical: true });
   }
 });
 for (const name of Object.keys(TABS)) {

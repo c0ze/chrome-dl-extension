@@ -75,10 +75,11 @@
       <section class="panel">
         <div class="panel-header dashboard-header">
           <div>
-            <p class="label">Download Dashboard</p>
+            <p id="dashboard-label" class="label">Download Dashboard</p>
             <p id="dashboard-summary" class="hint">Checking current jobs…</p>
           </div>
           <div class="dashboard-actions">
+            <div id="download-controls" class="dashboard-actions">
             <div class="view-toggle" role="group" aria-label="Download view">
               <button id="view-tiles" type="button" class="view-button" title="Show downloads as tiles">
                 Tiles
@@ -90,15 +91,20 @@
             <a class="icon-button link-button" href="library.html" target="_blank" title="Find broken and duplicate videos in your download folder">
               Library Check
             </a>
-            <button id="clear-button" type="button" class="icon-button" title="Remove queued, failed, and completed downloads">
-              Remove All
+            <button id="clear-button" type="button" class="icon-button" title="Take queued, failed and finished downloads off the list. Their files are kept.">
+              Clear List
             </button>
             <button id="refresh-button" type="button" class="icon-button" title="Refresh downloads">
               Refresh
             </button>
+            </div>
+            <button id="removed-button" type="button" class="icon-button" title="Videos you removed: deleted from disk, never downloaded again">
+              Removed
+            </button>
           </div>
         </div>
         <div id="download-list" class="download-list"></div>
+        <div id="library-view" class="download-list hidden"></div>
       </section>
       </div>
 

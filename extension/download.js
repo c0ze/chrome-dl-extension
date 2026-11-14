@@ -1,6 +1,7 @@
 import { batchTargetForUrl } from "./providers.js";
 import { folderForTarget, groupJobsByHandle, groupSummary, jobHandle } from "./grouping.js";
 import { initHandles } from "./handles.js";
+import { initLibraryViews } from "./library-views.js";
 
 const HOST_NAME = "dev.arda.ytdlp_host";
 const RECENT_DIRECTORIES_KEY = "recentDownloadDirectories";
@@ -34,7 +35,11 @@ const elements = {
   downloadList: document.getElementById("download-list"),
   downloadButton: document.getElementById("download-button"),
   downloadDir: document.getElementById("download-dir"),
+  dashboardLabel: document.getElementById("dashboard-label"),
+  downloadControls: document.getElementById("download-controls"),
   downloadForm: document.getElementById("download-form"),
+  libraryView: document.getElementById("library-view"),
+  removedButton: document.getElementById("removed-button"),
   handleGroups: document.getElementById("handle-groups"),
   handleList: document.getElementById("handle-list"),
   handleSearch: document.getElementById("handle-search"),
@@ -492,13 +497,26 @@ async function cancelDashboardJob(jobId) {
   }
 }
 
-async function removeDashboardJob(jobId) {
+async function removeDashboardJob(job, deletes) {
+  if (
+    deletes &&
+    !window.confirm(
+      `Delete ${formatJobTitle(job)} from disk? It stays listed under Removed and will not be downloaded again.`
+    )
+  ) {
+    return;
+  }
+
   try {
-    const response = await callHost({ type: "remove_download_job", job_id: jobId });
+    const response = await callHost({ type: "remove_download", job_id: job.id });
     if (!response?.ok) {
       throw new Error(response?.error || "Could not remove this download.");
     }
 
+    if (response.deleted) {
+      showMessage("success", `Deleted ${formatJobTitle(job)}. It is listed under Removed.`);
+      void handlesPanel.refresh();
+    }
     void pollDownloads();
   } catch (error) {
     showMessage("error", error.message || "Could not remove this download.");
@@ -512,7 +530,7 @@ async function clearDashboardJobs() {
       throw new Error(response?.error || "Could not clear the download list.");
     }
 
-    showMessage("success", `Removed ${response.removed || 0} downloads from the dashboard.`);
+    showMessage("success", `Cleared ${response.removed || 0} downloads from the list. Their files are kept.`);
     void pollDownloads();
   } catch (error) {
     showMessage("error", error.message || "Could not clear the download list.");
@@ -530,20 +548,16 @@ async function playDashboardJob(jobId) {
   }
 }
 
-async function trashDashboardJob(job) {
-  if (!window.confirm(`Move ${formatJobTitle(job)} to the trash folder?`)) {
-    return;
-  }
-
+async function favoriteDashboardJob(job) {
   try {
-    const response = await callHost({ type: "trash_download", job_id: job.id });
+    const response = await callHost({ type: "set_favorite", job_id: job.id, favorite: !job.favorite });
     if (!response?.ok) {
-      throw new Error(response?.error || "Could not move the video to the trash folder.");
+      throw new Error(response?.error || "Could not change the favorite.");
     }
-    showMessage("success", `Moved to ${response.trash}`);
     void pollDownloads();
+    void handlesPanel.refresh();
   } catch (error) {
-    showMessage("error", error.message || "Could not move the video to the trash folder.");
+    showMessage("error", error.message || "Could not change the favorite.");
   }
 }
 
@@ -618,7 +632,15 @@ function makeJobActions(job) {
     actions.append(
       makeActionButton("Play", "Open this video in the configured player", "", () => {
         void playDashboardJob(job.id);
-      })
+      }),
+      makeActionButton(
+        job.favorite ? "★" : "☆",
+        job.favorite ? "Remove from favorites" : "Add to this group's favorites",
+        job.favorite ? "favorite-button active" : "favorite-button",
+        () => {
+          void favoriteDashboardJob(job);
+        }
+      )
     );
   }
 
@@ -630,19 +652,19 @@ function makeJobActions(job) {
     );
   }
 
-  if (job.status === "complete" && job.filename) {
-    actions.append(
-      makeActionButton("Trash", "Move the video to the library's trash folder", "button-danger", () => {
-        void trashDashboardJob(job);
-      })
-    );
-  }
-
   if (job.status !== "running") {
+    const deletes = job.status === "complete" && Boolean(job.filename);
     actions.append(
-      makeActionButton("Remove", "Remove this item from the dashboard. The file is kept.", "button-muted-small", () => {
-        void removeDashboardJob(job.id);
-      })
+      makeActionButton(
+        "Remove",
+        deletes
+          ? "Delete this video from disk, keep it under Removed and never download it again"
+          : "Take this download off the list",
+        "button-danger",
+        () => {
+          void removeDashboardJob(job, deletes);
+        }
+      )
     );
   }
 
@@ -1249,7 +1271,18 @@ function applyKnownHandleFolder(handles) {
   }
 }
 
+const libraryViews = initLibraryViews({
+  callHost,
+  showMessage,
+  elements,
+  onChanged: () => {
+    void pollDownloads();
+    void handlesPanel.refresh();
+  },
+});
+
 const handlesPanel = initHandles({
+  onOpenFavorites: (group) => libraryViews.showFavorites(group),
   callHost,
   showMessage,
   onQueued: () => void pollDownloads(),

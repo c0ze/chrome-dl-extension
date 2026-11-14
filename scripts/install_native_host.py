@@ -8,13 +8,17 @@ import json
 import os
 import shutil
 import stat
+import sys
 from pathlib import Path
 
 HOST_NAME = "dev.arda.ytdlp_host"
 INSTALL_DIR = Path.home() / ".local" / "share" / "yt-dlp-browser-host"
 CONFIG_PATH = INSTALL_DIR / "config.json"
 HOST_SCRIPT_PATH = INSTALL_DIR / "yt_dlp_host.py"
-HOST_MODULES = ("library_check.py",)
+HOST_MODULES = ("library_check.py", "vtag.py")
+# Haruna's custom commands run `vtag`; it links to the installed copy so it
+# keeps working wherever the repository lives.
+VTAG_COMMAND = Path.home() / ".local" / "bin" / "vtag"
 DEFAULT_CONFIG = {
     "browser": "chrome",
     "profile": "",
@@ -116,6 +120,20 @@ def install_host_script(source_path: Path) -> None:
     for module in HOST_MODULES:
         # The host imports these, so they must sit next to it.
         shutil.copy2(source_path.with_name(module), INSTALL_DIR / module)
+    vtag = INSTALL_DIR / "vtag.py"
+    vtag.chmod(vtag.stat().st_mode | stat.S_IXUSR)
+    link_vtag_command(vtag)
+
+
+def link_vtag_command(target: Path) -> None:
+    """Point ~/.local/bin/vtag at the installed vtag, never over a real file."""
+    if VTAG_COMMAND.exists() and not VTAG_COMMAND.is_symlink():
+        print(f"Warning: {VTAG_COMMAND} is a file, not a link; left as it is.", file=sys.stderr)
+        return
+    VTAG_COMMAND.parent.mkdir(parents=True, exist_ok=True)
+    if VTAG_COMMAND.is_symlink():
+        VTAG_COMMAND.unlink()
+    VTAG_COMMAND.symlink_to(target)
     current_mode = HOST_SCRIPT_PATH.stat().st_mode
     HOST_SCRIPT_PATH.chmod(current_mode | stat.S_IXUSR)
 

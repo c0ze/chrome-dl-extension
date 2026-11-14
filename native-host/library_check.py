@@ -4,8 +4,7 @@
 A scan reads every video once (ffprobe, plus a decode of its last seconds),
 keeps what it learned in an index so the next scan only reads new or changed
 files, and writes a report of broken files and groups of duplicates. Nothing is
-ever deleted: a file the user removes is moved to <library>/_trash, keeping its
-path below the library root.
+removed here: the downloader's curation module removes files and records them.
 
 The scan runs as its own process (`library_check.py --scan <root> <state>`),
 because it takes far longer than a native message may.
@@ -28,7 +27,6 @@ from typing import Any
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".webm", ".mov", ".m4v"}
 # Synology metadata (@eaDir), hidden folders and our own _trash are not library content.
 SKIP_PREFIXES = ("@", ".", "_")
-TRASH_NAME = "_trash"
 INDEX_VERSION = 1
 SCAN_WORKERS = 4
 PROBE_TIMEOUT_SECONDS = 60
@@ -621,44 +619,6 @@ def library_file(root: Path, relative_path: Any) -> Path:
     if os.path.splitext(text)[1].lower() not in VIDEO_SUFFIXES or path.is_symlink():
         raise ValueError("That path is not a video in the library.")
     return path
-
-
-def trash_destination(root: Path, relative_path: str) -> Path:
-    """Where a file goes in the trash: same path below <library>/_trash, never over another."""
-    target = root / TRASH_NAME / relative_path
-    candidate = target
-    number = 1
-    while candidate.exists():
-        candidate = target.with_name(f"{target.stem}.{number}{target.suffix}")
-        number += 1
-    return candidate
-
-
-def trash_files(root: Path, state_dir: Path, relative_paths: list[Any]) -> dict[str, Any]:
-    """Move files to the library's trash folder and take them out of the report."""
-    if scan_is_running(state_dir):
-        return {"ok": False, "error": "A library scan is running. Remove files when it has finished."}
-
-    moved: list[str] = []
-    failed: list[str] = []
-    for relative_path in relative_paths:
-        try:
-            source = library_file(root, relative_path)
-            destination = trash_destination(root, str(relative_path))
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            source.rename(destination)
-            moved.append(str(relative_path))
-        except (OSError, ValueError) as error:
-            failed.append(f"{relative_path}: {error}")
-
-    if moved:
-        forget_files(state_dir, set(moved))
-    return {
-        "ok": not failed,
-        "moved": len(moved),
-        "trash": str(root / TRASH_NAME),
-        "error": f"Could not move {len(failed)} files. {failed[0]}" if failed else None,
-    }
 
 
 def forget_files(state_dir: Path, gone: set[str]) -> None:

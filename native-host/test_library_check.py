@@ -198,68 +198,6 @@ class DuplicateTests(LibraryCheckCase):
 
 
 @unittest.skipUnless(HAVE_FFMPEG, "ffmpeg and ffprobe are not installed")
-class TrashTests(LibraryCheckCase):
-    def setUp(self) -> None:
-        super().setUp()
-        original = make_video(self.root / "group d/alice/alice-1.mp4")
-        shutil.copy(original, self.root / "group d/alice/copy.mp4")
-        self.scan()
-
-    def test_a_removed_file_keeps_its_place_below_the_trash_folder(self) -> None:
-        response = check.trash_files(self.root, self.state, ["group d/alice/copy.mp4"])
-
-        self.assertTrue(response["ok"])
-        self.assertTrue((self.root / "_trash/group d/alice/copy.mp4").is_file())
-        self.assertFalse((self.root / "group d/alice/copy.mp4").exists())
-
-    def test_a_removed_file_leaves_the_report_and_ends_its_group(self) -> None:
-        check.trash_files(self.root, self.state, ["group d/alice/copy.mp4"])
-
-        status = check.scan_status(self.state)
-        self.assertEqual(status["group_count"], 0)
-        self.assertEqual(status["scanned"], 1)
-
-    def test_a_second_file_of_the_same_name_does_not_replace_the_first_in_the_trash(self) -> None:
-        check.trash_files(self.root, self.state, ["group d/alice/copy.mp4"])
-        shutil.copy(self.root / "group d/alice/alice-1.mp4", self.root / "group d/alice/copy.mp4")
-
-        check.trash_files(self.root, self.state, ["group d/alice/copy.mp4"])
-
-        self.assertTrue((self.root / "_trash/group d/alice/copy.mp4").is_file())
-        self.assertTrue((self.root / "_trash/group d/alice/copy.1.mp4").is_file())
-
-    def test_only_library_videos_can_be_removed(self) -> None:
-        outside = self.root.parent / "outside.mp4"
-        outside.write_bytes(b"x")
-        (self.root / "notes.txt").write_text("keep")
-
-        for path in ("../outside.mp4", str(outside), "notes.txt", "_trash/x.mp4", "@eaDir/x.mp4", ""):
-            response = check.trash_files(self.root, self.state, [path])
-            self.assertFalse(response["ok"], path)
-
-        self.assertTrue(outside.exists())
-        self.assertTrue((self.root / "notes.txt").exists())
-
-    def test_removing_every_extra_identical_copy_keeps_one_of_each(self) -> None:
-        extras = check.extra_identical_files(self.state)
-
-        self.assertEqual(len(extras), 1)
-        check.trash_files(self.root, self.state, extras)
-        remaining = sorted(path.name for path in (self.root / "group d/alice").iterdir())
-        self.assertEqual(len(remaining), 1)
-
-    def test_nothing_is_removed_while_a_scan_is_running(self) -> None:
-        import fcntl
-
-        with open(check.lock_path(self.state), "a", encoding="utf-8") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            response = check.trash_files(self.root, self.state, ["group d/alice/copy.mp4"])
-
-        self.assertFalse(response["ok"])
-        self.assertTrue((self.root / "group d/alice/copy.mp4").exists())
-
-
-@unittest.skipUnless(HAVE_FFMPEG, "ffmpeg and ffprobe are not installed")
 class ScanProcessTests(LibraryCheckCase):
     def test_the_scan_process_reports_done_and_leaves_a_report(self) -> None:
         make_video(self.root / "g/alice/one.mp4")

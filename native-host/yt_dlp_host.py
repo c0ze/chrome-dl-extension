@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, TextIO
 from urllib.parse import parse_qsl, parse_qs, unquote, urlencode, urlparse, urlunparse
 
+import curation
 import library_check
 
 APP_DIR = Path.home() / ".local" / "share" / "yt-dlp-browser-host"
@@ -32,6 +33,8 @@ HANDLES_PATH = STATE_DIR / "handles.json"
 HANDLES_LOCK_PATH = STATE_DIR / "handles.lock"
 THUMBS_DIR = STATE_DIR / "thumbs"
 ARCHIVE_PATH = STATE_DIR / "archive.txt"
+FAVORITE_THUMBS_DIR = STATE_DIR / "favorite-thumbs"
+MAX_THUMBNAILS_MADE_PER_CALL = 8
 MAX_LOG_BYTES = 5 * 1024 * 1024
 LOG_BACKUP_PATH = STATE_DIR / "host.log.1"
 PRIVATE_FILE_MODE = 0o600
@@ -729,7 +732,7 @@ def get_jobs() -> dict[str, Any]:
         launch_next_queued_job(attempt_limit=QUEUE_KICK_ATTEMPT_LIMIT)
         state = read_jobs_shared()
 
-    jobs = state["jobs"]
+    jobs = mark_favorites(state["jobs"])
     active_count = sum(1 for job in jobs if job.get("status") == "running")
     queued_count = sum(1 for job in jobs if job.get("status") == "queued")
 
@@ -744,6 +747,21 @@ def get_jobs() -> dict[str, Any]:
         }
 
     return build_response(jobs_within_budget(visible_jobs(jobs), build_response))
+
+
+def mark_favorites(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Copies of the jobs with "favorite" set from vtag's list, by path alone."""
+    try:
+        with curation.open_favorites(library_root()) as db:
+            favorites = {os.path.normpath(path) for path in curation.favorite_paths(db)}
+    except Exception as error:  # noqa: BLE001
+        log_line(f"Could not read favorites: {error}")
+        favorites = set()
+    marked = []
+    for job in jobs:
+        filename = str(job.get("filename") or "").strip().strip('"')
+        marked.append({**job, "favorite": bool(filename) and os.path.normpath(filename) in favorites})
+    return marked
 
 
 def normalized_url_key(raw_url: Any) -> str:
@@ -1942,27 +1960,174 @@ def play_video(video: Path) -> dict[str, Any]:
     return {"ok": True, "path": str(video)}
 
 
-def trash_download(job_id: str) -> dict[str, Any]:
-    """Move a finished download's file to the library trash and drop it from the dashboard."""
+def job_video(job: dict[str, Any], root: Path) -> str:
+    """A finished job's file relative to the library root, or "" when it has none there."""
+    filename = str(job.get("filename") or "").strip().strip('"')
+    if not filename:
+        return ""
+    try:
+        return str(Path(os.path.expanduser(filename)).relative_to(root))
+    except ValueError:
+        return ""
+
+
+def remove_download(job_id: str) -> dict[str, Any]:
+    """Take a download off the dashboard; a finished one's video is deleted and recorded."""
     job = get_download_job(job_id)
     if not job:
         return {"ok": False, "error": "Download job not found."}
     if job.get("status") in ACTIVE_STATUSES:
-        return {"ok": False, "error": "Cancel the download before removing its file."}
+        return {"ok": False, "error": "Cancel the download before removing it."}
 
-    filename = str(job.get("filename") or "").strip().strip('"')
     root = library_root()
-    try:
-        relative = str(Path(os.path.expanduser(filename)).relative_to(root)) if filename else ""
-    except ValueError:
-        relative = ""
-    if not relative:
-        return {"ok": False, "error": f"Only videos inside {root} can be moved to its trash folder."}
+    relative = job_video(job, root) if job.get("status") == "complete" else ""
+    if not relative or not (root / relative).is_file():
+        # Nothing on disk (failed, cancelled, or already gone): only the entry goes.
+        return {**remove_download_job(job_id), "deleted": 0}
 
-    response = library_check.trash_files(root, STATE_DIR, [relative])
+    thumb = thumbnail_path(job_id)
+    with curation.open_favorites(library_root()) as db:
+        response = curation.remove_videos(
+            root,
+            STATE_DIR,
+            ARCHIVE_PATH,
+            [{"relative": relative, "url": job.get("url"), "thumb": str(thumb) if thumb else None}],
+            db,
+        )
     if response["ok"]:
         remove_download_job(job_id)
-    return response
+    return {**response, "deleted": response["removed"]}
+
+
+def remove_library_files(paths: list[Any], reason: str) -> dict[str, Any]:
+    if library_check.scan_is_running(STATE_DIR):
+        return {"ok": False, "error": "A library scan is running. Remove files when it has finished."}
+    root = library_root()
+    targets = []
+    for path in paths:
+        relative = str(path)
+        thumb = library_check.thumbs_dir(STATE_DIR) / f"{library_check.thumbnail_key(relative)}.jpg"
+        targets.append({"relative": relative, "thumb": str(thumb), "reason": reason})
+    with curation.open_favorites(library_root()) as db:
+        return curation.remove_videos(root, STATE_DIR, ARCHIVE_PATH, targets, db)
+
+
+def favorite_target(message: dict[str, Any]) -> Path:
+    """The file a favorites message is about: a dashboard job's, or a library path."""
+    root = library_root()
+    job_id = str(message.get("job_id") or "").strip()
+    if job_id:
+        job = get_download_job(job_id)
+        relative = job_video(job, root) if job else ""
+        if not relative:
+            raise ValueError(f"Only videos inside {root} can be favorites.")
+    else:
+        relative = str(message.get("relative") or "")
+    video = library_check.library_file(root, relative)
+    if not video.is_file():
+        raise ValueError("The video file is not there any more.")
+    return video
+
+
+def favorite_thumbnails(relatives: list[Any]) -> dict[str, Any]:
+    """Pictures for favorites, made on demand (a few per call: each reads a video)."""
+    root = library_root()
+    thumbs: dict[str, str] = {}
+    used = made = 0
+    for relative in relatives:
+        try:
+            video = library_check.library_file(root, relative)
+        except ValueError:
+            continue
+        key = library_check.thumbnail_key(str(relative))
+        picture = FAVORITE_THUMBS_DIR / f"{key}.jpg"
+        if not picture.is_file():
+            if made >= MAX_THUMBNAILS_MADE_PER_CALL or not video.is_file():
+                continue
+            made += 1
+            if not curation.grab_frame(video, picture):
+                continue
+        encoded = base64.b64encode(picture.read_bytes()).decode("ascii")
+        if used + len(encoded) > MAX_THUMBNAIL_RESPONSE_BYTES:
+            break
+        used += len(encoded)
+        thumbs[key] = encoded
+    return {"ok": True, "thumbs": thumbs}
+
+
+def removed_thumbnails(ids: list[Any]) -> dict[str, Any]:
+    thumbs: dict[str, str] = {}
+    used = 0
+    for record_id in ids:
+        if not re.fullmatch(r"[0-9a-f]{32}", str(record_id)):
+            continue
+        try:
+            data = (curation.removed_thumbs(STATE_DIR) / f"{record_id}.jpg").read_bytes()
+        except OSError:
+            continue
+        encoded = base64.b64encode(data).decode("ascii")
+        if used + len(encoded) > MAX_THUMBNAIL_RESPONSE_BYTES:
+            break
+        used += len(encoded)
+        thumbs[str(record_id)] = encoded
+    return {"ok": True, "thumbs": thumbs}
+
+
+def handle_curation_message(message_type: str, message: dict[str, Any]) -> dict[str, Any] | None:
+    """Favorites and removals; None when the message is not one of them."""
+    if message_type == "remove_download":
+        job_id = str(message.get("job_id", "")).strip()
+        if not job_id:
+            raise ValueError("Missing job_id field.")
+        return remove_download(job_id)
+
+    if message_type == "set_favorite":
+        video = favorite_target(message)
+        with curation.open_favorites(library_root()) as db:
+            on = curation.set_favorite(db, video, bool(message.get("favorite")))
+        return {"ok": True, "favorite": on, "group": curation.collection_of(library_root(), video)}
+
+    if message_type == "get_favorites":
+        group = message.get("group")
+        with curation.open_favorites(library_root()) as db:
+            return curation.favorites(db, library_root(), None if group is None else str(group))
+
+    if message_type == "get_favorite_thumbnails":
+        relatives = message.get("paths")
+        if not isinstance(relatives, list):
+            raise ValueError("get_favorite_thumbnails expects a paths list.")
+        return favorite_thumbnails(relatives)
+
+    if message_type == "play_favorites":
+        group = str(message.get("group") or "")
+        with curation.open_favorites(library_root()) as db:
+            curation.vtag.write_playlists(db)
+        playlist = curation.playlist_for(group)
+        if not group or not playlist.is_file():
+            return {"ok": False, "error": "That group has no favorites to play."}
+        return play_video(playlist)
+
+    if message_type == "get_removed":
+        return curation.removed_page(STATE_DIR, int(message.get("offset") or 0), int(message.get("limit") or 60))
+
+    if message_type == "get_removed_thumbnails":
+        ids = message.get("ids")
+        if not isinstance(ids, list):
+            raise ValueError("get_removed_thumbnails expects an ids list.")
+        return removed_thumbnails(ids)
+
+    if message_type == "allow_removed":
+        return curation.allow_again(STATE_DIR, ARCHIVE_PATH, str(message.get("id") or ""))
+
+    return None
+
+
+def removed_post_keys() -> set[str]:
+    try:
+        return curation.removed_url_keys(STATE_DIR, normalized_url_key)
+    except Exception as error:  # noqa: BLE001
+        log_line(f"Could not read the removed list: {error}")
+        return set()
 
 
 def library_thumbnails(keys: list[Any]) -> dict[str, Any]:
@@ -1999,13 +2164,16 @@ def handle_library_message(message_type: str, message: dict[str, Any]) -> dict[s
             STATE_DIR, kind, int(message.get("offset") or 0), int(message.get("limit") or 50)
         )
 
-    if message_type == "trash_library_files":
+    if message_type == "remove_library_files":
         paths = message.get("paths")
         if message.get("all_identical"):
             paths = library_check.extra_identical_files(STATE_DIR)
         if not isinstance(paths, list):
-            raise ValueError("trash_library_files expects a paths list.")
-        return library_check.trash_files(library_root(), STATE_DIR, paths)
+            raise ValueError("remove_library_files expects a paths list.")
+        reason = str(message.get("reason") or "removed")
+        if reason not in {"removed", "duplicate", "broken"}:
+            raise ValueError("remove_library_files: unknown reason.")
+        return remove_library_files(paths, reason)
 
     if message_type == "get_library_thumbnails":
         keys = message.get("keys")
@@ -2021,12 +2189,6 @@ def handle_library_message(message_type: str, message: dict[str, Any]) -> dict[s
             return play_video(video)
         open_folder(video.parent)
         return {"ok": True, "path": str(video.parent)}
-
-    if message_type == "trash_download":
-        job_id = str(message.get("job_id", "")).strip()
-        if not job_id:
-            raise ValueError("Missing job_id field.")
-        return trash_download(job_id)
 
     return None
 
@@ -2334,6 +2496,13 @@ def start_download_job(
         "updated_at": started_at,
     }
 
+    if normalized_url_key(normalized_url) in removed_post_keys():
+        return {
+            "ok": False,
+            "removed": True,
+            "error": "You removed this video. Use Allow Again in the Removed list to download it again.",
+        }
+
     def mutator(state: dict[str, Any]) -> dict[str, Any]:
         if not allow_duplicate:
             duplicate = duplicate_download_for_url(state, normalized_url)
@@ -2411,8 +2580,19 @@ def start_profile_download_jobs(
         seen_urls.add(url_key)
         video_urls.append(normalized_video_url)
 
+    # A removed video stays removed, even when duplicates are allowed.
+    removed_keys = removed_post_keys()
+    removed_count = sum(1 for url in video_urls if normalized_url_key(url) in removed_keys)
+    video_urls = [url for url in video_urls if normalized_url_key(url) not in removed_keys]
+
     limit_skipped_count = max(0, len(video_urls) - MAX_PROFILE_BATCH_JOBS)
     video_urls = video_urls[:MAX_PROFILE_BATCH_JOBS]
+
+    if not video_urls and removed_count:
+        return {
+            "ok": False,
+            "error": f"All {removed_count} videos found are ones you removed. Allow them again in the Removed list first.",
+        }
 
     if not video_urls:
         if rejected_count:
@@ -2536,6 +2716,7 @@ def start_profile_download_jobs(
         "skipped_count": response.get("skipped_count", 0),
         "rejected_count": rejected_count,
         "limit_skipped_count": limit_skipped_count + response.get("capped_count", 0),
+        "removed_count": removed_count,
         "download_dir": str(profile_dir),
         "log_path": str(LOG_PATH),
     }
@@ -3421,6 +3602,10 @@ def handle_message(message: dict[str, Any]) -> dict[str, Any]:
     library_response = handle_library_message(str(message_type), message)
     if library_response is not None:
         return library_response
+
+    curation_response = handle_curation_message(str(message_type), message)
+    if curation_response is not None:
+        return curation_response
 
     if message_type == "play_download":
         job_id = str(message.get("job_id", "")).strip()

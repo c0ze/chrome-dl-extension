@@ -23,6 +23,10 @@ def setUpModule() -> None:
     host.THUMBS_DIR = root / "thumbs"
     host.ARCHIVE_PATH = root / "archive.txt"
     host.HANDLES_PATH.write_text('{"handles": {}}')
+    # Favorites are vtag's: no test may reach the real database or playlists.
+    host.curation.vtag.DB_PATH = root / "vtag.db"
+    host.curation.vtag.PLAYLIST_DIR = root / "playlists"
+    host.FAVORITE_THUMBS_DIR = root / "favorite-thumbs"
 
 
 def tearDownModule() -> None:
@@ -1939,47 +1943,186 @@ class DownloadArchiveTests(unittest.TestCase):
         )
 
 
-class TrashDownloadTests(LibraryCase):
+class RemoveDownloadTests(LibraryCase):
+    """Remove deletes a finished download's file, keeps a record and stops it coming back."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        for name, value in (("DB_PATH", Path(temp.name) / "vtag.db"), ("PLAYLIST_DIR", Path(temp.name) / "pl")):
+            patcher = unittest.mock.patch.object(host.curation.vtag, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.video_path = self.video("group d/alice/alice-1234567890001.mp4")
+
     def job(self, **fields: Any) -> None:
-        self.write_jobs([{"id": "a" * 32, "url": "https://x.com/alice/status/1", "status": "complete", **fields}])
+        self.write_jobs(
+            [{"id": "a" * 32, "url": "https://x.com/alice/status/77", "status": "complete",
+              "filename": str(self.video_path), **fields}]
+        )
 
-    def test_a_finished_download_goes_to_the_trash_and_leaves_the_dashboard(self) -> None:
-        video = self.video("group d/alice/alice-1234567890001.mp4")
-        self.job(filename=str(video))
+    def remove(self) -> dict[str, Any]:
+        with unittest.mock.patch.object(host.curation, "video_length", return_value=3.0):
+            return host.remove_download("a" * 32)
 
-        response = host.trash_download("a" * 32)
+    def test_a_finished_download_is_deleted_recorded_and_leaves_the_dashboard(self) -> None:
+        self.job()
+
+        response = self.remove()
 
         self.assertTrue(response["ok"])
-        self.assertTrue((self.library / "_trash/group d/alice/alice-1234567890001.mp4").is_file())
+        self.assertFalse(self.video_path.exists())
         self.assertIsNone(host.get_download_job("a" * 32))
+        record = host.curation.read_removed(self.root)[0]
+        self.assertEqual(record["relative"], "group d/alice/alice-1234567890001.mp4")
+        self.assertEqual(record["url"], "https://x.com/alice/status/77")
+        self.assertEqual(record["group"], "group d")
 
-    def test_a_file_outside_the_library_is_left_alone(self) -> None:
+    def test_a_removed_video_is_never_downloaded_again(self) -> None:
+        self.job()
+        self.remove()
+
+        self.assertIn("twitter 1234567890001", host.ARCHIVE_PATH.read_text().splitlines())
+        with unittest.mock.patch.object(host, "launch_next_queued_job", return_value={"started": True}):
+            # Not even when the duplicate prompt is confirmed.
+            response = host.start_download_job("https://x.com/alice/status/77", "toolbar", str(self.library), True)
+        self.assertFalse(response["ok"])
+        self.assertTrue(response["removed"])
+
+    def test_allow_again_lifts_the_block(self) -> None:
+        self.job()
+        self.remove()
+        record = host.curation.read_removed(self.root)[0]
+
+        host.handle_message({"type": "allow_removed", "id": record["id"]})
+
+        self.assertNotIn("twitter 1234567890001", host.ARCHIVE_PATH.read_text().splitlines())
+        self.assertEqual(host.curation.read_removed(self.root), [])
+        with unittest.mock.patch.object(host, "launch_next_queued_job", return_value={"started": True}):
+            self.write_jobs([])
+            self.assertTrue(host.start_download_job("https://x.com/alice/status/77", "toolbar", str(self.library))["ok"])
+
+    def test_a_failed_download_only_leaves_the_list(self) -> None:
+        self.job(status="failed")
+
+        response = self.remove()
+
+        self.assertTrue(response["ok"])
+        self.assertTrue(self.video_path.exists())
+        self.assertEqual(host.curation.read_removed(self.root), [])
+
+    def test_a_file_outside_the_library_is_never_deleted(self) -> None:
         outside = self.root / "elsewhere.mp4"
         outside.write_bytes(b"x")
         self.job(filename=str(outside))
 
-        response = host.trash_download("a" * 32)
+        self.remove()
 
-        self.assertFalse(response["ok"])
         self.assertTrue(outside.exists())
-        self.assertIsNotNone(host.get_download_job("a" * 32))
 
-    def test_a_download_in_flight_is_not_trashed(self) -> None:
-        video = self.video("group d/alice/part.mp4")
-        self.job(filename=str(video), status="queued")
+    def test_a_download_in_flight_is_not_removed(self) -> None:
+        self.job(status="queued")
 
-        self.assertFalse(host.trash_download("a" * 32)["ok"])
-        self.assertTrue(video.exists())
+        self.assertFalse(self.remove()["ok"])
+        self.assertTrue(self.video_path.exists())
 
-    def test_library_messages_cannot_reach_outside_the_library(self) -> None:
-        with self.assertRaises(ValueError):
-            host.handle_library_message("play_library_file", {"path": "../../etc/passwd"})
-        with self.assertRaises(ValueError):
-            host.handle_library_message("get_library_report", {"kind": "everything"})
-        self.assertIsNone(host.handle_library_message("download", {}))
+    def test_a_removed_favorite_leaves_the_favorites_but_the_record_says_it_was_one(self) -> None:
+        self.job()
+        host.handle_message({"type": "set_favorite", "job_id": "a" * 32, "favorite": True})
 
-    def test_thumbnail_keys_cannot_name_other_files(self) -> None:
-        self.assertEqual(host.library_thumbnails(["../../x", "a" * 39, 5])["thumbs"], {})
+        self.remove()
+
+        self.assertEqual(host.handle_message({"type": "get_favorites"})["groups"], {})
+        self.assertTrue(host.curation.read_removed(self.root)[0]["favorite"])
+
+    def test_batches_leave_out_removed_videos(self) -> None:
+        self.job()
+        self.remove()
+        self.write_jobs([])
+        with unittest.mock.patch.object(host, "launch_next_queued_job", return_value={"started": True}):
+            response = host.start_profile_download_jobs(
+                "https://x.com/alice/media", "toolbar", str(self.library / "group d"),
+                ["https://x.com/alice/status/77", "https://x.com/alice/status/78"], True,
+            )
+        self.assertEqual(response["queued_count"], 1)
+        self.assertEqual(response["removed_count"], 1)
+
+
+class FavoritesTests(LibraryCase):
+    """Favorites are vtag's, so the downloader and Haruna's mouse button share them."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        for name, value in (("DB_PATH", Path(temp.name) / "vtag.db"), ("PLAYLIST_DIR", Path(temp.name) / "pl")):
+            patcher = unittest.mock.patch.object(host.curation.vtag, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.playlists = Path(temp.name) / "pl"
+        self.video_path = self.video("group c/bob/bob-1234567890009.mp4")
+        self.write_jobs(
+            [{"id": "b" * 32, "url": "https://x.com/bob/status/9", "status": "complete", "filename": str(self.video_path)}]
+        )
+
+    def test_a_dashboard_favorite_lands_in_its_groups_favorites_and_playlist(self) -> None:
+        host.handle_message({"type": "set_favorite", "job_id": "b" * 32, "favorite": True})
+
+        favorites = host.handle_message({"type": "get_favorites", "group": "group c"})
+
+        self.assertEqual(favorites["groups"], {"group c": 1})
+        self.assertEqual(favorites["items"][0]["relative"], "group c/bob/bob-1234567890009.mp4")
+        self.assertIn(str(self.video_path), (self.playlists / "group c" / "favorite.m3u").read_text())
+        self.assertTrue(host.get_jobs()["jobs"][0]["favorite"])
+
+    def test_a_favorite_made_in_haruna_shows_on_the_dashboard(self) -> None:
+        with host.curation.open_favorites(self.library) as db:
+            host.curation.vtag.set_tags(db, str(self.video_path), ["favorite"])
+
+        self.assertTrue(host.get_jobs()["jobs"][0]["favorite"])
+
+    def test_unfavorite(self) -> None:
+        host.handle_message({"type": "set_favorite", "job_id": "b" * 32, "favorite": True})
+        host.handle_message({"type": "set_favorite", "relative": "group c/bob/bob-1234567890009.mp4", "favorite": False})
+
+        self.assertEqual(host.handle_message({"type": "get_favorites"})["groups"], {})
+
+    def test_only_library_videos_can_be_favorites(self) -> None:
+        for relative in ("../x.mp4", "/etc/passwd", "group c/bob/notes.txt"):
+            with self.assertRaises(ValueError):
+                host.handle_message({"type": "set_favorite", "relative": relative, "favorite": True})
+
+
+class RemoveLibraryFilesTests(LibraryCase):
+    def setUp(self) -> None:
+        super().setUp()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        patcher = unittest.mock.patch.object(host.curation.vtag, "DB_PATH", Path(temp.name) / "vtag.db")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_library_check_removals_are_recorded_with_their_reason(self) -> None:
+        self.video("group d/alice/copy.mp4")
+        with unittest.mock.patch.object(host.curation, "video_length", return_value=None):
+            response = host.handle_message(
+                {"type": "remove_library_files", "paths": ["group d/alice/copy.mp4"], "reason": "duplicate"}
+            )
+
+        self.assertTrue(response["ok"])
+        self.assertFalse((self.library / "group d/alice/copy.mp4").exists())
+        self.assertEqual(host.curation.read_removed(self.root)[0]["reason"], "duplicate")
+
+    def test_only_library_videos_can_be_removed(self) -> None:
+        outside = self.root / "outside.mp4"
+        outside.write_bytes(b"x")
+        (self.library / "notes.txt").write_text("keep")
+        for path in ("../outside.mp4", str(outside), "notes.txt", "@eaDir/x.mp4", ""):
+            response = host.handle_message({"type": "remove_library_files", "paths": [path], "reason": "removed"})
+            self.assertFalse(response["ok"], path)
+        self.assertTrue(outside.exists())
+        self.assertTrue((self.library / "notes.txt").exists())
 
 
 class CheckedThroughTests(LibraryCase):
