@@ -97,7 +97,11 @@ is loaded.
   already has in that group (such as `group b/Bob B/`), files the author under
   the folder's parent group, `group a` or `group b`, instead of treating the
   folder as a group of its own. An author already listed under another group
-  gains the new group as well.
+  gains the new group as well. A post reached through a former handle is
+  filed under the creator's current handle, never as a second entry, and goes
+  into a folder named after the current handle in a group the creator is not
+  in yet. A handle list written by an earlier version, which stored a
+  creator's own folder as if it were a group, is read as the group it is in.
 - `Edit` on a handle renames it or files it under another group. A rename
   creates a folder for the new handle and moves the old handle's folder inside
   it, so one creator's videos stay under their current handle; renaming to a
@@ -107,15 +111,22 @@ is loaded.
   with no click. A post goes into `<group>/<handle>/`; a profile goes into the
   group once its scan ends, and the host adds the handle's folder. This holds
   for a creator with exactly one folder, also when the page was reached
-  through a former name, and the picker says `Downloading into group a / alice`
-  while it asks the host. A scan that stopped early is queued without the
+  through a former name (but not when that former name belongs to two
+  creators, which is no way to tell whose post it is), and the picker says
+  `Downloading into group a / alice` while it asks the host. Only the click
+  that opened the picker can start it: the toolbar button or the page menu on
+  the page, never a right-clicked link or a page with nothing to download. The
+  picker takes the one-time marker off its address as it opens, so reloading
+  it, restoring its tab or reopening the dashboard never starts a download
+  again. A scan that stopped early is queued without the
   confirmation, and the result message carries the warning. It is the same
   download as a click on `Start Download`, so the duplicate prompt, the refusal
   of videos you removed and the missing-folder handling all still apply.
   Choosing a destination yourself before it fires cancels it for that picker
   tab: typing in the folder field, `Choose Folder…`, `Start Download`,
   `Use Default`, a Recent Folder or a group button, even if you then decline
-  a confirmation. Nothing starts for a new creator, for one with folders in
+  a confirmation. The host's default folder, which arrives a moment after the
+  picker opens, never replaces a folder you typed or chose by then. Nothing starts for a new creator, for one with folders in
   several groups, or on any page that is not an X/Twitter post or profile
   (Facebook keeps the folder picker as it was).
 - On an X/Twitter post or profile (not on other X pages such as the home
@@ -155,7 +166,12 @@ is loaded.
   A finished download whose file is outside the download folder, or that the
   host cannot access, is never deleted: `Remove` takes it off the list and says
   the file was kept, and the player stays on that video. Only a file that is
-  confirmed gone lets the player move on.
+  confirmed gone lets the player move on. Nothing is deleted through a
+  symlinked folder either: a file whose real location is outside the download
+  folder is refused, and its record and the download archive are left alone. A
+  video removed from Favorites or Library Check, which has no post link of its
+  own, is refused by the post id in its file name, so another form of the
+  link cannot bring it back either.
 - Favorites are shared with `vtag`, the Haruna helper that lives in this
   repository (`native-host/vtag.py`, linked as `~/.local/bin/vtag` by the
   installer): Haruna's custom command `vtag fav`, bound to a mouse button,
@@ -169,6 +185,10 @@ is loaded.
   `0 ★ Favorites`. Only links are created or deleted there. Library
   Check and Import ignore links, and favoriting a video opened through a link
   favorites the video itself. `vtag sync` rebuilds the folders and playlists.
+  Such a favorite only plays in the downloader: its tile and the player offer
+  no Favorite, Remove, Folder or external player button and say `Manage this
+  video in its own folder`, since the host acts on videos inside the download
+  folder only.
 - The handle list holds every X/Twitter account you have downloaded from.
   `Check` (or `Check All`, or a group's `Check`) opens the handle's Posts tab
   in a background tab, reads down it, then does the same on its Videos tab
@@ -190,14 +210,23 @@ is loaded.
   `Check All` or a group's `Check` includes the handle. Afterwards the header
   shows `N new` with `Download` and `Seen`, which do what they do in the
   handle list, or `Nothing new` when the latest check since this page opened
-  found nothing (a check that found videos, or `Download` and `Seen` after
-  it, never reads as that). The handle list refreshes as usual. The buttons
+  read everything it had to and found nothing (a check that found videos, or
+  `Download` and `Seen` after it, never reads as that). A check that found
+  nothing but stopped before it had read it all, for example when the Videos
+  tab would not open, says `Checked (partial)` instead; check again. A creator
+  filed in several groups has no `Download` in this header, since it cannot say
+  which group the videos belong in: its `N new` has a tooltip pointing to the
+  `Download` on its row in the handle list, one per group. While a check runs
+  or waits for the permission prompt, `Import` and `Edit`'s `Save` are off
+  and refuse to run. The handle list refreshes as usual. The buttons
   do not fold the group, and a second `Check` clicked while one is running or
   waiting for the permission prompt is turned away.
 - Above the handle list's search box, one chip per group that has favorites
   (`★ group a 12`, in name order) opens that group's favorites in the
-  downloads column, where `Play` works as it does there. The row is hidden
-  when there are no favorites; the `★ Favorites` row inside each group stays.
+  downloads column, where `Play` works as it does there; opening one while
+  the player is open closes the player first, and an answer for a view you
+  have left is dropped. The row is hidden when there are no favorites; the
+  `★ Favorites` row inside each group stays.
 - A scan that hits its round limit on either tab, or whose Videos tab could not
   be opened after the Posts tab was read, is reported as partial, and starting
   a partial download asks for confirmation first. The videos that were found

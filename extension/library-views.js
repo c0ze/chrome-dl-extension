@@ -1,7 +1,7 @@
 // The two library views that take over the dashboard panel: a group's
 // favorites (shared with Haruna's vtag) and the videos you removed.
 
-import { formatBytes, formatDuration, playableFavorites } from "./grouping.js";
+import { OUTSIDE_LIBRARY_NOTE, formatBytes, formatDuration, playableFavorites } from "./grouping.js";
 
 const PAGE_SIZE = 60;
 const THUMBNAIL_BATCH = 24;
@@ -12,10 +12,21 @@ export function favoritesGroupFor(handleGroup) {
   return handleGroup || UNGROUPED_FAVORITES;
 }
 
-export function initLibraryViews({ callHost, showMessage, elements, onChanged, getPlayer, getPlayerName }) {
+export function initLibraryViews({
+  callHost,
+  showMessage,
+  elements,
+  onChanged,
+  getPlayer,
+  getPlayerName,
+  closePlayer = () => {},
+}) {
   let mode = null; // { kind: "favorites", group } or { kind: "removed" }
   let items = [];
   let total = 0;
+  // The newest load: an answer to an older one is dropped, so a slow response
+  // for the view that was left can never become the one on screen.
+  let loadTicket = 0;
   const thumbnails = new Map();
   const missing = new Set();
 
@@ -82,6 +93,9 @@ export function initLibraryViews({ callHost, showMessage, elements, onChanged, g
         part.textContent = text;
         meta.append(part);
       }
+      // A favorite outside the library folder has no path the host can act on
+      // (it is not in the library), so it only plays here.
+      const managed = Boolean(item.relative);
       if (!item.exists) {
         const badge = document.createElement("span");
         badge.className = "download-status failed";
@@ -90,27 +104,36 @@ export function initLibraryViews({ callHost, showMessage, elements, onChanged, g
       } else {
         picture.classList.add("playable");
         picture.addEventListener("click", () => play(item));
-        actions.append(
-          button("Play", "Play this video here", "", () => play(item)),
-          button(getPlayerName(), "Open this video in the configured player", "button-muted-small", () => {
-            void fileAction("play_library_file", item.relative);
-          }),
-          button("Folder", "Open the containing folder", "button-muted-small", () => {
-            void fileAction("open_library_folder", item.relative);
-          })
-        );
+        actions.append(button("Play", "Play this video here", "", () => play(item)));
+        if (managed) {
+          actions.append(
+            button(getPlayerName(), "Open this video in the configured player", "button-muted-small", () => {
+              void fileAction("play_library_file", item.relative);
+            }),
+            button("Folder", "Open the containing folder", "button-muted-small", () => {
+              void fileAction("open_library_folder", item.relative);
+            })
+          );
+        }
       }
-      actions.append(
-        button("★", "Remove from favorites", "favorite-button active", () => {
-          void unfavorite(item);
-        })
-      );
-      if (item.exists) {
+      if (managed) {
         actions.append(
-          button("Remove", "Delete this video from disk and keep it under Removed", "button-danger", () => {
-            void removeFromTile(item);
+          button("★", "Remove from favorites", "favorite-button active", () => {
+            void unfavorite(item);
           })
         );
+        if (item.exists) {
+          actions.append(
+            button("Remove", "Delete this video from disk and keep it under Removed", "button-danger", () => {
+              void removeFromTile(item);
+            })
+          );
+        }
+      } else {
+        const note = document.createElement("span");
+        note.className = "tile-note";
+        note.textContent = OUTSIDE_LIBRARY_NOTE;
+        actions.append(note);
       }
     } else {
       const parts = [`@${item.handle}`, item.group, formatBytes(item.size)];
@@ -241,27 +264,34 @@ export function initLibraryViews({ callHost, showMessage, elements, onChanged, g
 
   async function load(append = false) {
     const current = mode;
+    const ticket = ++loadTicket;
+    const stale = () => current !== mode || ticket !== loadTicket;
+    // The answer stays in these until it is known to be for the view on screen.
+    let loaded = [];
+    let loadedTotal = 0;
     try {
-      if (mode.kind === "favorites") {
-        const response = await hostAction({ type: "get_favorites", group: mode.group }, "Could not load the favorites.");
-        items = response.items;
-        total = items.length;
+      if (current.kind === "favorites") {
+        const response = await hostAction({ type: "get_favorites", group: current.group }, "Could not load the favorites.");
+        loaded = response.items;
+        loadedTotal = loaded.length;
       } else {
         const response = await hostAction(
           { type: "get_removed", offset: append ? items.length : 0, limit: PAGE_SIZE },
           "Could not load the removed videos."
         );
-        items = append ? [...items, ...response.items] : response.items;
-        total = response.total;
+        loaded = append ? [...items, ...response.items] : response.items;
+        loadedTotal = response.total;
       }
     } catch (error) {
-      showMessage("error", error.message);
-      items = [];
-      total = 0;
+      if (!stale()) {
+        showMessage("error", error.message);
+      }
     }
-    if (current !== mode) {
+    if (stale()) {
       return;
     }
+    items = loaded;
+    total = loadedTotal;
     render();
     void loadThumbnails();
   }
@@ -353,6 +383,8 @@ export function initLibraryViews({ callHost, showMessage, elements, onChanged, g
   }
 
   function open(next) {
+    // A player left open would cover the view that is about to replace this one.
+    closePlayer();
     mode = next;
     items = [];
     total = 0;

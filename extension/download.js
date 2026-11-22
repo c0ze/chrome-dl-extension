@@ -71,12 +71,16 @@ const elements = {
   viewTiles: document.getElementById("view-tiles"),
 };
 
-// `plan` says where this creator's downloads go (null until the handle list has
-// loaded, and for anything but an X/Twitter page). `started` is set by the first
-// download this tab sends, by hand or by itself, so nothing starts twice;
-// `folderEdited` is set once the user has chosen a destination (typed a folder,
-// Choose Folder…, or asked for a start by hand), which ends any pending auto-start.
+// `autoStart` is true only when the toolbar button or the page menu opened this
+// picker for something to download: the one case in which a download may start
+// by itself. `plan` says where this creator's downloads go (null until the
+// handle list has loaded, and for anything but an X/Twitter page). `started` is
+// set by the first download this tab sends, by hand or by itself, so nothing
+// starts twice; `folderEdited` is set once the user has chosen a destination
+// (typed a folder, Choose Folder…, or asked for a start by hand), which ends
+// any pending auto-start.
 const state = {
+  autoStart: false,
   defaultDirectory: "~/Downloads",
   folderEdited: false,
   handles: [],
@@ -84,6 +88,9 @@ const state = {
   partialAcknowledged: false,
   plan: null,
   playerName: playerLabel(""),
+  // The videos a Scan Again was started with: a continuation of the same page
+  // adds what it finds to them.
+  priorUrls: [],
   profileName: "",
   profileScanError: "",
   profileUrls: null,
@@ -253,12 +260,19 @@ function duplicatePromptText(duplicateJob, duplicateCount) {
   return `${intro}\n\n${title}${location}\n\nDownload duplicate video files anyway?`;
 }
 
+// Where to scroll before Scan Again: the tab a scan carries on from.
+function scrollAdvice() {
+  return batchTargetForUrl(state.targetUrl)?.provider === "facebook"
+    ? "the profile's reels page"
+    : "the profile's Posts or Media tab";
+}
+
 function partialScanMessage(count) {
   const label = count === 1 ? "video link" : "video links";
   return (
     `The scan stopped early, so this is only part of the profile: ${count} ${label} found so far. ` +
-    "Queue these first, then scroll further down the profile page and scan again to pick up " +
-    "older posts. A new scan starts from where the page is scrolled, and already queued videos are skipped."
+    `Queue these first, or scroll further down ${scrollAdvice()} and use Scan Again to ` +
+    "add older posts to them. Already queued videos are skipped."
   );
 }
 
@@ -266,8 +280,8 @@ function partialScanPromptText(count) {
   const label = count === 1 ? "video" : "videos";
   return (
     "The profile scan stopped early before it reached the end of this profile.\n\n" +
-    `Only ${count} ${label} were found so far. After queueing them, scroll further down the ` +
-    "profile page and scan again to find older posts.\n\n" +
+    `Only ${count} ${label} were found so far. To find older posts, scroll further down ` +
+    `${scrollAdvice()} and use Scan Again before queueing.\n\n` +
     `Queue these ${count} ${label} now anyway?`
   );
 }
@@ -387,9 +401,13 @@ function applyScanRecord(record) {
 
   state.scanSettled = true;
   state.scanStatus = "done";
-  const urls = Array.isArray(record.urls)
+  const found = Array.isArray(record.urls)
     ? record.urls.filter((url) => typeof url === "string" && url.startsWith("https://"))
     : [];
+  // A scan that carried on from where the page was scrolled only reports what it
+  // read from there, so it adds to the videos the picker already had.
+  const urls = record.continuation ? [...new Set([...state.priorUrls, ...found])] : found;
+  state.priorUrls = [];
   state.profileUrls = urls;
   state.profileName = record.profileName || "";
   state.scanPartial = Boolean(record.partial) && urls.length > 0;
@@ -478,6 +496,7 @@ async function requestRescan() {
 
   clearScanWatchdog();
   setRescanVisible(false);
+  state.priorUrls = state.profileUrls || [];
   state.scanSettled = false;
   state.scanStatus = "scanning";
   state.scanSeenAt = 0;
@@ -888,17 +907,21 @@ function checkStateFor(group) {
     entry,
     checking: handlesPanel.isChecking(entry.handle),
     nothingNew: !entry.pending_count && handlesPanel.foundNothingNew(entry.handle),
+    partial: !entry.pending_count && handlesPanel.checkedPartial(entry.handle),
   };
 }
 
 /**
  * The header's Check, and after a check `N new` with Download and Seen, or
- * "Nothing new". The buttons act on the handle list's entry as it is when they
- * are clicked, and call preventDefault so the group does not fold. Check asks
- * for the x.com permission, which needs this click: nothing may be awaited
- * before it.
+ * "Nothing new" (only after a check that read everything; one that stopped
+ * early says "Checked (partial)"). A creator filed in several groups gets no
+ * Download here, since the header cannot say which group the videos belong in:
+ * its row in the handle list has one per group. The buttons act on the handle
+ * list's entry as it is when they are clicked, and call preventDefault so the
+ * group does not fold. Check asks for the x.com permission, which needs this
+ * click: nothing may be awaited before it.
  */
-function makeCheckControls(group, { entry, checking, nothingNew }) {
+function makeCheckControls(group, { entry, checking, nothingNew, partial }) {
   const controls = document.createElement("span");
   controls.className = "group-check-controls";
 
@@ -907,6 +930,12 @@ function makeCheckControls(group, { entry, checking, nothingNew }) {
     const badge = document.createElement("span");
     badge.className = "handle-new";
     badge.textContent = pendingLabel(entry.pending_count);
+    const severalFolders = (entry.folders || []).length > 1;
+    if (severalFolders) {
+      badge.title =
+        "This creator is filed in several groups. Use Download on its row in the handle list, " +
+        "under the group the videos belong in.";
+    }
     const download = makeActionButton(
       "Download",
       `Queue the ${entry.pending_count} new videos into this handle's folder in ${entry.group || "the library"}`,
@@ -928,12 +957,14 @@ function makeCheckControls(group, { entry, checking, nothingNew }) {
     });
     download.disabled = checking;
     seen.disabled = checking;
-    controls.append(badge, download, seen);
-  } else if (nothingNew) {
+    controls.append(badge, ...(severalFolders ? [] : [download]), seen);
+  } else if (nothingNew || partial) {
     const note = document.createElement("span");
     note.className = "group-summary";
-    note.textContent = "Nothing new";
-    note.title = formatChecked(entry.last_checked);
+    note.textContent = nothingNew ? "Nothing new" : "Checked (partial)";
+    note.title = nothingNew
+      ? formatChecked(entry.last_checked)
+      : "The check stopped before it had read everything, so it cannot say nothing is new. Check again.";
     controls.append(note);
   }
 
@@ -1004,8 +1035,10 @@ function renderDownloads(jobs, totals) {
         checkState.entry.group,
         checkState.entry.pending_count,
         checkState.entry.last_checked,
+        (checkState.entry.folders || []).length,
         checkState.checking,
         checkState.nothingNew,
+        checkState.partial,
       ]
     );
   });
@@ -1296,7 +1329,7 @@ async function startDownload(directory, allowDuplicate = false, notice = "") {
       }
       const suffix = notes.length ? ` (${notes.join("; ")})` : "";
       const partialNote = state.scanPartial
-        ? " This was a partial scan — scroll the profile media page further and scan again for older posts."
+        ? ` This was a partial scan — scroll ${scrollAdvice()} further and use Scan Again for older posts.`
         : "";
       showMessage(
         state.scanPartial ? "warning" : "success",
@@ -1354,7 +1387,10 @@ async function initialize() {
     const defaultDirectory = config.download_dir || "~/Downloads";
 
     state.defaultDirectory = defaultDirectory;
-    elements.downloadDir.value = recentDirectories[0] || defaultDirectory;
+    // The config can arrive after the user has typed or chosen a folder.
+    if (!state.folderEdited) {
+      elements.downloadDir.value = recentDirectories[0] || defaultDirectory;
+    }
     renderRecentDirectories(recentDirectories);
 
     // The Play buttons carry the external player's name. The list and the
@@ -1375,6 +1411,23 @@ async function initialize() {
 }
 
 const params = new URLSearchParams(window.location.search);
+// The background adds auto=1 for one toolbar or page-menu click. It comes off
+// the address at once, so a reload, a restored tab or a copied link can never
+// start the download again.
+state.autoStart = params.get("auto") === "1";
+if (params.has("auto")) {
+  params.delete("auto");
+  const query = params.toString();
+  try {
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`
+    );
+  } catch (_error) {
+    // The address keeps the marker, but this page has already read it.
+  }
+}
 state.targetUrl = params.get("url") || "";
 state.source = params.get("source") || "extension";
 state.scanKey = params.get("profileBatchKey") || "";
@@ -1470,6 +1523,7 @@ function maybeAutoStart() {
     urlCount: state.profileUrls?.length || 0,
     folderEdited: state.folderEdited,
     started: state.started,
+    requested: state.autoStart,
   });
   if (!ready) {
     return;
@@ -1526,6 +1580,7 @@ const libraryViews = initLibraryViews({
   },
   getPlayer,
   getPlayerName: () => state.playerName,
+  closePlayer: () => inlinePlayer?.close(),
 });
 
 const handlesPanel = initHandles({

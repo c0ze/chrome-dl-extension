@@ -19,7 +19,7 @@ const FAVORITES = () => [
 
 // The favorites view over a fake host and a fake player that records how it
 // was opened. `fail` maps a host message type to the error it answers with.
-async function setup({ confirm = true, fail = {} } = {}) {
+async function setup({ confirm = true, fail = {}, hold = {}, favorites = {} } = {}) {
   const dom = new JSDOM(
     `<!doctype html><p id="label"></p><p id="summary"></p><div id="controls"></div>
      <div id="list"></div><div id="view" class="hidden"></div><button id="removed"></button>`,
@@ -34,10 +34,15 @@ async function setup({ confirm = true, fail = {} } = {}) {
   const messages = [];
   const opened = [];
   let changed = 0;
+  let playersClosed = 0;
   const callHost = async (payload) => {
     host.push(payload);
     if (fail[payload.type]) return { ok: false, error: fail[payload.type] };
-    if (payload.type === "get_favorites") return { ok: true, items: FAVORITES() };
+    if (payload.type === "get_favorites") {
+      // `hold[group]` keeps that group's answer back until the promise settles.
+      if (hold[payload.group]) await hold[payload.group];
+      return { ok: true, items: favorites[payload.group] || FAVORITES() };
+    }
     if (payload.type === "get_favorite_thumbnails") return { ok: true, thumbs: {} };
     if (payload.type === "set_favorite") return { ok: true, favorite: payload.favorite };
     return { ok: true, removed: 1 };
@@ -56,6 +61,7 @@ async function setup({ confirm = true, fail = {} } = {}) {
     onChanged: () => { changed += 1; },
     getPlayer: () => ({ open: (items, index, handlers) => opened.push({ items, index, handlers }) }),
     getPlayerName: () => "Haruna",
+    closePlayer: () => { playersClosed += 1; host.push({ type: "closePlayer" }); },
   });
   views.showFavorites("group a");
   await settle();
@@ -64,7 +70,7 @@ async function setup({ confirm = true, fail = {} } = {}) {
   const tiles = () => [...view.querySelectorAll(".download-tile")];
   const button = (tile, label) => [...tile.querySelectorAll("button")].find((b) => b.textContent === label);
   const count = (type) => host.filter((payload) => payload.type === type).length;
-  return { view, tiles, button, host, messages, opened, count, changed: () => changed, settle };
+  return { view, views, tiles, button, host, messages, opened, count, changed: () => changed, settle, playersClosed: () => playersClosed };
 }
 
 test("Play on a favorite opens the player over the favorites whose file is there", async () => {
@@ -198,4 +204,76 @@ test("Remove on a tile still deletes on the page and reports a failure there", a
   await page.settle();
   assert.deepEqual(page.messages, [["error", "Could not remove the video."]]);
   assert.equal(page.count("get_favorites"), 2);
+});
+
+const OTHER = [
+  { path: "/srv/archive/group b/carol/9.mp4", relative: "group b/carol/9.mp4", name: "9.mp4", handle: "carol",
+    exists: true, added: "2026-01-04 10:00:00", thumb: "k9" },
+];
+
+test("an answer for a view that was left cannot replace the one on screen", async () => {
+  let release;
+  const slow = new Promise((resolve) => (release = resolve));
+  // Group a's answer is held; group b is opened and answers first.
+  const page = await setup({ hold: { "group a": slow }, favorites: { "group b": OTHER } });
+  page.views.showFavorites("group b");
+  await page.settle();
+  assert.deepEqual(page.tiles().map((tile) => tile.querySelector(".download-title").textContent), ["9.mp4"]);
+
+  release();
+  await page.settle();
+
+  assert.deepEqual(
+    page.tiles().map((tile) => tile.querySelector(".download-title").textContent),
+    ["9.mp4"],
+    "group a's late answer did not take over"
+  );
+  page.button(page.tiles()[0], "Play").click();
+  assert.equal(page.opened.length, 1, "Play finds the tile that is shown");
+  assert.equal(page.opened[0].items[0].path, "/srv/archive/group b/carol/9.mp4");
+});
+
+test("a failed answer for a view that was left shows no message", async () => {
+  let release;
+  const slow = new Promise((resolve) => (release = resolve));
+  const page = await setup({ hold: { "group a": slow }, favorites: { "group b": OTHER } });
+  page.views.showFavorites("group b");
+  await page.settle();
+  page.host.length = 0;
+  release();
+  await page.settle();
+  assert.deepEqual(page.messages, []);
+});
+
+test("opening a favorites view closes an open player first", async () => {
+  const page = await setup();
+  assert.equal(page.playersClosed(), 1, "the first view closed any player too");
+  const before = page.host.length;
+
+  page.views.showFavorites("group b");
+
+  assert.equal(page.playersClosed(), 2);
+  assert.deepEqual(
+    page.host.slice(before).map((message) => message.type),
+    ["closePlayer", "get_favorites"],
+    "closed before the new view asked the host for anything"
+  );
+});
+
+test("a favorite outside the library only plays: no Favorite, Remove, Folder or external player", async () => {
+  const outside = {
+    path: "/elsewhere/clips/c.mp4", relative: "", name: "c.mp4", handle: "clips",
+    exists: true, added: "2026-01-05 10:00:00", thumb: "k5",
+  };
+  const page = await setup({ favorites: { "group a": [outside, ...FAVORITES().slice(0, 1)] } });
+  const [loose, inside] = page.tiles();
+
+  assert.deepEqual([...loose.querySelectorAll("button")].map((b) => b.textContent), ["Play"]);
+  assert.match(loose.textContent, /Manage this video in its own folder\./);
+  assert.ok([...inside.querySelectorAll("button")].map((b) => b.textContent).includes("Remove"));
+  assert.equal(inside.textContent.includes("Manage this video"), false);
+
+  page.button(loose, "Play").click();
+  assert.equal(page.opened[0].items[0].managed, false);
+  assert.equal(page.opened[0].items[1].managed, true);
 });

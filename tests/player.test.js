@@ -451,3 +451,45 @@ test("removing the last video reports closed once, after the remove", async () =
   await tick();
   assert.deepEqual(order, ["removed", "closed"]);
 });
+
+test("a video the host cannot act on plays with no Favorite, Remove or external player", () => {
+  const page = setup({ items: [] });
+  const list = [
+    { path: "/elsewhere/a.mp4", title: "alice", favorite: true, managed: false },
+    { path: "/srv/archive/b.mp4", title: "bob", favorite: true },
+  ];
+  page.player.open(list, 0, { toggleFavorite: async () => true, remove: async () => true, external: () => {} });
+  const hidden = (action) => page.button(action).classList.contains("hidden");
+
+  assert.deepEqual(["favorite", "remove", "external"].map(hidden), [true, true, true]);
+  assert.equal(page.root.querySelector(".player-note").classList.contains("hidden"), false);
+  assert.match(page.root.querySelector(".player-note").textContent, /Manage this video in its own folder/);
+  assert.equal(page.button("prev").classList.contains("hidden"), false, "Prev and Next still work");
+  assert.ok(page.video.src.endsWith("/elsewhere/a.mp4"), page.video.src);
+
+  page.button("next").click();
+  assert.deepEqual(["favorite", "remove", "external"].map(hidden), [false, false, false]);
+  assert.equal(page.root.querySelector(".player-note").classList.contains("hidden"), true);
+});
+
+test("opening over an open player ends the first session and clears its failure", async () => {
+  const closed = [];
+  const page = setup({
+    handlers: { toggleFavorite: async () => { throw new Error("The host said no."); }, closed: () => closed.push("first") },
+  });
+  page.button("favorite").click();
+  await tick();
+  assert.equal(page.failure().classList.contains("hidden"), false, "the failure is showing");
+
+  page.player.open([{ path: "/srv/archive/z.mp4", title: "zed", favorite: false }], 0, {
+    toggleFavorite: async () => true, remove: async () => true, external: () => {}, closed: () => closed.push("second"),
+  });
+
+  assert.deepEqual(closed, ["first"], "the first session settled when the second opened");
+  assert.equal(page.failure().classList.contains("hidden"), true, "the old failure is gone");
+  assert.ok(page.header().includes("@zed"), page.header());
+  assert.ok(page.video.src.endsWith("/srv/archive/z.mp4"), page.video.src);
+
+  page.button("close").click();
+  assert.deepEqual(closed, ["first", "second"]);
+});

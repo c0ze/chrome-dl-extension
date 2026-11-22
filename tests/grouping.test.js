@@ -266,13 +266,16 @@ test("the filesystem root as the library root still shows a path", () => {
   assert.equal(shortPath("/tmp/foo", "/"), "/tmp/foo");
 });
 test("auto-start waits for a profile scan to find videos", () => {
-  const base = { auto: { directory: "d" }, isProfile: true, scanStatus: "scanning", urlCount: 0, folderEdited: false, started: false };
+  const base = { auto: { directory: "d" }, isProfile: true, scanStatus: "scanning", urlCount: 0, folderEdited: false, started: false, requested: true };
   assert.equal(autoStartReady(base), false);
   assert.equal(autoStartReady({ ...base, scanStatus: "done", urlCount: 3 }), true);
   assert.equal(autoStartReady({ ...base, scanStatus: "done", urlCount: 0 }), false);
   assert.equal(autoStartReady({ ...base, isProfile: false }), true);
   assert.equal(autoStartReady({ ...base, isProfile: false, folderEdited: true }), false);
   assert.equal(autoStartReady({ ...base, isProfile: false, started: true }), false);
+  assert.equal(autoStartReady({ ...base, isProfile: false, requested: false }), false, "no marker, no auto-start");
+  assert.equal(autoStartReady({ ...base, isProfile: false, requested: undefined }), false);
+  assert.equal(autoStartReady({ ...base, scanStatus: "scanning", urlCount: 3 }), false);
 });
 
 test("the player steps through a group's finished downloads in display order", () => {
@@ -324,6 +327,14 @@ test("the player steps through the favorites whose file is still there", () => {
     ["/srv/archive/group a/bob/3.mp4", "bob", true],
   ]);
   assert.equal(items[1].item, favorites[2]);
+});
+
+test("a favorite outside the library is not managed, so the player only plays it", () => {
+  const items = playableFavorites([
+    { path: "/srv/archive/group a/alice/1.mp4", relative: "group a/alice/1.mp4", handle: "alice", exists: true },
+    { path: "/elsewhere/clips/2.mp4", relative: "", handle: "clips", exists: true },
+  ]);
+  assert.deepEqual(items.map((item) => item.managed), [true, false]);
 });
 
 test("a Remove that deleted the video is done", () => {

@@ -4,6 +4,9 @@
 
 const TWITTER_HOSTS = new Set(["x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"]);
 export const NO_HANDLE = "";
+// Shown for a favorite that lives outside the library folder: the host has no
+// path it may act on there, so the downloader only plays it.
+export const OUTSIDE_LIBRARY_NOTE = "Manage this video in its own folder.";
 
 export function jobHandle(job) {
   if (typeof job?.handle === "string" && job.handle) {
@@ -90,11 +93,15 @@ function cleanFilename(filename) {
   return String(filename || "").trim().replace(/^"+|"+$/g, "").trim();
 }
 
-/** The same for a favorites group: the favorites whose file is still there. */
+/**
+ * The same for a favorites group: the favorites whose file is still there. One
+ * outside the library folder has no `relative` path, so it is not `managed`:
+ * the player plays it but offers no Favorite, Remove or external player.
+ */
 export function playableFavorites(favorites) {
   return favorites
     .filter((item) => item.exists)
-    .map((item) => ({ path: item.path, title: item.handle, favorite: true, item }));
+    .map((item) => ({ path: item.path, title: item.handle, favorite: true, managed: Boolean(item.relative), item }));
 }
 
 /**
@@ -320,12 +327,13 @@ export function shortPath(path, root, home = "") {
 }
 
 /**
- * Whether the picker may start the download itself: the creator's folder is
+ * Whether the picker may start the download itself: it was opened by a toolbar
+ * or page-menu click for this download (`requested`), the creator's folder is
  * known, the user has not touched it, and nothing started yet. A profile also
  * waits for its scan to finish with videos in hand.
  */
-export function autoStartReady({ auto, isProfile, scanStatus, urlCount, folderEdited, started }) {
-  if (!auto || folderEdited || started) {
+export function autoStartReady({ auto, isProfile, scanStatus, urlCount, folderEdited, started, requested }) {
+  if (!requested || !auto || folderEdited || started) {
     return false;
   }
   return !isProfile || (scanStatus === "done" && urlCount > 0);

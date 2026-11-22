@@ -4,6 +4,8 @@
 // manifest's file:/// host permission and the extension's "Allow access to
 // file URLs" switch. Callers own what the buttons do (see `open`).
 
+import { OUTSIDE_LIBRARY_NOTE } from "./grouping.js";
+
 const NO_FILE_ACCESS =
   "Turn on “Allow access to file URLs” for this extension in chrome://extensions.";
 const PLAY_ERROR = "Could not play this file.";
@@ -92,8 +94,12 @@ export function createPlayer({ root, playerName }) {
   const actions = element("div", "player-actions");
   actions.append(prev, favorite, remove, external, next);
 
+  // For a video the host cannot act on (outside the library folder): Favorite,
+  // Remove and the external player are hidden and this says why.
+  const unmanaged = element("p", "player-note hidden", OUTSIDE_LIBRARY_NOTE);
+
   const box = element("div", "player-box");
-  box.append(head, notice, video, failure, actions);
+  box.append(head, notice, video, failure, unmanaged, actions);
   root.setAttribute("role", "dialog");
   root.setAttribute("aria-label", "Video player");
   root.replaceChildren(box);
@@ -133,6 +139,11 @@ export function createPlayer({ root, playerName }) {
     next.disabled = busy || index === items.length - 1;
     favorite.disabled = busy;
     remove.disabled = busy;
+    const managed = item.managed !== false;
+    for (const control of [favorite, remove, external]) {
+      control.classList.toggle("hidden", !managed);
+    }
+    unmanaged.classList.toggle("hidden", managed);
     favorite.textContent = `${item.favorite ? "★" : "☆"} Favorite`;
     favorite.title = item.favorite ? "Remove from favorites" : "Add to this group's favorites";
     favorite.classList.toggle("active", Boolean(item.favorite));
@@ -218,8 +229,10 @@ export function createPlayer({ root, playerName }) {
   });
   closeButton.addEventListener("click", () => close());
 
-  // items: [{ path, title, favorite }]; the objects are the caller's, and
-  // `favorite` is kept up to date on them. handlers:
+  // items: [{ path, title, favorite, managed? }]; the objects are the caller's,
+  // and `favorite` is kept up to date on them. `managed: false` marks a video
+  // outside the library folder: it plays, with no Favorite, Remove or external
+  // player. handlers:
   //   toggleFavorite(item) -> Promise<boolean>  the new favorite state
   //   remove(item)         -> Promise<boolean>  true when the file was deleted
   //   external(item)                            open it in the external player
@@ -230,6 +243,9 @@ export function createPlayer({ root, playerName }) {
   //                        itself closes at once.
   function open(items, index, handlers) {
     if (!items.length) return;
+    // Opening over an open player ends that session first, which settles its
+    // `closed()` and clears its failure notice.
+    if (session) close();
     session = {
       items: items.slice(),
       index: Math.min(Math.max(index, 0), items.length - 1),

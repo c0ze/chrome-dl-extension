@@ -854,6 +854,22 @@ input:disabled {
   margin: 0;
 }
 
+/* Said under a video that only plays (outside the library folder) and on its tile. */
+.player-note,
+.tile-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.player-note {
+  text-align: center;
+}
+
+.tile-note {
+  font-size: 0.78rem;
+}
+
 .player-actions {
   display: flex;
   flex-wrap: wrap;
@@ -909,6 +925,14 @@ input:disabled {
 
   .column:last-child {
     padding-bottom: 24px;
+  }
+
+  /* The columns stack and no longer scroll on their own, so a player over a
+     short list would spill onto the handle list below. The column is kept tall
+     enough to hold it: the player is the viewport less 46px, and the column
+     has 18px of padding above its content here. */
+  .column-downloads:has(> .player:not(.hidden)) {
+    min-height: calc(100vh - 46px + 18px);
   }
 }
 
