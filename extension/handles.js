@@ -317,7 +317,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onOpenF
       groups = Array.isArray(response.groups) ? response.groups : [];
       const favorites = await callHost({ type: "get_favorites" });
       favoriteCounts = favorites?.ok ? favorites.groups || {} : {};
-      onLoaded(handles);
+      onLoaded(handles, groups, typeof response.library_root === "string" ? response.library_root : "");
     } catch (error) {
       handles = [];
       progressText = error.message || "Handle list unavailable";

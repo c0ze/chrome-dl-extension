@@ -72,7 +72,7 @@ test("the last check is shown as an age", () => {
   assert.equal(formatChecked("2026-11-02 12:00:00", now), "checked 10 days ago");
 });
 
-import { folderForTarget, groupHandles, handleMatches, sortHandles } from "../extension/grouping.js";
+import { groupHandles, handleMatches, sortHandles } from "../extension/grouping.js";
 
 const handle = (name, extra = {}) => ({
   handle: name,
@@ -154,16 +154,6 @@ test("sorting by new videos and by library size", () => {
   ];
   assert.deepEqual(sortHandles(entries, "new").map((entry) => entry.handle), ["b", "a", "c"]);
   assert.deepEqual(sortHandles(entries, "videos").map((entry) => entry.handle), ["b", "c", "a"]);
-});
-
-test("a known handle's download is steered to the folder it already has", () => {
-  const entries = [handle("New_Name", { aliases: ["old_name"], base_dir: "/lib/group d" })];
-  // A profile batch: the host appends the handle's folder itself.
-  assert.equal(folderForTarget(entries, "new_name", true).directory, "/lib/group d");
-  // A single post, reached through the former handle.
-  assert.equal(folderForTarget(entries, "OLD_NAME", false).directory, "/lib/group d/New_Name");
-  assert.equal(folderForTarget(entries, "stranger", false), null);
-  assert.equal(folderForTarget(entries, "", false), null);
 });
 
 import { formatBytes, formatDuration, scanSummary } from "../extension/grouping.js";

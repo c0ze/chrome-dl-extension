@@ -202,28 +202,6 @@ export function groupHandles(entries, query, sort) {
     }));
 }
 
-/** The folder a download from this URL's handle belongs in, if the handle is known. */
-export function folderForTarget(entries, handle, isProfile) {
-  const wanted = String(handle || "").toLowerCase();
-  if (!wanted) {
-    return null;
-  }
-  const entry = entries.find(
-    (candidate) =>
-      candidate.handle.toLowerCase() === wanted ||
-      (candidate.aliases || []).some((alias) => String(alias).toLowerCase() === wanted)
-  );
-  if (!entry || !entry.base_dir) {
-    return null;
-  }
-  // A profile batch names its base folder and the host adds the handle's own
-  // folder; a single post is saved exactly where the path points.
-  return {
-    entry,
-    directory: isProfile ? entry.base_dir : `${entry.base_dir}/${entry.name}`,
-  };
-}
-
 function findHandleEntry(entries, handle) {
   const wanted = String(handle || "").toLowerCase();
   if (!wanted) {

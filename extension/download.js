@@ -1,14 +1,17 @@
 import { batchTargetForUrl } from "./providers.js";
 import {
-  folderForTarget,
+  autoStartReady,
+  downloadPlan,
+  groupDirectory,
   groupJobsByHandle,
   groupSummary,
-  jobHandle,
   playableJobs,
+  shortPath,
   videoRemoved,
 } from "./grouping.js";
 import { initHandles } from "./handles.js";
 import { initLibraryViews } from "./library-views.js";
+import { autoStartNotice, pickerTarget, renderGroupButtons } from "./picker.js";
 import { createPlayer, playerLabel } from "./player.js";
 
 const HOST_NAME = "dev.arda.ytdlp_host";
@@ -49,6 +52,7 @@ const elements = {
   libraryView: document.getElementById("library-view"),
   player: document.getElementById("player"),
   removedButton: document.getElementById("removed-button"),
+  groupButtons: document.getElementById("group-buttons"),
   handleGroups: document.getElementById("handle-groups"),
   handleList: document.getElementById("handle-list"),
   handleSearch: document.getElementById("handle-search"),
@@ -64,9 +68,18 @@ const elements = {
   viewTiles: document.getElementById("view-tiles"),
 };
 
+// `plan` says where this creator's downloads go (null until the handle list has
+// loaded, and for anything but an X/Twitter page). `started` is set by the first
+// download this tab sends, by hand or by itself, so nothing starts twice;
+// `folderEdited` is set once the user has chosen a folder, which ends any
+// pending auto-start.
 const state = {
   defaultDirectory: "~/Downloads",
+  folderEdited: false,
+  handles: [],
+  libraryRoot: "",
   partialAcknowledged: false,
+  plan: null,
   playerName: playerLabel(""),
   profileName: "",
   profileScanError: "",
@@ -78,6 +91,7 @@ const state = {
   scanSettled: false,
   scanStatus: "none",
   source: "extension",
+  started: false,
   targetUrl: "",
 };
 
@@ -159,7 +173,12 @@ async function forgetRecentDirectory(directory) {
   return next;
 }
 
+// Kept so the buttons can be drawn again, with shorter paths, once the library
+// root arrives.
+let shownRecentDirectories = [];
+
 function renderRecentDirectories(directories) {
+  shownRecentDirectories = directories;
   elements.recentList.textContent = "";
 
   if (!directories.length) {
@@ -175,7 +194,7 @@ function renderRecentDirectories(directories) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "recent-button";
-    button.textContent = directory;
+    button.textContent = shortPath(directory, state.libraryRoot);
     button.title = `Download to ${directory}`;
     button.addEventListener("click", () => {
       void startDownload(directory);
@@ -265,9 +284,11 @@ function applyBusyState() {
   elements.browseButton.disabled = downloadBusy;
   elements.downloadDir.disabled = downloadBusy;
   elements.rescanButton.disabled = blocked;
-  elements.recentList.querySelectorAll("button").forEach((button) => {
-    button.disabled = blocked;
-  });
+  for (const container of [elements.recentList, elements.groupButtons]) {
+    container.querySelectorAll("button").forEach((button) => {
+      button.disabled = blocked;
+    });
+  }
 }
 
 function setBusy(isBusy) {
@@ -391,6 +412,7 @@ function applyScanRecord(record) {
 
   releaseScanRecord();
   applyBusyState();
+  maybeAutoStart();
 }
 
 async function readScanRecord() {
@@ -1061,7 +1083,9 @@ function stopDashboardPolling() {
   clearPollTimer();
 }
 
-async function startDownload(directory, allowDuplicate = false) {
+// `notice` is what to say while the request is out (the auto-start's "Downloading
+// into …"); the result replaces it.
+async function startDownload(directory, allowDuplicate = false, notice = "") {
   const selectedDirectory = directory.trim();
   if (!selectedDirectory) {
     showMessage("error", "Enter a folder path first.");
@@ -1097,7 +1121,12 @@ async function startDownload(directory, allowDuplicate = false) {
     state.partialAcknowledged = true;
   }
 
-  hideMessage();
+  state.started = true;
+  if (notice) {
+    showMessage("info", notice);
+  } else {
+    hideMessage();
+  }
   setBusy(true);
 
   try {
@@ -1160,10 +1189,10 @@ async function startDownload(directory, allowDuplicate = false) {
         : "";
       showMessage(
         state.scanPartial ? "warning" : "success",
-        `Queued ${count} profile ${label} in ${response.download_dir}${suffix}.${partialNote}`
+        `Queued ${count} profile ${label} in ${shortPath(response.download_dir || selectedDirectory, state.libraryRoot)}${suffix}.${partialNote}`
       );
     } else {
-      showMessage("success", `Download queued in ${selectedDirectory}`);
+      showMessage("success", `Download queued in ${shortPath(selectedDirectory, state.libraryRoot)}`);
     }
     void pollDownloads();
     void handlesPanel.refresh();
@@ -1265,6 +1294,7 @@ elements.defaultButton.addEventListener("click", () => {
 
 elements.browseButton.addEventListener("click", async () => {
   hideMessage();
+  state.folderEdited = true;
   elements.browseButton.disabled = true;
 
   try {
@@ -1305,35 +1335,74 @@ elements.clearButton.addEventListener("click", () => {
 elements.viewTiles.addEventListener("click", () => setDownloadsView("tiles"));
 elements.viewList.addEventListener("click", () => setDownloadsView("list"));
 
-/**
- * A handle that is already in the library downloads into the folder it has
- * there, so one creator's videos stay together. Applied once, when the handle
- * list first loads, and never over a folder the user has typed.
- */
-let knownFolderApplied = false;
-let folderEdited = false;
+// Typing a folder ends any pending auto-start: from then on the folder is the
+// user's. (Choose Folder… does the same, above.)
 elements.downloadDir.addEventListener("input", () => {
-  folderEdited = true;
+  state.folderEdited = true;
 });
 
-function applyKnownHandleFolder(handles) {
-  if (knownFolderApplied || folderEdited || !state.targetUrl) {
+/**
+ * Starts the download without a click when it is certain where it goes: the
+ * creator has exactly one folder, the user has not chosen another, and nothing
+ * started yet. A profile waits for its scan. It goes through startDownload, so
+ * the duplicate prompt, the removed-video refusal and a missing folder are
+ * handled as for a click. Called when the handle list loads and when a scan
+ * ends. A partial scan is queued without the confirmation (the success message
+ * carries the warning).
+ */
+function maybeAutoStart() {
+  const auto = state.plan?.auto;
+  const ready = autoStartReady({
+    auto,
+    isProfile: pickerTarget(state.targetUrl).isProfile,
+    scanStatus: state.scanStatus,
+    urlCount: state.profileUrls?.length || 0,
+    folderEdited: state.folderEdited,
+    started: state.started,
+  });
+  if (!ready) {
     return;
   }
-  knownFolderApplied = true;
 
-  const target = batchTargetForUrl(state.targetUrl);
-  const handle = target?.provider === "twitter" ? target.key : jobHandle({ url: state.targetUrl });
-  const known = folderForTarget(handles, handle, Boolean(target));
-  if (!known) {
-    return;
+  state.started = true;
+  state.partialAcknowledged = true;
+  elements.downloadDir.value = auto.directory;
+  void startDownload(auto.directory, false, autoStartNotice(auto));
+}
+
+function pickGroup(group) {
+  const { handle, isProfile } = pickerTarget(state.targetUrl);
+  void startDownload(groupDirectory(state.libraryRoot, group, handle, state.handles, isProfile));
+}
+
+/**
+ * Called each time the handle list loads. Works out where this page's creator
+ * goes, draws the group buttons (X/Twitter pages only, and only once the library
+ * root is known, since a group's folder is under it), shows the creator's folder
+ * in the field while the user has not chosen one, and starts the download if it
+ * may.
+ */
+function onHandlesLoaded(handles, groups, libraryRoot) {
+  const rootChanged = libraryRoot !== state.libraryRoot;
+  state.handles = handles;
+  state.libraryRoot = libraryRoot;
+  if (rootChanged) {
+    renderRecentDirectories(shownRecentDirectories);
   }
 
-  elements.downloadDir.value = known.directory;
-  if (elements.message.classList.contains("hidden")) {
-    const group = known.entry.group ? ` in "${known.entry.group}"` : "";
-    showMessage("info", `@${known.entry.handle} is already in your library${group}; the folder is set to it.`);
+  const target = pickerTarget(state.targetUrl);
+  state.plan = target.twitter ? downloadPlan(handles, target.handle, target.isProfile) : null;
+  renderGroupButtons(elements.groupButtons, {
+    groups: state.plan && libraryRoot ? groups : [],
+    highlight: state.plan?.groups || [],
+    onPick: pickGroup,
+  });
+  applyBusyState();
+
+  if (state.plan?.auto && !state.folderEdited && !state.started) {
+    elements.downloadDir.value = state.plan.auto.directory;
   }
+  maybeAutoStart();
 }
 
 const libraryViews = initLibraryViews({
@@ -1353,7 +1422,7 @@ const handlesPanel = initHandles({
   callHost,
   showMessage,
   onQueued: () => void pollDownloads(),
-  onLoaded: applyKnownHandleFolder,
+  onLoaded: onHandlesLoaded,
   elements,
 });
 

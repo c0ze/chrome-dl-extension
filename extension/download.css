@@ -166,6 +166,7 @@ input:focus {
 
 .button,
 .recent-button,
+.group-button,
 .icon-button {
   border: 0;
   border-radius: 8px;
@@ -189,13 +190,15 @@ input:focus {
 
 .button:disabled,
 .recent-button:disabled,
+.group-button:disabled,
 input:disabled {
   cursor: not-allowed;
   opacity: 0.62;
 }
 
 .button:hover,
-.recent-button:hover {
+.recent-button:hover,
+.group-button:hover {
   filter: brightness(1.04);
   transform: translateY(-1px);
 }
@@ -221,6 +224,28 @@ input:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.group-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.group-button {
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.68);
+  color: var(--ink);
+  border: 1px solid rgba(33, 27, 21, 0.1);
+  font-size: 0.86rem;
+}
+
+/* The groups this creator already has a folder in. */
+.group-button.highlighted {
+  background: var(--accent);
+  border-color: var(--accent-strong);
+  color: white;
 }
 
 .dashboard-header {

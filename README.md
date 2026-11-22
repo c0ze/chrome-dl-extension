@@ -98,8 +98,34 @@ is loaded.
   it, so one creator's videos stay under their current handle; renaming to a
   handle that is already listed merges the two the same way. `Add` follows a
   handle before anything is downloaded from it.
-- A download from a handle that is already in the library is pointed at the
-  folder that handle has, also when the page was reached through a former name.
+- A download from a creator who is already in the library starts by itself,
+  with no click. A post goes into `<group>/<handle>/`; a profile goes into the
+  group once its scan ends, and the host adds the handle's folder. This holds
+  for a creator with exactly one folder, also when the page was reached
+  through a former name, and the picker says `Downloading into group a / alice`
+  while it asks the host. A scan that stopped early is queued without the
+  confirmation, and the result message carries the warning. It is the same
+  download as a click on `Start Download`, so the duplicate prompt, the refusal
+  of videos you removed and the missing-folder handling all still apply.
+  Typing in the folder field, or using `Choose Folder…`, before it fires
+  cancels it. Nothing starts for a new creator, for one with folders in
+  several groups, or on any page that is not an X/Twitter post or profile
+  (Facebook keeps the folder picker as it was).
+- On X/Twitter pages the picker has a `Groups` panel above Recent Folders with
+  one button per group in the library. A click downloads into that group: a
+  post goes into the author's folder there (the folder the author already has
+  in that group, else `<group>/<handle>/`) and a profile into the group
+  itself, where the host adds the handle's folder. That is how a new creator
+  gets filed, and how a creator with several folders picks one: the groups
+  the creator is already filed under are highlighted. Clicking another group
+  adds it to the creator's folders. The panel is hidden when the library has no
+  groups or when the host does not report the library folder.
+- Folder paths in the picker are shown from the library folder's parent:
+  `media/twitter/group a/alice` for
+  `/srv/archive/media/twitter/group a/alice`. This applies to Recent Folders and
+  to the messages after a download starts. A folder outside that prefix is
+  shown in full. The tooltip and what is sent to the host are always the full
+  path.
 - Finished videos are recorded in yt-dlp's download archive
   (`~/.local/state/yt-dlp-browser-host/archive.txt`), and `Import` adds the
   videos already on disk whose file names carry their id. A video in the
