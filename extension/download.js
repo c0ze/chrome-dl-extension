@@ -887,7 +887,7 @@ function checkStateFor(group) {
   return {
     entry,
     checking: handlesPanel.isChecking(entry.handle),
-    nothingNew: !entry.pending_count && handlesPanel.wasChecked(entry.handle),
+    nothingNew: !entry.pending_count && handlesPanel.foundNothingNew(entry.handle),
   };
 }
 

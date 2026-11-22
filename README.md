@@ -184,9 +184,11 @@ is loaded.
   it too). The button reads `Checking…` while the check runs, also when
   `Check All` or a group's `Check` includes the handle. Afterwards the header
   shows `N new` with `Download` and `Seen`, which do what they do in the
-  handle list, or `Nothing new` once a check since this page opened found
-  nothing. The handle list refreshes as usual. The buttons do not fold the
-  group.
+  handle list, or `Nothing new` when the latest check since this page opened
+  found nothing (a check that found videos, or `Download` and `Seen` after
+  it, never reads as that). The handle list refreshes as usual. The buttons
+  do not fold the group, and a second `Check` clicked while one is running or
+  waiting for the permission prompt is turned away.
 - Above the handle list's search box, one chip per group that has favorites
   (`★ group a 12`, in name order) opens that group's favorites in the
   downloads column, where `Play` works as it does there. The row is hidden

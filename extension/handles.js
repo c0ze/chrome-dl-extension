@@ -15,12 +15,13 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
   let busy = false;
   let progressText = "";
   let staleFound = [];
-  // Lower-cased handles: the ones in the check that is running, and the ones a
-  // check has finished for since this page opened (a failed check removes its
-  // handle again). The downloads pane reads both through `isChecking` and
-  // `wasChecked`.
+  // Lower-cased handles: the ones in the check that is running, and the ones
+  // whose latest check since this page opened found nothing new. A later check
+  // of the handle, a failed one, Download and Seen all take it out of the
+  // second set again. The downloads pane reads them through `isChecking` and
+  // `foundNothingNew`.
   const checking = new Set();
-  const checked = new Set();
+  const foundNothing = new Set();
   let editing = null;
   let adding = false;
   // Groups start closed (a library has hundreds of handles); a group the user
@@ -366,7 +367,10 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
     await refresh();
   }
 
-  const markSeen = (entry) => simpleAction("mark_handle_seen", entry);
+  function markSeen(entry) {
+    foundNothing.delete(entry.handle.toLowerCase());
+    return simpleAction("mark_handle_seen", entry);
+  }
 
   async function addHandle(handle, group) {
     try {
@@ -441,6 +445,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
   }
 
   async function downloadPending(entry, rowGroup) {
+    foundNothing.delete(entry.handle.toLowerCase());
     try {
       const response = await hostAction(
         { type: "download_handle_pending", handle: entry.handle, group: rowGroup },
@@ -495,8 +500,11 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
       return;
     }
 
-    // Asked for here, on the click: Chrome only shows the prompt for a user
-    // gesture, and a scan cannot read a tab it opened itself without it.
+    // The slot is taken before the permission is asked for, so a second Check
+    // during the prompt finds it busy. The request stays the first await: Chrome
+    // only shows the prompt for a user gesture, and a scan cannot read a tab it
+    // opened itself without it.
+    busy = true;
     let granted = false;
     try {
       granted = await chrome.permissions.request({ origins: SCAN_ORIGINS });
@@ -504,20 +512,21 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
       granted = false;
     }
     if (!granted) {
+      busy = false;
+      render();
       showMessage("error", "Checking profiles needs permission to read x.com.");
       return;
     }
 
-    busy = true;
     let found = 0;
     const failures = [];
     staleFound = [];
-    for (const entry of entries) {
-      checking.add(entry.handle.toLowerCase());
-      checked.delete(entry.handle.toLowerCase());
-    }
-    onChanged();
     try {
+      for (const entry of entries) {
+        checking.add(entry.handle.toLowerCase());
+        foundNothing.delete(entry.handle.toLowerCase());
+      }
+      onChanged();
       for (const [index, entry] of entries.entries()) {
         progressText = `Checking ${index + 1} of ${entries.length}: @${entry.handle}`;
         render();
@@ -525,7 +534,9 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
           const pending = await checkOne(entry);
           if (pending !== null) {
             found += pending;
-            checked.add(entry.handle.toLowerCase());
+            if (pending === 0) {
+              foundNothing.add(entry.handle.toLowerCase());
+            }
           }
         } catch (error) {
           failures.push(`@${entry.handle}: ${error.message}`);
@@ -589,10 +600,11 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
       const entry = findHandleEntry(handles, handle);
       return Boolean(entry) && checking.has(entry.handle.toLowerCase());
     },
-    // True when a check of this handle finished since this page opened.
-    wasChecked: (handle) => {
+    // True when this handle's latest check since this page opened found nothing
+    // new, and no Download or Seen has happened since.
+    foundNothingNew: (handle) => {
       const entry = findHandleEntry(handles, handle);
-      return Boolean(entry) && checked.has(entry.handle.toLowerCase());
+      return Boolean(entry) && foundNothing.has(entry.handle.toLowerCase());
     },
   };
 }
