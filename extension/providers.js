@@ -55,14 +55,17 @@ export function twitterProfileUsername(rawUrl) {
     if (!TWITTER_HOSTS.includes(url.hostname)) {
       return null;
     }
-    const parts = url.pathname.split("/").filter(Boolean);
-    if (parts.length === 0 || parts.length > 2) {
+    // Exactly one leading slash, a single separator before an optional tab and
+    // an optional trailing slash: empty segments (//alice, /alice//likes) are
+    // other paths, not the profile.
+    const match = url.pathname.match(/^\/([^/]+)(?:\/([^/]+))?\/?$/);
+    if (!match) {
       return null;
     }
-    if (parts.length === 2 && !TWITTER_PROFILE_TABS.includes(parts[1].toLowerCase())) {
+    const [, candidate, tab] = match;
+    if (tab !== undefined && !TWITTER_PROFILE_TABS.includes(tab.toLowerCase())) {
       return null;
     }
-    const candidate = parts[0];
     if (!/^[A-Za-z0-9_]{1,15}$/.test(candidate)) {
       return null;
     }

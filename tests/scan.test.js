@@ -37,7 +37,8 @@ test("every profile tab is the same batch target", () => {
 });
 
 test("a post, an unknown tab or a reserved route is not a profile", () => {
-  for (const path of ["alice/status/1001", "alice/followers", "search", "compose/post", "home/media", "i/lists"]) {
+  for (const path of ["alice/status/1001", "alice/followers", "search", "compose/post", "home/media", "i/lists",
+                      "/alice", "alice//likes"]) {
     assert.equal(batchTargetForUrl(`https://x.com/${path}`), null, path);
   }
 });
