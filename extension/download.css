@@ -721,6 +721,89 @@ input:disabled {
   opacity: 0.55;
 }
 
+/* The inline player covers the downloads column. It is the column's first
+   child, sticky so it stays over the viewport when the column is scrolled,
+   and takes no height of its own (the negative bottom margin) so the list
+   keeps its place and scroll position for when it closes; meanwhile the list
+   is invisible rather than gone. The 46px is the column's own vertical
+   padding. */
+.player {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  height: calc(100vh - 46px);
+  margin-bottom: calc(46px - 100vh);
+}
+
+.column-downloads:has(> .player:not(.hidden)) > .panel {
+  visibility: hidden;
+}
+
+.player-box {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: var(--shadow);
+}
+
+.player-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.player-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.player-close {
+  min-width: 36px;
+}
+
+.player-video {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  border-radius: 8px;
+  background: #000;
+  object-fit: contain;
+}
+
+.player-notice {
+  margin: 0;
+}
+
+.player-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.player-actions .download-action-button {
+  padding: 9px 14px;
+  font-size: 0.85rem;
+}
+
+.player-actions .download-action-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 @media (max-width: 1250px) {
   .layout {
     grid-template-columns: minmax(320px, 400px) minmax(0, 1fr);
