@@ -3,6 +3,7 @@ import {
   FACEBOOK_HOSTS,
   RESERVED_PROFILE_USERNAMES,
   batchTargetForUrl,
+  mergeScanPasses,
   profileScanChunk,
   twitterMediaUrl,
   twitterPostsUrl,
@@ -106,39 +107,161 @@ async function restoreScrollPosition(tabId, scrollY) {
   }
 }
 
-async function scanProfileTab(tabId, provider, username, key) {
-  if (provider === "twitter") {
-    try {
-      await showTwitterPosts(tabId, username);
-    } catch (error) {
-      await writeScanRecord(key, {
-        status: "error",
-        provider,
-        username,
-        error: error?.message || "Could not open the profile's Posts tab.",
-      });
-      return;
-    }
-  }
-  await runProfileScan(tabId, provider, username, key);
-}
-
-async function runProfileScan(
-  tabId,
-  provider,
-  expectedUsername,
-  key,
-  maxRounds = PROFILE_SCAN_MAX_ROUNDS,
-  stopAtId = null
-) {
+/**
+ * Scans a profile page for the picker and settles `key` with one final record.
+ * A Twitter profile is read twice, Posts then Media, in the tab it was started
+ * from; the tab is put back on `returnUrl` afterwards.
+ */
+async function scanProfileTab(tabId, provider, username, key, returnUrl = null) {
   if (activeScans.has(key)) {
     return;
   }
 
   activeScans.add(key);
+  try {
+    if (provider === "twitter") {
+      await scanTwitterProfile(tabId, username, key, returnUrl);
+    } else {
+      await runProfileScan(tabId, provider, username, key);
+    }
+  } finally {
+    activeScans.delete(key);
+  }
+}
+
+async function runProfileScan(tabId, provider, username, key) {
+  const pass = await scanPass(tabId, provider, username, key);
+  await writeScanRecord(key, scanRecord(provider, username, pass, pass.profileName));
+  await restoreScrollPosition(tabId, pass.originalScrollY);
+}
+
+// The one record that settles a scan; `merged` says how it ended.
+function scanRecord(provider, username, merged, profileName = "") {
+  if (!merged.ok) {
+    return {
+      status: "error",
+      provider,
+      username,
+      gone: merged.gone,
+      error: merged.error || "Could not scan the profile media page.",
+    };
+  }
+  return {
+    status: "done",
+    provider,
+    username,
+    urls: merged.urls,
+    found: merged.urls.length,
+    partial: merged.partial,
+    newestId: merged.newestId,
+    profileName,
+  };
+}
+
+async function scanTwitterProfile(tabId, username, key, returnUrl) {
+  let postsPass = null;
+  let mediaPass = null;
+  try {
+    try {
+      await showTwitterPosts(tabId, username);
+    } catch (error) {
+      await writeScanRecord(key, {
+        status: "error",
+        provider: "twitter",
+        username,
+        error: error?.message || "Could not open the profile's Posts tab.",
+      });
+      return;
+    }
+
+    postsPass = await scanPass(tabId, "twitter", username, key);
+    if (postsPass.ok) {
+      mediaPass = await scanTwitterMedia(tabId, username, key, postsPass);
+    }
+    const merged = mergeScanPasses(postsPass, mediaPass);
+    await writeScanRecord(key, scanRecord("twitter", username, merged, postsPass.profileName));
+  } finally {
+    await returnToStartPage(tabId, username, returnUrl, postsPass, mediaPass);
+  }
+}
+
+/**
+ * The Media pass of a Twitter scan, after the Posts pass: moves the tab to the
+ * Media tab and reads it, counting the Posts videos as already found. Never
+ * throws: a Media tab that will not open is a failed pass, which the merge
+ * keeps the Posts videos for.
+ */
+async function scanTwitterMedia(tabId, username, key, postsPass, { stopAtId = null } = {}) {
+  try {
+    // Nothing is written while the tab loads, which can outlast the picker's
+    // watchdog; this keeps the scan looking alive.
+    await writeScanRecord(key, {
+      status: "scanning",
+      provider: "twitter",
+      username,
+      found: postsPass.urls.length,
+    });
+    await showTabUrl(tabId, twitterMediaUrl(username));
+  } catch (error) {
+    return { ok: false, error: error?.message || "Could not open the profile's Media tab.", urls: [] };
+  }
+  return scanPass(tabId, "twitter", username, key, { stopAtId, carryUrls: postsPass.urls });
+}
+
+/**
+ * Puts the tab back on the page the scan was started from and, when that is the
+ * Posts or Media tab, scrolls it to where it was. With no `returnUrl` the tab
+ * stays where the scan left it. Best effort: the tab may be gone.
+ */
+async function returnToStartPage(tabId, username, returnUrl, postsPass, mediaPass) {
+  try {
+    if (returnUrl) {
+      await showTabUrl(tabId, returnUrl);
+    }
+    const here = pageKey((await chrome.tabs.get(tabId)).url);
+    const pass =
+      here === pageKey(twitterPostsUrl(username))
+        ? postsPass
+        : here === pageKey(twitterMediaUrl(username))
+          ? mediaPass
+          : null;
+    await restoreScrollPosition(tabId, pass?.originalScrollY);
+  } catch (_error) {
+    // The tab was closed or would not load; there is nothing to go back to.
+  }
+}
+
+/**
+ * One read of a profile page, scrolling it in chunks until it stops growing, the
+ * round limit is reached or, with `stopAtId`, the scan is back at a post a
+ * previous check saw. Resolves to the merge-ready pass (see mergeScanPasses),
+ * with the profile name and the scroll position the page started at.
+ *
+ * Only ever writes `scanning` records: a pass is part of a scan, and the
+ * picker takes a `done` or `error` record as the end of it, so the caller
+ * writes that once. `carryUrls` are videos earlier passes found, counted in the
+ * progress so it grows across passes.
+ */
+async function scanPass(
+  tabId,
+  provider,
+  expectedUsername,
+  key,
+  { maxRounds = PROFILE_SCAN_MAX_ROUNDS, stopAtId = null, carryUrls = [] } = {}
+) {
   let progress = null;
   let profileName = "";
   const hosts = provider === "facebook" ? FACEBOOK_HOSTS : TWITTER_HOSTS;
+  const pass = (fields) => ({
+    ok: true,
+    urls: [],
+    partial: false,
+    complete: false,
+    newestId: null,
+    profileName,
+    originalScrollY: progress?.originalScrollY ?? null,
+    ...fields,
+  });
 
   try {
     for (let round = 0; round < maxRounds; round += 1) {
@@ -164,14 +287,11 @@ async function runProfileScan(
         throw new Error("Could not inspect the profile page.");
       }
       if (!result.ok) {
-        await writeScanRecord(key, {
-          status: "error",
-          provider,
-          username: expectedUsername,
+        return pass({
+          ok: false,
           gone: Boolean(result.gone),
           error: result.error || "Could not scan the profile media page.",
         });
-        return;
       }
 
       progress = result.progress;
@@ -181,49 +301,37 @@ async function runProfileScan(
       const urls = Array.isArray(result.urls) ? result.urls : [];
 
       if (result.done) {
-        await writeScanRecord(key, {
-          status: "done",
-          provider,
-          username: result.username || expectedUsername,
+        const partial = Boolean(result.capped);
+        return pass({
           urls,
-          found: urls.length,
-          partial: Boolean(result.capped),
-          newestId: result.newestId,
-          reachedStop: result.reachedStop,
-          profileName,
+          partial,
+          // Reached the previous check's place, or the end of the timeline.
+          complete: Boolean(result.reachedStop) || !partial,
+          newestId: result.newestId || null,
         });
-        return;
       }
 
       await writeScanRecord(key, {
         status: "scanning",
         provider,
         username: result.username || expectedUsername,
-        found: urls.length,
+        // A video both passes found counts once.
+        found: new Set([...carryUrls, ...urls]).size,
         profileName,
       });
     }
 
-    const urls = Array.isArray(progress?.urls) ? progress.urls : [];
-    await writeScanRecord(key, {
-      status: "done",
-      provider,
-      username: expectedUsername,
-      urls,
-      found: urls.length,
+    // Out of rounds with the page still growing: only part of the profile.
+    return pass({
+      urls: Array.isArray(progress?.urls) ? progress.urls : [],
       partial: true,
-      profileName,
+      newestId: progress?.newestId || null,
     });
   } catch (error) {
-    await writeScanRecord(key, {
-      status: "error",
-      provider,
-      username: expectedUsername,
+    return pass({
+      ok: false,
       error: error?.message || "Could not scan the profile media page. Try reloading it first.",
     });
-  } finally {
-    activeScans.delete(key);
-    await restoreScrollPosition(tabId, progress?.originalScrollY);
   }
 }
 
@@ -283,26 +391,42 @@ async function waitForTabLoad(tabId) {
   throw new Error("The profile page took too long to load.");
 }
 
-/**
- * Puts a Twitter profile tab on the Posts tab, which is what a scan reads (see
- * twitterPostsUrl); a scan started from the Videos tab moves the tab there.
- */
-async function showTwitterPosts(tabId, username) {
-  const postsUrl = twitterPostsUrl(username);
+// A page without its query, hash or trailing slash, to tell whether two URLs are
+// the same page. Null for something that is not a URL.
+function pageKey(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    return `${url.origin}${url.pathname.replace(/\/$/, "")}`.toLowerCase();
+  } catch (_error) {
+    return null;
+  }
+}
+
+// Moves a tab to `url` and waits for it to load; does nothing when it is there.
+async function showTabUrl(tabId, url) {
   const tab = await chrome.tabs.get(tabId);
-  if (String(tab.url || "").replace(/\/$/, "").toLowerCase() === postsUrl.toLowerCase()) {
+  const current = pageKey(tab.url);
+  if (current !== null && current === pageKey(url)) {
     return;
   }
-  await chrome.tabs.update(tabId, { url: postsUrl });
+  await chrome.tabs.update(tabId, { url });
   await sleep(300); // Let the navigation start before waiting for it to finish.
   await waitForTabLoad(tabId);
 }
 
 /**
- * Looks at one handle's media page for the handle list: opens it in a
- * background tab, scans the top of it and closes it again. The URL is
- * validated the same way a toolbar scan's is, so only a real X/Twitter media
- * page is ever opened and read.
+ * Puts a Twitter profile tab on the Posts tab, where a scan starts (see
+ * twitterPostsUrl); a scan started from another tab moves the tab there.
+ */
+function showTwitterPosts(tabId, username) {
+  return showTabUrl(tabId, twitterPostsUrl(username));
+}
+
+/**
+ * Looks at one handle's profile for the handle list: opens it in a background
+ * tab, scans the top of its Posts tab and then its Media tab, and closes it
+ * again. The URL is validated the same way a toolbar scan's is, so only a real
+ * X/Twitter profile is ever opened and read.
  */
 async function checkHandle(message) {
   const url = typeof message?.profileUrl === "string" ? message.profileUrl : "";
@@ -320,22 +444,25 @@ async function checkHandle(message) {
     // A check reads down the timeline until it reaches the newest post the
     // previous complete check saw, so a regular check only reads what is new.
     const stopAtId = /^\d+$/.test(String(message.stopAtId || "")) ? String(message.stopAtId) : null;
-    await runProfileScan(tabId, target.provider, target.key, key, PROFILE_SCAN_MAX_ROUNDS, stopAtId);
+    const postsPass = await scanPass(tabId, target.provider, target.key, key, { stopAtId });
+    const mediaPass = postsPass.ok
+      ? await scanTwitterMedia(tabId, target.key, key, postsPass, { stopAtId })
+      : null;
 
-    const record = (await chrome.storage.session.get(key))[key];
-    if (record?.status !== "done") {
+    const merged = mergeScanPasses(postsPass, mediaPass);
+    if (!merged.ok) {
       return {
         ok: false,
-        gone: Boolean(record?.gone),
-        error: record?.error || "The profile could not be scanned.",
+        gone: merged.gone,
+        error: merged.error || "The profile could not be scanned.",
       };
     }
     return {
       ok: true,
-      urls: Array.isArray(record.urls) ? record.urls : [],
-      newestId: record.newestId || null,
-      // Reached the previous check's place, or the end of the timeline.
-      complete: Boolean(record.reachedStop) || !record.partial,
+      gone: false,
+      urls: merged.urls,
+      newestId: merged.newestId,
+      complete: merged.complete,
     };
   } catch (error) {
     return { ok: false, error: error?.message || "The profile could not be scanned." };
@@ -418,7 +545,8 @@ async function openDownloadPicker(url, source, tab, { fromLink = false } = {}) {
   await showDownloadPicker(chrome.runtime.getURL(`download.html?${params.toString()}`), tab);
 
   if (batchKey) {
-    await scanProfileTab(tab.id, target.provider, target.key, batchKey);
+    // The scan moves the tab between profile tabs; it goes back to where it was.
+    await scanProfileTab(tab.id, target.provider, target.key, batchKey, tab.url || null);
   }
 }
 

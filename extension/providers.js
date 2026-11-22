@@ -178,6 +178,65 @@ export function batchTargetForUrl(rawUrl) {
   return null;
 }
 
+// The larger of two post ids (X ids grow over time). Compared as BigInt: the
+// ids are longer than a double holds exactly.
+function newerPostId(a, b) {
+  const ids = [a, b].filter((id) => /^\d+$/.test(String(id ?? "")));
+  if (!ids.length) {
+    return null;
+  }
+  return ids.reduce((newest, id) => (BigInt(id) > BigInt(newest) ? id : newest));
+}
+
+/**
+ * Joins the two reads of a Twitter profile, its Posts tab and its Media tab,
+ * into one result. Each pass is { ok, gone?, error?, urls, partial, complete,
+ * newestId }; `media` is null when it was never read (the Posts pass failed, or
+ * the tab would not open).
+ *
+ * The Posts pass decides whether there is a result at all. A Media pass that
+ * fails costs completeness only, since the Posts videos are still good; a
+ * profile that is gone stops the scan whichever pass noticed.
+ */
+export function mergeScanPasses(posts, media) {
+  const postUrls = Array.isArray(posts.urls) ? posts.urls : [];
+  if (!posts.ok) {
+    return {
+      ok: false,
+      gone: Boolean(posts.gone),
+      error: posts.error || null,
+      urls: postUrls,
+      partial: Boolean(posts.partial),
+      complete: false,
+      newestId: posts.newestId ?? null,
+    };
+  }
+
+  if (media && !media.ok && media.gone) {
+    return {
+      ok: false,
+      gone: true,
+      error: media.error || null,
+      urls: postUrls,
+      partial: true,
+      complete: false,
+      newestId: posts.newestId ?? null,
+    };
+  }
+
+  const mediaRead = Boolean(media && media.ok);
+  const mediaUrls = mediaRead && Array.isArray(media.urls) ? media.urls : [];
+  return {
+    ok: true,
+    gone: false,
+    error: null,
+    urls: [...new Set([...postUrls, ...mediaUrls])],
+    partial: Boolean(posts.partial) || !mediaRead || Boolean(media.partial),
+    complete: Boolean(posts.complete) && mediaRead && Boolean(media.complete),
+    newestId: newerPostId(posts.newestId, mediaRead ? media.newestId : null),
+  };
+}
+
 /**
  * Runs in the scanned page. Must stay closure-free: everything it needs arrives
  * through `options` because chrome.scripting serialises the function source.

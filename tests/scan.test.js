@@ -7,6 +7,7 @@ import {
   batchTargetForUrl,
   profileScanChunk,
   facebookPeopleUrlName,
+  mergeScanPasses,
   twitterMediaUrl,
 } from "../extension/providers.js";
 
@@ -936,4 +937,73 @@ test("a check on the Media tab stops at the previous check's post", async () => 
   assert.equal(result.reachedStop, true);
   assert.equal(result.newestId, "600");
   assert.deepEqual(result.urls.sort(), ["https://x.com/alice/status/500", "https://x.com/alice/status/600"]);
+});
+
+const pass = (o) => ({ ok: true, urls: [], partial: false, complete: true, newestId: null, ...o });
+
+test("both passes merge without duplicates and keep the newer position", () => {
+  const m = mergeScanPasses(pass({ urls: ["u1", "u2"], newestId: "900" }), pass({ urls: ["u2", "u3"], newestId: "1000" }));
+  assert.deepEqual(m.urls, ["u1", "u2", "u3"]);
+  assert.equal(m.newestId, "1000");
+  assert.equal(m.complete, true);
+  assert.equal(m.partial, false);
+});
+
+test("a failed Media pass keeps the Posts videos and marks the scan partial", () => {
+  const m = mergeScanPasses(pass({ urls: ["u1"], newestId: "9" }), { ok: false, error: "x", urls: [] });
+  assert.equal(m.ok, true);
+  assert.deepEqual(m.urls, ["u1"]);
+  assert.equal(m.partial, true);
+  assert.equal(m.complete, false);
+});
+
+test("a gone profile stops the scan", () => {
+  assert.equal(mergeScanPasses({ ok: false, gone: true, urls: [] }, null).gone, true);
+});
+
+test("one incomplete pass makes the check incomplete", () => {
+  assert.equal(mergeScanPasses(pass({}), pass({ complete: false })).complete, false);
+  assert.equal(mergeScanPasses(pass({ complete: false }), pass({})).complete, false);
+});
+
+test("a profile that disappears between the passes is gone", () => {
+  const m = mergeScanPasses(pass({ urls: ["u1"] }), { ok: false, gone: true, error: "gone", urls: [] });
+  assert.equal(m.ok, false);
+  assert.equal(m.gone, true);
+});
+
+test("a Posts pass that fails is the result, whatever Media did", () => {
+  const m = mergeScanPasses({ ok: false, error: "no page", urls: [] }, pass({ urls: ["u9"] }));
+  assert.equal(m.ok, false);
+  assert.equal(m.gone, false);
+  assert.equal(m.error, "no page");
+});
+
+test("a missing Media pass keeps the Posts videos and marks the scan partial", () => {
+  const m = mergeScanPasses(pass({ urls: ["u1"] }), null);
+  assert.equal(m.ok, true);
+  assert.deepEqual(m.urls, ["u1"]);
+  assert.equal(m.partial, true);
+  assert.equal(m.complete, false);
+});
+
+test("a partial pass makes the scan partial", () => {
+  assert.equal(mergeScanPasses(pass({ partial: true }), pass({})).partial, true);
+  assert.equal(mergeScanPasses(pass({}), pass({ partial: true })).partial, true);
+});
+
+test("the newer position is compared as a number, not as text", () => {
+  assert.equal(mergeScanPasses(pass({ newestId: "999" }), pass({ newestId: "1000" })).newestId, "1000");
+  assert.equal(mergeScanPasses(pass({ newestId: "1000" }), pass({ newestId: "999" })).newestId, "1000");
+  // Ids longer than a double holds exactly still compare right.
+  assert.equal(
+    mergeScanPasses(pass({ newestId: "1234567890123456789" }), pass({ newestId: "1234567890123456790" })).newestId,
+    "1234567890123456790"
+  );
+});
+
+test("a pass without a position leaves the other one's", () => {
+  assert.equal(mergeScanPasses(pass({ newestId: null }), pass({ newestId: "7" })).newestId, "7");
+  assert.equal(mergeScanPasses(pass({ newestId: "7" }), pass({ newestId: null })).newestId, "7");
+  assert.equal(mergeScanPasses(pass({}), pass({})).newestId, null);
 });

@@ -55,13 +55,19 @@ is loaded.
 - Open any tab of an X/Twitter profile (Posts, Replies, Highlights, Articles,
   Videos or Likes, such as `https://x.com/username/media`) and click the
   extension button to scan the profile for video posts. The scan
-  switches that tab to the profile's Posts tab (`https://x.com/username`) and
-  reads that: X's Videos tab only lists posts holding exactly one video and
-  nothing else, so posts with two videos, or a video and photos, are missing
-  there. The picker tab opens immediately and reports scan progress while it
-  runs; the page is scrolled automatically and returned to its original
-  position when the scan ends. The host queues those videos one by one and downloads them into
-  a `username/` folder inside the selected target folder.
+  reads two tabs of the profile in that tab, one after the other: first the
+  Posts tab (`https://x.com/username`), then the Videos tab
+  (`https://x.com/username/media`), and merges what they find without
+  duplicates. Neither tab shows every video on its own: the Videos tab only
+  lists posts holding exactly one video and nothing else, so posts with two
+  videos, or a video and photos, are missing there, while the Posts tab leaves
+  out the creator's replies and sensitive posts shown behind a warning. The
+  picker tab opens immediately and reports scan progress while it runs,
+  counting the videos of both tabs together; the page is scrolled
+  automatically. When the scan ends the tab goes back to the page it was on
+  when you clicked the button, and is scrolled back to where it was if that was
+  the Posts or Videos tab. The host queues those videos one by one and
+  downloads them into a `username/` folder inside the selected target folder.
 - Right-clicking a link to a profile and choosing `Download with yt-dlp` opens
   the picker for that profile but does not scan: the link is not the tab you
   are on. Open the profile in a tab and use the toolbar button there.
@@ -117,20 +123,24 @@ is loaded.
   favorites the video itself. `vtag sync` rebuilds the folders and playlists.
 - The handle list holds every X/Twitter account you have downloaded from.
   `Check` (or `Check All`, or a group's `Check`) opens the handle's Posts tab
-  in a background tab, reads down it and closes it; posts that were not
+  in a background tab, reads down it, then does the same on its Videos tab
+  and closes the tab; posts that were not
   downloaded yet show as `N new`. A check remembers the newest post it saw and
-  the next one stops when it gets back there, so a regular check only reads
-  what was posted since. A check cut short by the scroll limit does not move
-  that mark, so the next one covers the rest. An account that no longer exists
+  the next one stops when it gets back there on each tab, so a regular check
+  only reads what was posted since. Reading two tabs means a check can take up
+  to twice as long as it did on one. A check cut short by the scroll limit on
+  either tab does not move that mark, so the next one covers the rest. An account that no longer exists
   is marked `Stale`; `Check All` and group checks skip it, and a check that
   finds the account again, or `Not Stale`, clears the mark. `Download` queues them into the folder that handle already uses,
   `Seen` dismisses them. Chrome asks once for permission to read x.com the
   first time you check. A handle that was only seen in the dashboard history
   starts with just those posts as known, so its first check can report older
   videos as new: use `Seen` once to set the baseline.
-- A scan that hits its round limit is reported as partial, and starting a
-  partial download asks for confirmation first. Scroll the media page further
-  and use `Scan Again` to pick up older posts.
+- A scan that hits its round limit on either tab, or whose Videos tab could not
+  be opened after the Posts tab was read, is reported as partial, and starting
+  a partial download asks for confirmation first. The videos that were found
+  are kept. Scroll the media page further and use `Scan Again` to pick up older
+  posts.
 - Reserved X/Twitter routes are never treated as profile batches, by either the
   extension or the host: `home`, `explore`, `notifications`, `messages`, `i`,
   `settings`, `search`, `compose`, `jobs`, `lists`, `bookmarks`, `communities`,
