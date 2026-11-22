@@ -39,6 +39,7 @@ function setup({ items = PATHS, index = 0, handlers = {}, playerName = "haruna" 
     video: q("video"),
     header: () => q(".player-title").textContent,
     notice: () => q(".player-notice"),
+    failure: () => q(".player-failure"),
     button: (action) => q(`[data-action="${action}"]`),
   };
 }
@@ -277,4 +278,152 @@ test("with file access the video loads once the check has answered", async () =>
   } finally {
     delete globalThis.chrome;
   }
+});
+
+// A handler promise the test settles by hand, so the player can be closed
+// while its Favorite or Remove is still pending.
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+test("a rejected remove shows the failure, keeps the video and can be retried", async () => {
+  let attempts = 0;
+  const { button, header, video, failure } = setup({
+    index: 1,
+    handlers: {
+      remove: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("permission denied");
+        return true;
+      },
+    },
+  });
+  assert.equal(failure().classList.contains("hidden"), true);
+
+  button("remove").click();
+  await tick();
+  assert.equal(failure().classList.contains("hidden"), false);
+  assert.equal(failure().textContent, "Could not remove this file: permission denied");
+  assert.ok(header().includes("2 of 3"), header());
+  assert.ok(video.src.endsWith("/srv/archive/b.mp4"), video.src);
+  assert.equal(video.classList.contains("hidden"), false, "the video keeps playing");
+  assert.equal(button("remove").disabled, false);
+  assert.equal(button("favorite").disabled, false);
+
+  // The retry clears the failure and goes through.
+  button("remove").click();
+  await tick();
+  assert.equal(attempts, 2);
+  assert.equal(failure().classList.contains("hidden"), true);
+  assert.ok(header().includes("2 of 2"), header());
+  assert.ok(video.src.endsWith("/srv/archive/c.mp4"), video.src);
+});
+
+test("a rejected favorite shows the failure, keeps the star and can be retried", async () => {
+  let attempts = 0;
+  const { button, failure, list } = setup({
+    handlers: {
+      toggleFavorite: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("host not responding");
+        return false;
+      },
+    },
+  });
+  assert.ok(button("favorite").textContent.includes("★"));
+
+  button("favorite").click();
+  await tick();
+  assert.equal(failure().textContent, "Could not update the favorite: host not responding");
+  assert.ok(button("favorite").textContent.includes("★"), "the star did not change");
+  assert.equal(list[0].favorite, true);
+  assert.equal(button("favorite").disabled, false);
+
+  button("favorite").click();
+  await tick();
+  assert.equal(failure().classList.contains("hidden"), true);
+  assert.ok(button("favorite").textContent.includes("☆"));
+});
+
+test("a failure without a message still says what failed, and the next video clears it", async () => {
+  const { button, failure } = setup({
+    handlers: { remove: () => Promise.reject(undefined) },
+  });
+  button("remove").click();
+  await tick();
+  assert.equal(failure().textContent, "Could not remove this file.");
+
+  button("next").click();
+  assert.equal(failure().classList.contains("hidden"), true);
+});
+
+test("closing while a favorite is pending closes at once and reports closed after it settles", async () => {
+  const pending = deferred();
+  const seen = [];
+  const { window, root, video, list } = setup({
+    handlers: {
+      toggleFavorite: () => pending.promise,
+      closed: () => { seen.push(list[0].favorite); },
+    },
+  });
+  const favoriteButton = root.querySelector('[data-action="favorite"]');
+  favoriteButton.click();
+  window.document.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Escape" }));
+
+  assert.equal(root.classList.contains("hidden"), true, "the overlay closes at once");
+  assert.equal(video.hasAttribute("src"), false);
+  assert.deepEqual(seen, [], "closed waits for the pending favorite");
+
+  pending.resolve(false);
+  await tick();
+  assert.deepEqual(seen, [false], "closed runs once, after the new state is on the item");
+});
+
+test("closing while a remove is pending reports closed after it settles", async () => {
+  const pending = deferred();
+  let closed = 0;
+  const { button, root, header } = setup({
+    handlers: { remove: () => pending.promise, closed: () => { closed += 1; } },
+  });
+  button("remove").click();
+  button("close").click();
+  assert.equal(root.classList.contains("hidden"), true);
+  assert.equal(closed, 0);
+
+  pending.resolve(true);
+  await tick();
+  assert.equal(closed, 1);
+  assert.equal(root.classList.contains("hidden"), true, "a remove after close does not reopen it");
+  assert.ok(header().includes("1 of 3"), "the closed player is left as it was");
+});
+
+test("closed also runs when the pending action fails after the player closed", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const pending = deferred();
+  let closed = 0;
+  const { button } = setup({
+    handlers: { remove: () => pending.promise, closed: () => { closed += 1; } },
+  });
+  button("remove").click();
+  button("close").click();
+  pending.reject(new Error("gone"));
+  await tick();
+  assert.equal(closed, 1);
+});
+
+test("removing the last video reports closed once, after the remove", async () => {
+  const order = [];
+  const { button } = setup({
+    items: [PATHS[0]],
+    handlers: {
+      remove: async () => { order.push("removed"); return true; },
+      closed: () => { order.push("closed"); },
+    },
+  });
+  button("remove").click();
+  await tick();
+  assert.deepEqual(order, ["removed", "closed"]);
 });

@@ -54,6 +54,11 @@ export function createPlayer({ root, playerName }) {
   const notice = element("p", "message error player-notice hidden");
   notice.setAttribute("role", "alert");
 
+  // A handler that failed (Favorite, Remove): shown under the video, which
+  // keeps playing, unlike `notice`, which replaces a video that cannot play.
+  const failure = element("p", "message error player-notice player-failure hidden");
+  failure.setAttribute("role", "alert");
+
   const video = element("video", "player-video");
   video.controls = true;
   video.autoplay = true;
@@ -80,12 +85,12 @@ export function createPlayer({ root, playerName }) {
   actions.append(prev, favorite, remove, external, next);
 
   const box = element("div", "player-box");
-  box.append(head, notice, video, actions);
+  box.append(head, notice, video, failure, actions);
   root.setAttribute("role", "dialog");
   root.setAttribute("aria-label", "Video player");
   root.replaceChildren(box);
 
-  // { items, index, handlers, busy } while open, otherwise null.
+  // { items, index, handlers, busy, notifyWhenIdle } while open, otherwise null.
   let session = null;
   // null until the first open has asked Chrome; without the extension API
   // (tests, a plain page) there is nothing to ask.
@@ -103,6 +108,12 @@ export function createPlayer({ root, playerName }) {
   function clearNotice() {
     notice.classList.add("hidden");
     video.classList.remove("hidden");
+  }
+
+  function showFailure(what, error) {
+    const reason = typeof error === "string" ? error : error?.message;
+    failure.textContent = reason ? `Could not ${what}: ${reason}` : `Could not ${what}.`;
+    failure.classList.remove("hidden");
   }
 
   function updateControls() {
@@ -132,6 +143,7 @@ export function createPlayer({ root, playerName }) {
   }
 
   function show() {
+    failure.classList.add("hidden");
     updateControls();
     loadCurrent();
   }
@@ -145,29 +157,36 @@ export function createPlayer({ root, playerName }) {
   }
 
   // Runs one of the caller's handlers with the buttons that change the list
-  // disabled, so a second click or a step cannot overlap it.
-  async function whileBusy(work) {
+  // disabled, so a second click or a step cannot overlap it. A failure is
+  // shown under the video and leaves everything as it was, so the button can
+  // be pressed again. `what` finishes "Could not ...".
+  async function whileBusy(what, work) {
     const s = session;
     if (!s || s.busy) return;
+    failure.classList.add("hidden");
     s.busy = true;
     updateControls();
     try {
       await work(s);
+    } catch (error) {
+      if (session === s) showFailure(what, error);
+      else console.error(error); // closed meanwhile: nowhere to show it
     } finally {
       s.busy = false;
       if (session === s) updateControls();
+      else if (s.notifyWhenIdle) s.handlers.closed?.();
     }
   }
 
   function toggleFavorite() {
-    return whileBusy(async (s) => {
+    return whileBusy("update the favorite", async (s) => {
       const item = s.items[s.index];
       item.favorite = Boolean(await s.handlers.toggleFavorite(item));
     });
   }
 
   function removeCurrent() {
-    return whileBusy(async (s) => {
+    return whileBusy("remove this file", async (s) => {
       if (!(await s.handlers.remove(s.items[s.index]))) return;
       if (session !== s) return;
       s.items.splice(s.index, 1);
@@ -196,7 +215,11 @@ export function createPlayer({ root, playerName }) {
   //   toggleFavorite(item) -> Promise<boolean>  the new favorite state
   //   remove(item)         -> Promise<boolean>  true when the file was deleted
   //   external(item)                            open it in the external player
-  //   closed()             optional, once when the overlay closes
+  //   closed()             optional; fires once after the overlay has closed
+  //                        and after any Favorite or Remove still pending at
+  //                        that moment has settled, so a caller reloading its
+  //                        view in `closed` sees the final state. The overlay
+  //                        itself closes at once.
   function open(items, index, handlers) {
     if (!items.length) return;
     session = {
@@ -204,6 +227,7 @@ export function createPlayer({ root, playerName }) {
       index: Math.min(Math.max(index, 0), items.length - 1),
       handlers,
       busy: false,
+      notifyWhenIdle: false,
     };
     root.classList.remove("hidden");
     doc.addEventListener("keydown", onKeydown);
@@ -229,9 +253,11 @@ export function createPlayer({ root, playerName }) {
     video.removeAttribute("src");
     video.load();
     clearNotice();
+    failure.classList.add("hidden");
     root.classList.add("hidden");
     doc.removeEventListener("keydown", onKeydown);
-    s.handlers.closed?.();
+    if (s.busy) s.notifyWhenIdle = true;
+    else s.handlers.closed?.();
   }
 
   return { open, close };
