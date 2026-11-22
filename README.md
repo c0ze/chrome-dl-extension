@@ -83,6 +83,12 @@ is loaded.
   handles. A creator with a folder in more than one group is one handle that
   is listed under each of them; its actions apply to the folder in the group
   you use them from. Importing again is safe; it only adds what is new.
+- A single post downloaded into a folder named after its author (for example
+  `group a/alice/` for a post by `alice`), or after the folder that author
+  already has in that group (such as `group b/Bob B/`), files the author under
+  the folder's parent group, `group a` or `group b`, instead of treating the
+  folder as a group of its own. An author already listed under another group
+  gains the new group as well.
 - `Edit` on a handle renames it or files it under another group. A rename
   creates a folder for the new handle and moves the old handle's folder inside
   it, so one creator's videos stay under their current handle; renaming to a
