@@ -1511,6 +1511,44 @@ class HandleListTests(HandleStateCase):
         self.assertEqual(host.message_handle({"handle": "@Someone"}), "Someone")
 
 
+class RememberDownloadedPostTests(HandleStateCase):
+    """A post saved in <group>/<handle> files the handle under <group>, not under the handle's own folder."""
+
+    def post(self, post_id: int, username: str = "alice") -> str:
+        return f"https://x.com/{username}/status/{post_id}"
+
+    def test_a_post_in_a_handle_folder_is_filed_under_the_group(self) -> None:
+        host.remember_downloaded_post(self.post(1001), str(self.library / "group a" / "alice"))
+
+        self.assertEqual(
+            self.only_handle()["folders"],
+            [{"base_dir": str(self.library / "group a"), "name": "alice", "group": "group a"}],
+        )
+
+    def test_a_known_handle_gains_the_new_group(self) -> None:
+        host.remember_handle("alice", [], base_dir=str(self.library / "group a"))
+
+        host.remember_downloaded_post(self.post(1001), str(self.library / "group b" / "alice"))
+
+        groups = [folder["group"] for folder in self.only_handle()["folders"]]
+        self.assertEqual(groups, ["group a", "group b"])
+
+    def test_a_custom_folder_name_is_kept(self) -> None:
+        host.remember_handle("bob", [], base_dir=str(self.library / "group b"), name="Bob B", replace_folder=True)
+
+        host.remember_downloaded_post(self.post(1002, "bob"), str(self.library / "group b" / "Bob B"))
+
+        folders = self.only_handle()["folders"]
+        self.assertEqual([(folder["group"], folder["name"]) for folder in folders], [("group b", "Bob B")])
+
+    def test_a_post_in_another_folder_is_recorded_as_before(self) -> None:
+        host.remember_downloaded_post(self.post(1001), str(self.library / "misc"))
+
+        entry = self.only_handle()
+        self.assertEqual(entry["base_dir"], str(self.library / "misc"))
+        self.assertEqual(entry["group"], "misc")
+
+
 class ThumbnailTests(HandleStateCase):
     def test_only_job_ids_name_thumbnail_files(self) -> None:
         self.assertIsNone(host.thumbnail_path("../../etc/passwd"))

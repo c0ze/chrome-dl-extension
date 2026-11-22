@@ -2971,7 +2971,30 @@ def remember_downloaded_post(url: str, download_dir: str | None) -> None:
         base_dir = resolve_download_dir(download_dir or load_config()["download_dir"])
     except ValueError:
         pass
+
+    if base_dir:
+        folder = Path(base_dir)
+        if folder.name and is_handle_folder(username, folder.name, str(folder.parent)):
+            # A post saved in <group>/<handle> belongs to the handle's folder
+            # in <group>, not to a new folder of its own inside it.
+            remember_handle(username, [url], base_dir=str(folder.parent), name=folder.name, replace_folder=True)
+            return
     remember_handle(username, [url], base_dir=base_dir)
+
+
+def is_handle_folder(username: str, folder_name: str, parent: str) -> bool:
+    """Is <parent>/<folder_name> the handle's own folder, going by its name?"""
+    if folder_name.lower() == username.lower():
+        return True
+
+    try:
+        entry = find_handle(read_handles(), username)
+    except Exception as error:  # noqa: BLE001
+        log_line(f"Could not read the handle list: {error}")
+        return False
+
+    folder = folder_in_base(entry, parent) if entry else None
+    return folder is not None and folder["name"] == folder_name
 
 
 def entry_folders(entry: dict[str, Any]) -> list[dict[str, str]]:
