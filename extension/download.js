@@ -71,8 +71,8 @@ const elements = {
 // `plan` says where this creator's downloads go (null until the handle list has
 // loaded, and for anything but an X/Twitter page). `started` is set by the first
 // download this tab sends, by hand or by itself, so nothing starts twice;
-// `folderEdited` is set once the user has chosen a folder, which ends any
-// pending auto-start.
+// `folderEdited` is set once the user has chosen a destination (typed a folder,
+// Choose Folder…, or asked for a start by hand), which ends any pending auto-start.
 const state = {
   defaultDirectory: "~/Downloads",
   folderEdited: false,
@@ -197,7 +197,7 @@ function renderRecentDirectories(directories) {
     button.textContent = shortPath(directory, state.libraryRoot);
     button.title = `Download to ${directory}`;
     button.addEventListener("click", () => {
-      void startDownload(directory);
+      startByHand(directory);
     });
     elements.recentList.append(button);
   });
@@ -1083,6 +1083,16 @@ function stopDashboardPolling() {
   clearPollTimer();
 }
 
+// Every start the user asks for (Start Download, Use Default, a Recent Folder, a
+// group button) goes through here, and choosing a destination ends any
+// auto-start for this page at once, before startDownload asks anything: a
+// declined confirmation or a refusal returns without having started, and a
+// handle list that arrives later must not queue what the user turned down.
+function startByHand(directory) {
+  state.folderEdited = true;
+  void startDownload(directory);
+}
+
 // `notice` is what to say while the request is out (the auto-start's "Downloading
 // into …"); the result replaces it.
 async function startDownload(directory, allowDuplicate = false, notice = "") {
@@ -1284,12 +1294,12 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 
 elements.downloadForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  void startDownload(elements.downloadDir.value);
+  startByHand(elements.downloadDir.value);
 });
 
 elements.defaultButton.addEventListener("click", () => {
   elements.downloadDir.value = state.defaultDirectory;
-  void startDownload(state.defaultDirectory);
+  startByHand(state.defaultDirectory);
 });
 
 elements.browseButton.addEventListener("click", async () => {
@@ -1372,7 +1382,7 @@ function maybeAutoStart() {
 
 function pickGroup(group) {
   const { handle, isProfile } = pickerTarget(state.targetUrl);
-  void startDownload(groupDirectory(state.libraryRoot, group, handle, state.handles, isProfile));
+  startByHand(groupDirectory(state.libraryRoot, group, handle, state.handles, isProfile));
 }
 
 /**

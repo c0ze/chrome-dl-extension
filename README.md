@@ -107,11 +107,14 @@ is loaded.
   confirmation, and the result message carries the warning. It is the same
   download as a click on `Start Download`, so the duplicate prompt, the refusal
   of videos you removed and the missing-folder handling all still apply.
-  Typing in the folder field, or using `Choose Folder…`, before it fires
-  cancels it. Nothing starts for a new creator, for one with folders in
+  Choosing a destination yourself before it fires cancels it for that picker
+  tab: typing in the folder field, `Choose Folder…`, `Start Download`,
+  `Use Default`, a Recent Folder or a group button, even if you then decline
+  a confirmation. Nothing starts for a new creator, for one with folders in
   several groups, or on any page that is not an X/Twitter post or profile
   (Facebook keeps the folder picker as it was).
-- On X/Twitter pages the picker has a `Groups` panel above Recent Folders with
+- On an X/Twitter post or profile (not on other X pages such as the home
+  timeline or search) the picker has a `Groups` panel above Recent Folders with
   one button per group in the library. A click downloads into that group: a
   post goes into the author's folder there (the folder the author already has
   in that group, else `<group>/<handle>/`) and a profile into the group

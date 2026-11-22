@@ -93,9 +93,32 @@ test("a post is a Twitter target with its author, and not a profile", () => {
   assert.deepEqual(pickerTarget("https://www.x.com/bob/status/1002?s=20"), { twitter: true, handle: "bob", isProfile: false });
 });
 
-test("a Twitter page with no author is still Twitter, without a handle", () => {
+test("a post link with no author is still a Twitter post, without a handle", () => {
   assert.deepEqual(pickerTarget("https://x.com/i/status/1001"), { twitter: true, handle: "", isProfile: false });
-  assert.deepEqual(pickerTarget("https://x.com/home"), { twitter: true, handle: "", isProfile: false });
+  assert.deepEqual(pickerTarget("https://x.com/i/web/status/1001"), { twitter: true, handle: "", isProfile: false });
+  assert.deepEqual(pickerTarget("https://twitter.com/i/statuses/1001"), { twitter: true, handle: "", isProfile: false });
+});
+
+test("a post's own sub-pages are the post", () => {
+  assert.deepEqual(pickerTarget("https://x.com/alice/status/1001/video/1"), { twitter: true, handle: "alice", isProfile: false });
+  assert.deepEqual(pickerTarget("https://x.com/alice/status/1001/photo/1").twitter, true);
+});
+
+test("other X pages are neither a post nor a profile, so they get no group buttons", () => {
+  for (const url of [
+    "https://x.com/home",
+    "https://x.com/explore",
+    "https://x.com/search?q=cats",
+    "https://x.com/notifications",
+    "https://x.com/i/bookmarks",
+    "https://x.com/i/lists/1001",
+    "https://x.com/alice/followers",
+    "https://x.com/alice/status",
+    "https://x.com/alice/status/abc",
+    "https://x.com/",
+  ]) {
+    assert.deepEqual(pickerTarget(url), { twitter: false, handle: "", isProfile: false }, url);
+  }
 });
 
 test("Facebook and other sites are not Twitter targets", () => {

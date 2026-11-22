@@ -4,9 +4,20 @@
 import { jobHandle } from "./grouping.js";
 import { TWITTER_HOSTS, batchTargetForUrl } from "./providers.js";
 
-function isTwitterHost(rawUrl) {
+// A post: a status link on an X/Twitter host, with or without an author in front
+// (/alice/status/1001, /i/status/1001, /i/web/status/1001), the same shapes the
+// host reads a post from. Other X pages (/home, /search, /alice/followers) are
+// neither a post nor a profile.
+function isTwitterPost(rawUrl) {
   try {
-    return TWITTER_HOSTS.includes(new URL(rawUrl).hostname);
+    const url = new URL(rawUrl);
+    if (!TWITTER_HOSTS.includes(url.hostname)) {
+      return false;
+    }
+    const parts = url.pathname.split("/").filter(Boolean);
+    return parts.some(
+      (part, index) => ["status", "statuses"].includes(part.toLowerCase()) && /^\d+$/.test(parts[index + 1] ?? "")
+    );
   } catch (_error) {
     return false;
   }
@@ -14,7 +25,7 @@ function isTwitterHost(rawUrl) {
 
 /**
  * What the picker was opened for. `twitter` is true for an X/Twitter profile or
- * post (group buttons and auto-start are for those only); `handle` is the
+ * post only (group buttons and auto-start are for those); `handle` is the
  * creator when the URL names one (a post's author, a profile's own name) and ""
  * when it does not (/i/status/…); `isProfile` is true for a profile batch.
  */
@@ -26,9 +37,10 @@ export function pickerTarget(rawUrl) {
   if (batch) {
     return { twitter: false, handle: "", isProfile: true };
   }
-
-  const handle = jobHandle({ url: rawUrl });
-  return { twitter: Boolean(handle) || isTwitterHost(rawUrl), handle, isProfile: false };
+  if (isTwitterPost(rawUrl)) {
+    return { twitter: true, handle: jobHandle({ url: rawUrl }), isProfile: false };
+  }
+  return { twitter: false, handle: "", isProfile: false };
 }
 
 /** What shows while the picker starts a download by itself. */
