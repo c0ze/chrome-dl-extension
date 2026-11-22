@@ -188,7 +188,7 @@ test("the scan line says what is happening or what the last scan found", () => {
   );
 });
 
-import { autoStartReady, downloadPlan, groupDirectory, shortPath } from "../extension/grouping.js";
+import { autoStartReady, downloadPlan, findHandleEntry, groupDirectory, shortPath } from "../extension/grouping.js";
 
 const R = "/srv/archive/media/twitter";
 const alice = { handle: "alice", aliases: ["oldalice"], folders: [{ base_dir: `${R}/group a`, name: "alice", group: "group a" }] };
@@ -232,6 +232,39 @@ test("paths are shown from the library root's parent", () => {
   assert.equal(shortPath("/home/u/Downloads", R, "/home/u"), "~/Downloads");
   assert.equal(shortPath("/other/place", R, "/home/u"), "/other/place");
 });
+test("a post by a former handle is filed under the current handle's name, in a new group too", () => {
+  assert.equal(groupDirectory(R, "group b", "OldAlice", [alice], false), `${R}/group b/alice`);
+  assert.equal(groupDirectory(R, "group a", "oldalice", [alice], false), `${R}/group a/alice`);
+});
+test("a current handle beats a former handle that matches the same name, whatever the order", () => {
+  const former = { handle: "carol", aliases: ["dave"], folders: [{ base_dir: `${R}/group a`, name: "carol", group: "group a" }] };
+  const current = { handle: "dave", aliases: [], folders: [{ base_dir: `${R}/group b`, name: "dave", group: "group b" }] };
+  assert.equal(findHandleEntry([former, current], "dave"), current);
+  assert.equal(downloadPlan([former, current], "Dave", false).auto.directory, `${R}/group b/dave`);
+  assert.equal(groupDirectory(R, "group b", "dave", [former, current], false), `${R}/group b/dave`);
+});
+test("a former handle shared by several creators matches none, so nothing starts by itself", () => {
+  const first = { handle: "carol", aliases: ["dave"], folders: [{ base_dir: `${R}/group a`, name: "carol", group: "group a" }] };
+  const second = { handle: "erin", aliases: ["Dave"], folders: [{ base_dir: `${R}/group b`, name: "erin", group: "group b" }] };
+  assert.equal(findHandleEntry([first, second], "dave"), null);
+  assert.deepEqual(downloadPlan([first, second], "dave", false), { auto: null, groups: [] });
+  assert.equal(groupDirectory(R, "group a", "dave", [first, second], false), `${R}/group a/dave`);
+});
+test("a former handle held by one creator finds that creator", () => {
+  assert.equal(findHandleEntry([alice, bob], "oldalice"), alice);
+  assert.equal(findHandleEntry([alice, bob], "carol"), null);
+});
+test("a shallow library root does not turn unrelated paths into relative ones", () => {
+  assert.equal(shortPath("/media/twitter/group a", "/media/twitter"), "media/twitter/group a");
+  assert.equal(shortPath("/media/twitter", "/media/twitter"), "media/twitter");
+  assert.equal(shortPath("/tmp/foo", "/media/twitter"), "/tmp/foo");
+  assert.equal(shortPath("/home/u/x", "/media/twitter", "/home/u"), "~/x");
+  assert.equal(shortPath("/home/u", "/media/twitter", "/home/u"), "~");
+});
+test("the filesystem root as the library root still shows a path", () => {
+  assert.equal(shortPath("/", "/"), "/");
+  assert.equal(shortPath("/tmp/foo", "/"), "/tmp/foo");
+});
 test("auto-start waits for a profile scan to find videos", () => {
   const base = { auto: { directory: "d" }, isProfile: true, scanStatus: "scanning", urlCount: 0, folderEdited: false, started: false };
   assert.equal(autoStartReady(base), false);
@@ -256,6 +289,15 @@ test("the player steps through a group's finished downloads in display order", (
   assert.deepEqual(items.map((item) => item.title), ["alice", "alice"]);
   assert.equal(items[0].job, group.jobs[0]);
   assert.equal(items[1].job, group.jobs[4]);
+});
+
+test("a quoted or padded file name reaches the player as a plain path", () => {
+  const [group] = groupJobsByHandle([
+    job("alice", "complete", { id: "a", filename: '"/srv/archive/alice/a.mp4"' }),
+    job("alice", "complete", { id: "b", filename: "  /srv/archive/alice/b.mp4 " }),
+    job("alice", "complete", { id: "c", filename: '" "' }),
+  ]);
+  assert.deepEqual(playableJobs(group).map((item) => item.path), ["/srv/archive/alice/a.mp4", "/srv/archive/alice/b.mp4"]);
 });
 
 test("downloads with no handle reach the player with an empty title", () => {

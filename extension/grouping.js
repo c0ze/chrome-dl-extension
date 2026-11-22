@@ -80,8 +80,14 @@ export function groupSummary(group) {
  */
 export function playableJobs(group) {
   return group.jobs
-    .filter((job) => job.status === "complete" && job.filename)
-    .map((job) => ({ path: job.filename, title: group.handle, favorite: Boolean(job.favorite), job }));
+    .map((job) => ({ job, path: cleanFilename(job.filename) }))
+    .filter(({ job, path }) => job.status === "complete" && path)
+    .map(({ job, path }) => ({ path, title: group.handle, favorite: Boolean(job.favorite), job }));
+}
+
+// A job's filename as the host reads it: surrounding whitespace and quotes gone.
+function cleanFilename(filename) {
+  return String(filename || "").trim().replace(/^"+|"+$/g, "").trim();
 }
 
 /** The same for a favorites group: the favorites whose file is still there. */
@@ -213,19 +219,24 @@ export function favoriteChips(counts) {
     .sort((a, b) => a.group.toLowerCase().localeCompare(b.group.toLowerCase()));
 }
 
-/** The list entry for a handle, ignoring case and matching former names too. */
+/**
+ * The list entry for a handle, ignoring case. A current handle always beats a
+ * former one; a former handle finds its creator only when exactly one creator
+ * has it, since with two there is no telling whose post this is.
+ */
 export function findHandleEntry(entries, handle) {
   const wanted = String(handle || "").toLowerCase();
   if (!wanted) {
     return null;
   }
-  return (
-    entries.find(
-      (candidate) =>
-        String(candidate.handle).toLowerCase() === wanted ||
-        (candidate.aliases || []).some((alias) => String(alias).toLowerCase() === wanted)
-    ) || null
+  const current = entries.find((candidate) => String(candidate.handle).toLowerCase() === wanted);
+  if (current) {
+    return current;
+  }
+  const former = entries.filter((candidate) =>
+    (candidate.aliases || []).some((alias) => String(alias).toLowerCase() === wanted)
   );
+  return former.length === 1 ? former[0] : null;
 }
 
 /**
@@ -273,8 +284,10 @@ export function groupDirectory(root, group, handle, entries, isProfile) {
   if (isProfile || !handle) {
     return groupDir;
   }
-  const folder = (findHandleEntry(entries, handle)?.folders || []).find((candidate) => candidate.group === group);
-  return `${groupDir}/${folder?.name || handle}`;
+  // A former handle's post goes under the creator's current name.
+  const entry = findHandleEntry(entries, handle);
+  const folder = (entry?.folders || []).find((candidate) => candidate.group === group);
+  return `${groupDir}/${folder?.name || entry?.handle || handle}`;
 }
 
 /**
@@ -285,9 +298,15 @@ export function shortPath(path, root, home = "") {
   const full = trimSlashes(path);
   const base = trimSlashes(root);
   if (base) {
-    const anchor = base.split("/").slice(0, -2).join("/") + "/";
-    if (full.startsWith(anchor)) {
-      return full.slice(anchor.length);
+    // The root's parent folder is the anchor. When that is "/" (a root two
+    // levels deep) it would match every absolute path, so only paths under the
+    // root itself are shortened then.
+    const grandparent = base.split("/").slice(0, -2).join("/");
+    const anchor = `${grandparent}/`;
+    const under = grandparent ? full.startsWith(anchor) : full === base || full.startsWith(`${base}/`);
+    const short = under ? full.slice(anchor.length) : "";
+    if (short) {
+      return short;
     }
   }
   const homeDir = trimSlashes(home);
