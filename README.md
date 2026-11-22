@@ -64,9 +64,9 @@ is loaded.
   out the creator's replies and sensitive posts shown behind a warning. The
   picker tab opens immediately and reports scan progress while it runs,
   counting the videos of both tabs together; the page is scrolled
-  automatically. When the scan ends the tab goes back to the page it was on
-  when you clicked the button, and is scrolled back to where it was if that was
-  the Posts or Videos tab. The host queues those videos one by one and
+  automatically. When the scan ends the tab goes back to the exact page it was
+  on when you clicked the button and is scrolled back to where it was, and then
+  the picker shows the result. The host queues those videos one by one and
   downloads them into a `username/` folder inside the selected target folder.
 - Right-clicking a link to a profile and choosing `Download with yt-dlp` opens
   the picker for that profile but does not scan: the link is not the tab you

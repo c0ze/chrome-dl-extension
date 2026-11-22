@@ -89,6 +89,19 @@ async function sweepProfileBatches() {
   }
 }
 
+async function readScrollPosition(tabId) {
+  try {
+    const [injection] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => window.scrollY,
+    });
+    return typeof injection?.result === "number" ? injection.result : null;
+  } catch (_error) {
+    // The page cannot be read; there is no position to bring back.
+    return null;
+  }
+}
+
 async function restoreScrollPosition(tabId, scrollY) {
   if (typeof scrollY !== "number") {
     return;
@@ -111,6 +124,10 @@ async function restoreScrollPosition(tabId, scrollY) {
  * Scans a profile page for the picker and settles `key` with one final record.
  * A Twitter profile is read twice, Posts then Media, in the tab it was started
  * from; the tab is put back on `returnUrl` afterwards.
+ *
+ * The final record is the last thing written: the tab is already back where it
+ * was and the scan guard is released, because the picker offers Scan Again the
+ * moment it sees the record and a restart must then be able to run.
  */
 async function scanProfileTab(tabId, provider, username, key, returnUrl = null) {
   if (activeScans.has(key)) {
@@ -118,21 +135,30 @@ async function scanProfileTab(tabId, provider, username, key, returnUrl = null) 
   }
 
   activeScans.add(key);
+  let record;
   try {
-    if (provider === "twitter") {
-      await scanTwitterProfile(tabId, username, key, returnUrl);
-    } else {
-      await runProfileScan(tabId, provider, username, key);
-    }
+    record =
+      provider === "twitter"
+        ? await scanTwitterProfile(tabId, username, key, returnUrl)
+        : await runProfileScan(tabId, provider, username, key);
+  } catch (error) {
+    record = {
+      status: "error",
+      provider,
+      username,
+      error: error?.message || "Could not scan the profile media page.",
+    };
   } finally {
     activeScans.delete(key);
   }
+  await writeScanRecord(key, record);
 }
 
+// Resolves to the record that settles the scan (see scanProfileTab).
 async function runProfileScan(tabId, provider, username, key) {
   const pass = await scanPass(tabId, provider, username, key);
-  await writeScanRecord(key, scanRecord(provider, username, pass, pass.profileName));
   await restoreScrollPosition(tabId, pass.originalScrollY);
+  return scanRecord(provider, username, pass, pass.profileName);
 }
 
 // The one record that settles a scan; `merged` says how it ended.
@@ -158,20 +184,46 @@ function scanRecord(provider, username, merged, profileName = "") {
   };
 }
 
+const scanningRecord = (username, found) => ({
+  status: "scanning",
+  provider: "twitter",
+  username,
+  found,
+});
+
+// The picker takes 20 seconds without a record for a stalled worker, and a page
+// load can take longer than that (waitForTabLoad gives up after 30), so while a
+// tab is moving the scanning record is rewritten every few seconds.
+const SCAN_HEARTBEAT_MS = 5000;
+
+async function whileKeepingScanAlive(key, record, work) {
+  await writeScanRecord(key, record);
+  const timer = setInterval(() => void writeScanRecord(key, record), SCAN_HEARTBEAT_MS);
+  try {
+    return await work();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+// Resolves to the record that settles the scan (see scanProfileTab).
 async function scanTwitterProfile(tabId, username, key, returnUrl) {
+  // Where the user left the page, read before the scan moves the tab away.
+  const startScrollY = returnUrl ? await readScrollPosition(tabId) : null;
   let postsPass = null;
   let mediaPass = null;
   try {
     try {
-      await showTwitterPosts(tabId, username);
+      await whileKeepingScanAlive(key, scanningRecord(username, 0), () =>
+        showTwitterPosts(tabId, username)
+      );
     } catch (error) {
-      await writeScanRecord(key, {
+      return {
         status: "error",
         provider: "twitter",
         username,
         error: error?.message || "Could not open the profile's Posts tab.",
-      });
-      return;
+      };
     }
 
     postsPass = await scanPass(tabId, "twitter", username, key);
@@ -179,9 +231,14 @@ async function scanTwitterProfile(tabId, username, key, returnUrl) {
       mediaPass = await scanTwitterMedia(tabId, username, key, postsPass);
     }
     const merged = mergeScanPasses(postsPass, mediaPass);
-    await writeScanRecord(key, scanRecord("twitter", username, merged, postsPass.profileName));
+    return scanRecord("twitter", username, merged, postsPass.profileName);
   } finally {
-    await returnToStartPage(tabId, username, returnUrl, postsPass, mediaPass);
+    if (returnUrl) {
+      const found = new Set([...(postsPass?.urls ?? []), ...(mediaPass?.urls ?? [])]).size;
+      await whileKeepingScanAlive(key, scanningRecord(username, found), () =>
+        returnToStartPage(tabId, returnUrl, startScrollY)
+      );
+    }
   }
 }
 
@@ -193,15 +250,9 @@ async function scanTwitterProfile(tabId, username, key, returnUrl) {
  */
 async function scanTwitterMedia(tabId, username, key, postsPass, { stopAtId = null } = {}) {
   try {
-    // Nothing is written while the tab loads, which can outlast the picker's
-    // watchdog; this keeps the scan looking alive.
-    await writeScanRecord(key, {
-      status: "scanning",
-      provider: "twitter",
-      username,
-      found: postsPass.urls.length,
-    });
-    await showTabUrl(tabId, twitterMediaUrl(username));
+    await whileKeepingScanAlive(key, scanningRecord(username, postsPass.urls.length), () =>
+      showTabUrl(tabId, twitterMediaUrl(username))
+    );
   } catch (error) {
     return { ok: false, error: error?.message || "Could not open the profile's Media tab.", urls: [] };
   }
@@ -209,23 +260,14 @@ async function scanTwitterMedia(tabId, username, key, postsPass, { stopAtId = nu
 }
 
 /**
- * Puts the tab back on the page the scan was started from and, when that is the
- * Posts or Media tab, scrolls it to where it was. With no `returnUrl` the tab
- * stays where the scan left it. Best effort: the tab may be gone.
+ * Puts the tab back on exactly the URL the scan was started from (query and
+ * fragment included) and scrolls it to where the user had it. Best effort: the
+ * tab may be gone.
  */
-async function returnToStartPage(tabId, username, returnUrl, postsPass, mediaPass) {
+async function returnToStartPage(tabId, returnUrl, scrollY) {
   try {
-    if (returnUrl) {
-      await showTabUrl(tabId, returnUrl);
-    }
-    const here = pageKey((await chrome.tabs.get(tabId)).url);
-    const pass =
-      here === pageKey(twitterPostsUrl(username))
-        ? postsPass
-        : here === pageKey(twitterMediaUrl(username))
-          ? mediaPass
-          : null;
-    await restoreScrollPosition(tabId, pass?.originalScrollY);
+    await showTabUrl(tabId, returnUrl, { exact: true });
+    await restoreScrollPosition(tabId, scrollY);
   } catch (_error) {
     // The tab was closed or would not load; there is nothing to go back to.
   }
@@ -391,22 +433,14 @@ async function waitForTabLoad(tabId) {
   throw new Error("The profile page took too long to load.");
 }
 
-// A page without its query, hash or trailing slash, to tell whether two URLs are
-// the same page. Null for something that is not a URL.
-function pageKey(rawUrl) {
-  try {
-    const url = new URL(rawUrl);
-    return `${url.origin}${url.pathname.replace(/\/$/, "")}`.toLowerCase();
-  } catch (_error) {
-    return null;
-  }
-}
-
 // Moves a tab to `url` and waits for it to load; does nothing when it is there.
-async function showTabUrl(tabId, url) {
+// A scan's own pages (a profile's tabs) count as there when they differ only in
+// a trailing slash or letter case; with `exact` the URL must be the same string,
+// so a query or fragment is not lost.
+async function showTabUrl(tabId, url, { exact = false } = {}) {
+  const plain = (value) => String(value || "").replace(/\/$/, "").toLowerCase();
   const tab = await chrome.tabs.get(tabId);
-  const current = pageKey(tab.url);
-  if (current !== null && current === pageKey(url)) {
+  if (exact ? tab.url === url : plain(tab.url) === plain(url)) {
     return;
   }
   await chrome.tabs.update(tabId, { url });
@@ -429,10 +463,21 @@ function showTwitterPosts(tabId, username) {
  * X/Twitter profile is ever opened and read.
  */
 async function checkHandle(message) {
+  // Every reply has the same six fields, a failure included.
+  const reply = (fields) => ({
+    ok: false,
+    gone: false,
+    error: null,
+    urls: [],
+    newestId: null,
+    complete: false,
+    ...fields,
+  });
+
   const url = typeof message?.profileUrl === "string" ? message.profileUrl : "";
   const target = batchTargetForUrl(url);
   if (!target || target.provider !== "twitter") {
-    return { ok: false, error: "This profile cannot be checked." };
+    return reply({ error: "This profile cannot be checked." });
   }
 
   const key = makeProfileBatchKey();
@@ -450,22 +495,16 @@ async function checkHandle(message) {
       : null;
 
     const merged = mergeScanPasses(postsPass, mediaPass);
-    if (!merged.ok) {
-      return {
-        ok: false,
-        gone: merged.gone,
-        error: merged.error || "The profile could not be scanned.",
-      };
-    }
-    return {
-      ok: true,
-      gone: false,
+    return reply({
+      ok: merged.ok,
+      gone: merged.gone,
+      error: merged.ok ? null : merged.error || "The profile could not be scanned.",
       urls: merged.urls,
       newestId: merged.newestId,
       complete: merged.complete,
-    };
+    });
   } catch (error) {
-    return { ok: false, error: error?.message || "The profile could not be scanned." };
+    return reply({ error: error?.message || "The profile could not be scanned." });
   } finally {
     await chrome.storage.session.remove(key).catch(() => {});
     if (tabId !== null) {
