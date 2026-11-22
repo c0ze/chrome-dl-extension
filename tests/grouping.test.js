@@ -220,6 +220,18 @@ test("a group button files a post in the handle's folder for that group", () => 
   assert.equal(groupDirectory(R, "group c", "carol", [], true), `${R}/group c`);
   assert.equal(groupDirectory(R, "group c", "", [], false), `${R}/group c`);
 });
+test("a group outside the library root is an absolute folder and is used as-is", () => {
+  const outside = { handle: "dave", aliases: [], folders: [{ base_dir: "/elsewhere/clips", name: "Dave D", group: "/elsewhere/clips" }] };
+  assert.equal(groupDirectory(R, "/elsewhere/clips", "", [], true), "/elsewhere/clips");
+  assert.equal(groupDirectory(R, "/elsewhere/clips", "dave", [outside], false), "/elsewhere/clips/Dave D");
+  assert.equal(groupDirectory(R, "/elsewhere/clips/", "erin", [], false), "/elsewhere/clips/erin");
+  assert.equal(groupDirectory(R, "/elsewhere/clips", "", [], false), "/elsewhere/clips");
+});
+test("two folders in one group still wait for a choice, one entry per folder", () => {
+  const twins = { handle: "frank", aliases: [], folders: [
+    { base_dir: `${R}/group a`, name: "frank", group: "group a" }, { base_dir: `${R}/group a`, name: "frank 2", group: "group a" }] };
+  assert.deepEqual(downloadPlan([twins], "frank", false), { auto: null, groups: ["group a", "group a"] });
+});
 test("paths are shown from the library root's parent", () => {
   assert.equal(shortPath(`${R}/group a/alice`, R), "media/twitter/group a/alice");
   assert.equal(shortPath(`${R}/`, R), "media/twitter");

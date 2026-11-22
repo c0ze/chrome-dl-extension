@@ -209,7 +209,7 @@ export function downloadPlan(entries, handle, isProfile) {
   if (!folders.length) {
     return { auto: null, groups: [] };
   }
-  const groups = [...new Set(folders.map((folder) => folder.group || ""))];
+  const groups = folders.map((folder) => folder.group || "");
   if (folders.length > 1) {
     return { auto: null, groups };
   }
@@ -232,10 +232,12 @@ function trimSlashes(path) {
 /**
  * The folder a group button files a download in. A post goes in the handle's own
  * folder inside the group (its recorded name there, else the handle); a profile
- * batch, or a post with no handle, names the group folder itself.
+ * batch, or a post with no handle, names the group folder itself. A group is a
+ * folder under the library root, except one the host labels with an absolute
+ * path (a folder outside the library), which is used as it is.
  */
 export function groupDirectory(root, group, handle, entries, isProfile) {
-  const groupDir = `${trimSlashes(root)}/${group}`;
+  const groupDir = String(group).startsWith("/") ? trimSlashes(group) : `${trimSlashes(root)}/${group}`;
   if (isProfile || !handle) {
     return groupDir;
   }
