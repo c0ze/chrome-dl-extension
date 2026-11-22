@@ -179,6 +179,18 @@ is loaded.
   first time you check. A handle that was only seen in the dashboard history
   starts with just those posts as known, so its first check can report older
   videos as new: use `Seen` once to set the baseline.
+- A handle's group in the downloads column has the same `Check` in its header,
+  when that handle is in the handle list and not `Stale` (a former name finds
+  it too). The button reads `Checking…` while the check runs, also when
+  `Check All` or a group's `Check` includes the handle. Afterwards the header
+  shows `N new` with `Download` and `Seen`, which do what they do in the
+  handle list, or `Nothing new` once a check since this page opened found
+  nothing. The handle list refreshes as usual. The buttons do not fold the
+  group.
+- Above the handle list's search box, one chip per group that has favorites
+  (`★ group a 12`, in name order) opens that group's favorites in the
+  downloads column, where `Play` works as it does there. The row is hidden
+  when there are no favorites; the `★ Favorites` row inside each group stays.
 - A scan that hits its round limit on either tab, or whose Videos tab could not
   be opened after the Posts tab was read, is reported as partial, and starting
   a partial download asks for confirmation first. The videos that were found

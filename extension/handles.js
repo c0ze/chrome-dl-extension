@@ -1,20 +1,26 @@
 // The handle list: every X/Twitter account in the library, filed under its
 // group, with a check that looks at a profile for videos not downloaded yet.
 
-import { formatChecked, groupHandles, handleGroups, pendingLabel } from "./grouping.js";
+import { favoriteChips, findHandleEntry, formatChecked, groupHandles, handleGroups, pendingLabel } from "./grouping.js";
 import { favoritesGroupFor } from "./library-views.js";
 
 const SCAN_ORIGINS = ["https://x.com/*"];
 const SORT_KEY = "handlesSort";
 const UNGROUPED_LABEL = "No group";
 
-export function initHandles({ callHost, showMessage, onQueued, onLoaded, onOpenFavorites, elements }) {
+export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChanged, onOpenFavorites, elements }) {
   let handles = [];
   let favoriteCounts = {};
   let groups = [];
   let busy = false;
   let progressText = "";
   let staleFound = [];
+  // Lower-cased handles: the ones in the check that is running, and the ones a
+  // check has finished for since this page opened (a failed check removes its
+  // handle again). The downloads pane reads both through `isChecking` and
+  // `wasChecked`.
+  const checking = new Set();
+  const checked = new Set();
   let editing = null;
   let adding = false;
   // Groups start closed (a library has hundreds of handles); a group the user
@@ -169,7 +175,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onOpenF
           }
         ),
         makeButton("Seen", "Mark the new videos as seen without downloading them", "button-muted-small", () => {
-          void simpleAction("mark_handle_seen", entry);
+          void markSeen(entry);
         })
       );
     }
@@ -254,7 +260,23 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onOpenF
     return details;
   }
 
+  function renderFavoriteChips() {
+    const chips = favoriteChips(favoriteCounts);
+    elements.favoriteChips.textContent = "";
+    elements.favoriteChips.classList.toggle("hidden", !chips.length);
+    for (const { group, count } of chips) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "favorite-chip";
+      chip.title = `Show the favorites in ${group}: ${count} ${count === 1 ? "video" : "videos"}`;
+      chip.textContent = `★ ${group} ${count}`;
+      chip.addEventListener("click", () => onOpenFavorites(group));
+      elements.favoriteChips.append(chip);
+    }
+  }
+
   function render() {
+    renderFavoriteChips();
     for (const button of [elements.checkAllButton, elements.importButton, elements.addHandleButton]) {
       button.disabled = busy;
     }
@@ -324,6 +346,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onOpenF
     }
     render();
     progressText = "";
+    onChanged();
   }
 
   async function hostAction(payload, failure) {
@@ -342,6 +365,8 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onOpenF
     }
     await refresh();
   }
+
+  const markSeen = (entry) => simpleAction("mark_handle_seen", entry);
 
   async function addHandle(handle, group) {
     try {
@@ -432,6 +457,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onOpenF
     await refresh();
   }
 
+  /** The handle's new videos after the check, or null when the account is gone. */
   async function checkOne(entry) {
     const scan = await chrome.runtime.sendMessage({
       type: "check-handle",
@@ -442,7 +468,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onOpenF
       if (scan?.gone) {
         await hostAction({ type: "set_handle_stale", handle: entry.handle, stale: true }, "Could not mark the handle stale.");
         staleFound.push(entry.handle);
-        return 0;
+        return null;
       }
       throw new Error(scan?.error || "The profile could not be scanned.");
     }
@@ -461,7 +487,11 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onOpenF
   }
 
   async function checkHandles(entries) {
-    if (busy || !entries.length) {
+    if (!entries.length) {
+      return;
+    }
+    if (busy) {
+      showMessage("info", "Another handle list action is still running.");
       return;
     }
 
@@ -482,12 +512,21 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onOpenF
     let found = 0;
     const failures = [];
     staleFound = [];
+    for (const entry of entries) {
+      checking.add(entry.handle.toLowerCase());
+      checked.delete(entry.handle.toLowerCase());
+    }
+    onChanged();
     try {
       for (const [index, entry] of entries.entries()) {
         progressText = `Checking ${index + 1} of ${entries.length}: @${entry.handle}`;
         render();
         try {
-          found += await checkOne(entry);
+          const pending = await checkOne(entry);
+          if (pending !== null) {
+            found += pending;
+            checked.add(entry.handle.toLowerCase());
+          }
         } catch (error) {
           failures.push(`@${entry.handle}: ${error.message}`);
         }
@@ -495,6 +534,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onOpenF
     } finally {
       busy = false;
       progressText = "";
+      checking.clear();
     }
 
     await refresh();
@@ -538,5 +578,21 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onOpenF
     render();
   });
 
-  return { refresh };
+  return {
+    refresh,
+    entryFor: (handle) => findHandleEntry(handles, handle),
+    checkHandles,
+    downloadPending,
+    markSeen,
+    // True from the start of a check that includes this handle until it ends.
+    isChecking: (handle) => {
+      const entry = findHandleEntry(handles, handle);
+      return Boolean(entry) && checking.has(entry.handle.toLowerCase());
+    },
+    // True when a check of this handle finished since this page opened.
+    wasChecked: (handle) => {
+      const entry = findHandleEntry(handles, handle);
+      return Boolean(entry) && checked.has(entry.handle.toLowerCase());
+    },
+  };
 }

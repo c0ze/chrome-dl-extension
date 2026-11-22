@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  favoriteChips,
   formatChecked,
   groupJobsByHandle,
   groupSummary,
@@ -301,4 +302,17 @@ test("a video the host left on disk is an error, not a removal", () => {
 test("taking a failed or queued download off the list removes no video", () => {
   assert.equal(videoRemoved({ ok: true, deleted: 0, missing: true }, false), false);
   assert.equal(videoRemoved({ ok: true, deleted: 0 }, false), false);
+});
+
+test("the favorites chips list the groups that have favorites, in name order", () => {
+  assert.deepEqual(favoriteChips({ "group b": 4, "Group a": 12, other: 0 }), [
+    { group: "Group a", count: 12 },
+    { group: "group b", count: 4 },
+  ]);
+});
+
+test("no favorites means no chips", () => {
+  assert.deepEqual(favoriteChips({}), []);
+  assert.deepEqual(favoriteChips({ "group a": 0 }), []);
+  assert.deepEqual(favoriteChips(undefined), []);
 });

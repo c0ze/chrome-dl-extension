@@ -642,6 +642,43 @@ input:disabled {
   margin-left: auto;
 }
 
+/* What a downloads-pane group header shows about its handle's check. */
+.group-check-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  align-self: center;
+  margin-left: auto;
+}
+
+.favorite-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.favorite-chips.hidden,
+.favorite-chips:empty {
+  display: none;
+}
+
+.favorite-chip {
+  padding: 4px 10px;
+  border: 1px solid rgba(200, 110, 51, 0.35);
+  border-radius: 999px;
+  background: rgba(255, 248, 238, 0.9);
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.favorite-chip:hover {
+  filter: brightness(0.96);
+}
+
 .handle-list .group-items {
   padding: 0 8px 8px;
   gap: 8px;
@@ -745,6 +782,7 @@ input:disabled {
 }
 
 .handle-actions .download-action-button:disabled,
+.group-check-controls .download-action-button:disabled,
 .icon-button:disabled {
   cursor: not-allowed;
   opacity: 0.55;

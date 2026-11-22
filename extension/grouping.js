@@ -202,7 +202,19 @@ export function groupHandles(entries, query, sort) {
     }));
 }
 
-function findHandleEntry(entries, handle) {
+/**
+ * The chips above the handle list: one per group that has favorites, from the
+ * counts the host returns (keyed by the favorites group), in name order.
+ */
+export function favoriteChips(counts) {
+  return Object.entries(counts || {})
+    .filter(([, count]) => count > 0)
+    .map(([group, count]) => ({ group, count }))
+    .sort((a, b) => a.group.toLowerCase().localeCompare(b.group.toLowerCase()));
+}
+
+/** The list entry for a handle, ignoring case and matching former names too. */
+export function findHandleEntry(entries, handle) {
   const wanted = String(handle || "").toLowerCase();
   if (!wanted) {
     return null;

@@ -2,9 +2,11 @@ import { batchTargetForUrl } from "./providers.js";
 import {
   autoStartReady,
   downloadPlan,
+  formatChecked,
   groupDirectory,
   groupJobsByHandle,
   groupSummary,
+  pendingLabel,
   playableJobs,
   shortPath,
   videoRemoved,
@@ -49,6 +51,7 @@ const elements = {
   dashboardLabel: document.getElementById("dashboard-label"),
   downloadControls: document.getElementById("download-controls"),
   downloadForm: document.getElementById("download-form"),
+  favoriteChips: document.getElementById("favorite-chips"),
   libraryView: document.getElementById("library-view"),
   player: document.getElementById("player"),
   removedButton: document.getElementById("removed-button"),
@@ -872,6 +875,85 @@ function makeDownloadTile(job, group) {
   return tile;
 }
 
+/**
+ * What a group header shows about its handle's check: nothing for a download
+ * with no handle, a handle that is not in the list, or one marked stale.
+ */
+function checkStateFor(group) {
+  const entry = group.handle ? handlesPanel.entryFor(group.handle) : null;
+  if (!entry || entry.stale) {
+    return null;
+  }
+  return {
+    entry,
+    checking: handlesPanel.isChecking(entry.handle),
+    nothingNew: !entry.pending_count && handlesPanel.wasChecked(entry.handle),
+  };
+}
+
+/**
+ * The header's Check, and after a check `N new` with Download and Seen, or
+ * "Nothing new". The buttons act on the handle list's entry as it is when they
+ * are clicked, and call preventDefault so the group does not fold. Check asks
+ * for the x.com permission, which needs this click: nothing may be awaited
+ * before it.
+ */
+function makeCheckControls(group, { entry, checking, nothingNew }) {
+  const controls = document.createElement("span");
+  controls.className = "group-check-controls";
+
+  const current = () => handlesPanel.entryFor(group.handle);
+  if (entry.pending_count) {
+    const badge = document.createElement("span");
+    badge.className = "handle-new";
+    badge.textContent = pendingLabel(entry.pending_count);
+    const download = makeActionButton(
+      "Download",
+      `Queue the ${entry.pending_count} new videos into this handle's folder in ${entry.group || "the library"}`,
+      "",
+      (event) => {
+        event.preventDefault();
+        const fresh = current();
+        if (fresh) {
+          void handlesPanel.downloadPending(fresh, fresh.group);
+        }
+      }
+    );
+    const seen = makeActionButton("Seen", "Mark the new videos as seen without downloading them", "button-muted-small", (event) => {
+      event.preventDefault();
+      const fresh = current();
+      if (fresh) {
+        void handlesPanel.markSeen(fresh);
+      }
+    });
+    download.disabled = checking;
+    seen.disabled = checking;
+    controls.append(badge, download, seen);
+  } else if (nothingNew) {
+    const note = document.createElement("span");
+    note.className = "group-summary";
+    note.textContent = "Nothing new";
+    note.title = formatChecked(entry.last_checked);
+    controls.append(note);
+  }
+
+  const check = makeActionButton(
+    checking ? "Checking…" : "Check",
+    "Look at this profile for new videos",
+    "button-muted-small",
+    (event) => {
+      event.preventDefault();
+      const fresh = current();
+      if (fresh) {
+        void handlesPanel.checkHandles([fresh]);
+      }
+    }
+  );
+  check.disabled = checking;
+  controls.append(check);
+  return controls;
+}
+
 function makeDownloadGroup(group) {
   const details = document.createElement("details");
   details.className = "download-group";
@@ -892,6 +974,10 @@ function makeDownloadGroup(group) {
   counts.className = "group-summary";
   counts.textContent = groupSummary(group);
   summary.append(handle, counts);
+  const checkState = checkStateFor(group);
+  if (checkState) {
+    summary.append(makeCheckControls(group, checkState));
+  }
 
   const items = document.createElement("div");
   items.className = downloadsView === "tiles" ? "group-items tiles" : "group-items";
@@ -907,8 +993,23 @@ function renderDownloads(jobs, totals) {
   lastTotals = totals;
 
   // The dashboard is polled every few seconds; rebuilding it when nothing
-  // changed would reset scrolling inside it and reload every picture.
-  const renderKey = JSON.stringify([jobs, totals, downloadsView, thumbnails.size, state.playerName]);
+  // changed would reset scrolling inside it and reload every picture. What the
+  // headers show about the handle list is part of what has to be unchanged.
+  const groups = groupJobsByHandle(jobs);
+  const checkKeys = groups.map((group) => {
+    const checkState = checkStateFor(group);
+    return (
+      checkState && [
+        checkState.entry.handle,
+        checkState.entry.group,
+        checkState.entry.pending_count,
+        checkState.entry.last_checked,
+        checkState.checking,
+        checkState.nothingNew,
+      ]
+    );
+  });
+  const renderKey = JSON.stringify([jobs, totals, downloadsView, thumbnails.size, state.playerName, checkKeys]);
   if (renderKey === lastRenderKey) {
     return;
   }
@@ -930,7 +1031,7 @@ function renderDownloads(jobs, totals) {
     return;
   }
 
-  groupJobsByHandle(jobs).forEach((group) => {
+  groups.forEach((group) => {
     elements.downloadList.append(makeDownloadGroup(group));
   });
 
@@ -1433,6 +1534,13 @@ const handlesPanel = initHandles({
   showMessage,
   onQueued: () => void pollDownloads(),
   onLoaded: onHandlesLoaded,
+  // A check, a Seen or a refresh can change what the group headers show. A
+  // list that failed to load (an empty render key) keeps its error.
+  onChanged: () => {
+    if (lastRenderKey) {
+      renderDownloads(lastJobs, lastTotals);
+    }
+  },
   elements,
 });
 
