@@ -907,3 +907,16 @@ test("without a marker a check reads on and reports the newest post it saw", asy
   // A repost of an old post is not where the timeline is.
   assert.equal(result.newestId, "505");
 });
+
+test("a check on the Media tab stops at the previous check's post", async () => {
+  withPage(`<div role="main">
+      <a href="/alice/status/600/video/1"></a>
+      <a href="/alice/status/550/photo/1"></a>
+      <a href="/alice/status/500/video/1"></a>
+    </div>`, "https://x.com/alice/media");
+  const result = await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, stopAtId: "500" });
+  assert.equal(result.done, true);
+  assert.equal(result.reachedStop, true);
+  assert.equal(result.newestId, "600");
+  assert.deepEqual(result.urls.sort(), ["https://x.com/alice/status/500", "https://x.com/alice/status/600"]);
+});

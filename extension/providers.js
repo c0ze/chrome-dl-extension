@@ -751,8 +751,8 @@ export async function profileScanChunk(options) {
   // time). A pinned post or a repost sits out of date order, so it says
   // nothing about where the scan is; both carry a social-context line.
   const stopAtId = /^\d+$/.test(String(options.stopAtId || "")) ? BigInt(options.stopAtId) : null;
-  function notePostPosition(article, id) {
-    if (article.querySelector("[data-testid='socialContext']") || !/^\d+$/.test(id)) {
+  function notePostId(id) {
+    if (!/^\d+$/.test(id)) {
       return;
     }
     if (!progress.newestId || BigInt(id) > BigInt(progress.newestId)) {
@@ -761,6 +761,13 @@ export async function profileScanChunk(options) {
     if (stopAtId !== null && BigInt(id) <= stopAtId) {
       progress.reachedStop = true;
     }
+  }
+
+  function notePostPosition(article, id) {
+    if (article.querySelector("[data-testid='socialContext']")) {
+      return;
+    }
+    notePostId(id);
   }
 
   function collectVisibleLinks() {
@@ -786,7 +793,8 @@ export async function profileScanChunk(options) {
       links.set(permalink.url, permalink.url);
     });
 
-    // Media-grid cells are plain anchors rather than articles.
+    // Media-grid cells are plain anchors rather than articles. The grid is in
+    // date order and has no pinned posts or reposts, so every cell is a position.
     document.querySelectorAll("a[href*='/status/']").forEach((anchor) => {
       if (anchor.closest("article")) {
         return;
@@ -796,6 +804,7 @@ export async function profileScanChunk(options) {
       if (!ownedByProfile(status)) {
         return;
       }
+      notePostId(status.id);
       if (!status.isVideoPath && !hasOwnVideoElement(anchor)) {
         return;
       }
