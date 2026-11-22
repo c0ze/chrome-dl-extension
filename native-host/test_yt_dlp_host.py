@@ -1831,15 +1831,15 @@ class HandleRenameTests(LibraryCase):
     def test_a_merge_keeps_each_folder_in_its_own_group(self) -> None:
         # The new handle only has a folder in another group, so the old videos
         # stay in theirs, under a folder for the new handle.
-        self.video("white/new_name/new_name-1234567890009.mp4")
+        self.video("group c/new_name/new_name-1234567890009.mp4")
         host.import_library()
 
         host.update_handle("old_name", "new_name", None)
 
         self.assertTrue((self.library / "group d/new_name/old_name/old_name-1234567890001.mp4").is_file())
-        self.assertTrue((self.library / "white/new_name/new_name-1234567890009.mp4").is_file())
+        self.assertTrue((self.library / "group c/new_name/new_name-1234567890009.mp4").is_file())
         entry = self.handles()["new_name"]
-        self.assertEqual([folder["group"] for folder in entry["folders"]], ["white", "group d"])
+        self.assertEqual([folder["group"] for folder in entry["folders"]], ["group c", "group d"])
 
     def test_a_rename_applies_in_every_group_the_handle_is_filed_under(self) -> None:
         self.video("group a/old_name/x.mp4")
@@ -1858,12 +1858,12 @@ class HandleRenameTests(LibraryCase):
         self.video("group a/old_name/x.mp4")
         host.import_library()
 
-        host.update_handle("old_name", None, "white", "group d")
+        host.update_handle("old_name", None, "group c", "group d")
 
-        self.assertTrue((self.library / "white/old_name/old_name-1234567890001.mp4").is_file())
+        self.assertTrue((self.library / "group c/old_name/old_name-1234567890001.mp4").is_file())
         self.assertTrue((self.library / "group a/old_name/x.mp4").is_file())
         with self.assertRaises(ValueError):
-            host.update_handle("old_name", None, "group a", "white")
+            host.update_handle("old_name", None, "group a", "group c")
 
     def test_new_videos_go_to_the_folder_in_the_group_they_were_asked_from(self) -> None:
         self.video("group a/old_name/x.mp4")
@@ -1884,7 +1884,7 @@ class HandleRenameTests(LibraryCase):
             self.assertEqual(
                 host.known_handle_folder("old_name", str(self.library / group)), ("old_name", "old_name")
             )
-        self.assertIsNone(host.known_handle_folder("old_name", str(self.library / "white")))
+        self.assertIsNone(host.known_handle_folder("old_name", str(self.library / "group c")))
 
     def test_a_second_rename_keeps_every_former_handle(self) -> None:
         host.update_handle("old_name", "mid_name", None)

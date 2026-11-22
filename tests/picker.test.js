@@ -111,7 +111,7 @@ test("other X pages are neither a post nor a profile, so they get no group butto
   for (const url of [
     "https://x.com/home",
     "https://x.com/explore",
-    "https://x.com/search?q=cats",
+    "https://x.com/search?q=dogs",
     "https://x.com/notifications",
     "https://x.com/i/bookmarks",
     "https://x.com/i/lists/1001",
