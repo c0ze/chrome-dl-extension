@@ -12,7 +12,12 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
   let handles = [];
   let favoriteCounts = {};
   let groups = [];
+  // `busy` is held by Import and Edit/Save. A check has its own slot, taken
+  // before it asks for the x.com permission and given up only by that run, so
+  // no other action finishing can free it; `working()` is either.
   let busy = false;
+  let checkRunning = false;
+  const working = () => busy || checkRunning;
   let progressText = "";
   let staleFound = [];
   // Lower-cased handles: the ones in the check that is running, and the ones
@@ -34,7 +39,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
     button.className = `download-action-button ${extraClass}`.trim();
     button.textContent = label;
     button.title = title;
-    button.disabled = busy;
+    button.disabled = working();
     button.addEventListener("click", onClick);
     return button;
   }
@@ -279,9 +284,9 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
   function render() {
     renderFavoriteChips();
     for (const button of [elements.checkAllButton, elements.importButton, elements.addHandleButton]) {
-      button.disabled = busy;
+      button.disabled = working();
     }
-    elements.checkAllButton.disabled = busy || !handles.length;
+    elements.checkAllButton.disabled = working() || !handles.length;
     elements.handleList.textContent = "";
 
     elements.handleGroups.textContent = "";
@@ -495,16 +500,16 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
     if (!entries.length) {
       return;
     }
-    if (busy) {
+    if (working()) {
       showMessage("info", "Another handle list action is still running.");
       return;
     }
 
-    // The slot is taken before the permission is asked for, so a second Check
-    // during the prompt finds it busy. The request stays the first await: Chrome
-    // only shows the prompt for a user gesture, and a scan cannot read a tab it
-    // opened itself without it.
-    busy = true;
+    // The check slot is taken before the permission is asked for, so a second
+    // Check during the prompt finds it taken. The request stays the first await:
+    // Chrome only shows the prompt for a user gesture, and a scan cannot read a
+    // tab it opened itself without it.
+    checkRunning = true;
     let granted = false;
     try {
       granted = await chrome.permissions.request({ origins: SCAN_ORIGINS });
@@ -512,7 +517,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
       granted = false;
     }
     if (!granted) {
-      busy = false;
+      checkRunning = false;
       render();
       showMessage("error", "Checking profiles needs permission to read x.com.");
       return;
@@ -543,7 +548,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
         }
       }
     } finally {
-      busy = false;
+      checkRunning = false;
       progressText = "";
       checking.clear();
     }

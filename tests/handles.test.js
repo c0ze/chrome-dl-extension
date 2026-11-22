@@ -55,12 +55,16 @@ async function setup({ scanResults = {} } = {}) {
   let permissionRequests = 0;
   let permissionGate = null;
   let scanGate = null;
+  let importGate = null;
   let grant = true;
 
   const callHost = async (payload) => {
     log.push(payload);
     const target = entries.find((candidate) => candidate.handle === payload.handle);
     switch (payload.type) {
+      case "import_library":
+        if (importGate) await importGate;
+        return { ok: true, found: 2, videos: 6, added: 0, skipped_count: 0, in_several_groups: 0 };
       case "get_handles":
         return { ok: true, handles: JSON.parse(JSON.stringify(entries)), groups: ["group a"], library_root: "/srv/archive/media/twitter" };
       case "get_favorites":
@@ -133,6 +137,12 @@ async function setup({ scanResults = {} } = {}) {
     scans,
     permissionRequests: () => permissionRequests,
     changes: () => changed,
+    importButton: $("import"),
+    holdImport() {
+      const [gate, release] = open();
+      importGate = gate;
+      return release;
+    },
     deny: () => { grant = false; },
     allow: () => { grant = true; },
     holdPermission() {
@@ -215,6 +225,75 @@ test("a second Check during a prompt that ends in a refusal is turned away, then
   page.allow();
   await page.panel.checkHandles([page.entry("bob")]);
   assert.deepEqual(page.scans, ["bob"]);
+});
+
+test("an Import that finishes while the permission prompt is open does not free the check slot", async () => {
+  const page = await setup();
+  const answer = page.holdPermission();
+  const finishScan = page.holdScans();
+  const first = page.panel.checkHandles([page.entry("alice")]);
+
+  page.importButton.click();
+  await settle();
+  assert.ok(page.log.some((message) => message.type === "import_library"), "the Import ran during the wait");
+
+  answer();
+  await settle();
+  assert.deepEqual(page.scans, ["alice"]);
+  assert.equal(page.panel.isChecking("alice"), true);
+
+  await within(page.panel.checkHandles([page.entry("bob")]), "the second Check");
+  await settle();
+  assert.deepEqual(page.messages.at(-1), ["info", "Another handle list action is still running."]);
+  assert.deepEqual(page.scans, ["alice"], "only one scan runs");
+  assert.equal(page.permissionRequests(), 1);
+  assert.equal(page.panel.isChecking("alice"), true, "the first check keeps its mark until its scan ends");
+  assert.equal(page.panel.isChecking("bob"), false);
+
+  finishScan();
+  await first;
+  assert.equal(page.panel.isChecking("alice"), false);
+});
+
+test("an Import that ends in the middle of a scan does not free the check slot", async () => {
+  const page = await setup();
+  const answer = page.holdPermission();
+  const finishScan = page.holdScans();
+  const finishImport = page.holdImport();
+  const first = page.panel.checkHandles([page.entry("alice")]);
+
+  page.importButton.click();
+  await settle();
+  answer();
+  await settle();
+  assert.equal(page.panel.isChecking("alice"), true);
+
+  finishImport();
+  await settle();
+  assert.equal(page.panel.isChecking("alice"), true, "the Import's end did not end the check's mark");
+  await within(page.panel.checkHandles([page.entry("bob")]), "the second Check");
+  assert.deepEqual(page.scans, ["alice"], "only one scan runs");
+  assert.equal(page.permissionRequests(), 1);
+
+  finishScan();
+  await first;
+  assert.equal(page.panel.isChecking("alice"), false);
+});
+
+test("a check that is running does not free an Import's slot either", async () => {
+  const page = await setup();
+  const finishImport = page.holdImport();
+  page.importButton.click();
+  await settle();
+
+  await within(page.panel.checkHandles([page.entry("alice")]), "a Check during an Import");
+  assert.deepEqual(page.messages.at(-1), ["info", "Another handle list action is still running."]);
+  assert.equal(page.permissionRequests(), 0, "no permission is asked for while another action runs");
+  finishImport();
+  await settle();
+
+  await page.panel.checkHandles([page.entry("alice")]);
+  assert.deepEqual(page.scans, ["alice"]);
 });
 
 test("a check that finds nothing says so, until the next check", async () => {
