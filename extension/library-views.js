@@ -1,7 +1,7 @@
 // The two library views that take over the dashboard panel: a group's
 // favorites (shared with Haruna's vtag) and the videos you removed.
 
-import { formatBytes, formatDuration } from "./grouping.js";
+import { formatBytes, formatDuration, playableFavorites } from "./grouping.js";
 
 const PAGE_SIZE = 60;
 const THUMBNAIL_BATCH = 24;
@@ -12,7 +12,7 @@ export function favoritesGroupFor(handleGroup) {
   return handleGroup || UNGROUPED_FAVORITES;
 }
 
-export function initLibraryViews({ callHost, showMessage, elements, onChanged }) {
+export function initLibraryViews({ callHost, showMessage, elements, onChanged, getPlayer, getPlayerName }) {
   let mode = null; // { kind: "favorites", group } or { kind: "removed" }
   let items = [];
   let total = 0;
@@ -88,8 +88,11 @@ export function initLibraryViews({ callHost, showMessage, elements, onChanged })
         badge.textContent = "File missing";
         picture.append(badge);
       } else {
+        picture.classList.add("playable");
+        picture.addEventListener("click", () => play(item));
         actions.append(
-          button("Play", "Open this video in the configured player", "", () => {
+          button("Play", "Play this video here", "", () => play(item)),
+          button(getPlayerName(), "Open this video in the configured player", "button-muted-small", () => {
             void fileAction("play_library_file", item.relative);
           }),
           button("Folder", "Open the containing folder", "button-muted-small", () => {
@@ -105,7 +108,7 @@ export function initLibraryViews({ callHost, showMessage, elements, onChanged })
       if (item.exists) {
         actions.append(
           button("Remove", "Delete this video from disk and keep it under Removed", "button-danger", () => {
-            void removeFavorite(item);
+            void removeFromTile(item);
           })
         );
       }
@@ -166,7 +169,7 @@ export function initLibraryViews({ callHost, showMessage, elements, onChanged })
       bar.append(summary);
       if (items.some((item) => item.exists)) {
         bar.append(
-          button("Play All", "Open this group's favorites as a playlist", "group-check", () => {
+          button("Play All", "Open this group's favorites as a playlist in the configured player", "group-check", () => {
             void hostAction({ type: "play_favorites", group: mode.group }, "Could not play the favorites.").catch(
               (error) => showMessage("error", error.message)
             );
@@ -271,28 +274,72 @@ export function initLibraryViews({ callHost, showMessage, elements, onChanged })
     }
   }
 
+  // Resolves to the favorite's new state. Throws when the host refused: the
+  // caller says where the failure shows (the page's message, or the player).
+  async function setFavorite(item, favorite) {
+    const response = await hostAction(
+      { type: "set_favorite", relative: item.relative, favorite },
+      "Could not change the favorite."
+    );
+    onChanged();
+    return Boolean(response.favorite);
+  }
+
+  // Resolves to true once the file is deleted, false when the confirmation was
+  // declined. Throws when the host refused, like setFavorite.
+  async function removeFavorite(item) {
+    if (!window.confirm(`Delete ${item.name} from disk? It stays listed under Removed and will not be downloaded again.`)) {
+      return false;
+    }
+    await hostAction({ type: "remove_library_files", paths: [item.relative], reason: "removed" }, "Could not remove the video.");
+    showMessage("success", `Deleted ${item.name}.`);
+    onChanged();
+    return true;
+  }
+
+  // The tile's star and Remove report a failure in the page's message.
   async function unfavorite(item) {
     try {
-      await hostAction({ type: "set_favorite", relative: item.relative, favorite: false }, "Could not change the favorite.");
+      await setFavorite(item, false);
     } catch (error) {
       showMessage("error", error.message);
     }
-    onChanged();
     await load();
   }
 
-  async function removeFavorite(item) {
-    if (!window.confirm(`Delete ${item.name} from disk? It stays listed under Removed and will not be downloaded again.`)) {
-      return;
-    }
+  async function removeFromTile(item) {
     try {
-      await hostAction({ type: "remove_library_files", paths: [item.relative], reason: "removed" }, "Could not remove the video.");
-      showMessage("success", `Deleted ${item.name}.`);
+      if (!(await removeFavorite(item))) {
+        return;
+      }
     } catch (error) {
       showMessage("error", error.message);
     }
-    onChanged();
     await load();
+  }
+
+  // Opens the player over this group's favorites that are still on disk. The
+  // player reports a failed Favorite or Remove itself, so those handlers throw
+  // instead of using the page's message; the view reloads once it closes.
+  function play(item) {
+    const queue = playableFavorites(items);
+    const index = queue.findIndex((entry) => entry.item === item);
+    if (index < 0) {
+      return;
+    }
+    const shown = mode;
+    getPlayer().open(queue, index, {
+      toggleFavorite: (entry) => setFavorite(entry.item, !entry.favorite),
+      remove: (entry) => removeFavorite(entry.item),
+      external: (entry) => {
+        void fileAction("play_library_file", entry.item.relative);
+      },
+      closed: () => {
+        if (mode === shown) {
+          void load();
+        }
+      },
+    });
   }
 
   async function allowAgain(item) {

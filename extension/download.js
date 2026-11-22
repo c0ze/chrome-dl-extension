@@ -1,7 +1,8 @@
 import { batchTargetForUrl } from "./providers.js";
-import { folderForTarget, groupJobsByHandle, groupSummary, jobHandle } from "./grouping.js";
+import { folderForTarget, groupJobsByHandle, groupSummary, jobHandle, playableJobs } from "./grouping.js";
 import { initHandles } from "./handles.js";
 import { initLibraryViews } from "./library-views.js";
+import { createPlayer, playerLabel } from "./player.js";
 
 const HOST_NAME = "dev.arda.ytdlp_host";
 const RECENT_DIRECTORIES_KEY = "recentDownloadDirectories";
@@ -39,6 +40,7 @@ const elements = {
   downloadControls: document.getElementById("download-controls"),
   downloadForm: document.getElementById("download-form"),
   libraryView: document.getElementById("library-view"),
+  player: document.getElementById("player"),
   removedButton: document.getElementById("removed-button"),
   handleGroups: document.getElementById("handle-groups"),
   handleList: document.getElementById("handle-list"),
@@ -58,6 +60,7 @@ const elements = {
 const state = {
   defaultDirectory: "~/Downloads",
   partialAcknowledged: false,
+  playerName: playerLabel(""),
   profileName: "",
   profileScanError: "",
   profileUrls: null,
@@ -97,6 +100,13 @@ function showMessage(kind, text) {
 function hideMessage() {
   elements.message.className = "message hidden";
   elements.message.textContent = "";
+}
+
+// Where a failed Remove or Favorite shows when its button is on the page. The
+// same actions started from the player throw into the player instead, which
+// shows the failure under the video.
+function reportToPage(error) {
+  showMessage("error", error.message || "That did not work.");
 }
 
 function callHost(payload) {
@@ -497,6 +507,10 @@ async function cancelDashboardJob(jobId) {
   }
 }
 
+// Resolves to true when the job's video is gone: deleted now, or already
+// missing from disk when the job was taken off the list. False when the
+// confirmation was declined, or when there was no video to delete (a failed or
+// queued job). Throws when the host refused; the caller shows the failure.
 async function removeDashboardJob(job, deletes) {
   if (
     deletes &&
@@ -504,23 +518,20 @@ async function removeDashboardJob(job, deletes) {
       `Delete ${formatJobTitle(job)} from disk? It stays listed under Removed and will not be downloaded again.`
     )
   ) {
-    return;
+    return false;
   }
 
-  try {
-    const response = await callHost({ type: "remove_download", job_id: job.id });
-    if (!response?.ok) {
-      throw new Error(response?.error || "Could not remove this download.");
-    }
-
-    if (response.deleted) {
-      showMessage("success", `Deleted ${formatJobTitle(job)}. It is listed under Removed.`);
-      void handlesPanel.refresh();
-    }
-    void pollDownloads();
-  } catch (error) {
-    showMessage("error", error.message || "Could not remove this download.");
+  const response = await callHost({ type: "remove_download", job_id: job.id });
+  if (!response?.ok) {
+    throw new Error(response?.error || "Could not remove this download.");
   }
+
+  if (response.deleted) {
+    showMessage("success", `Deleted ${formatJobTitle(job)}. It is listed under Removed.`);
+    void handlesPanel.refresh();
+  }
+  void pollDownloads();
+  return Boolean(response.deleted || deletes);
 }
 
 async function clearDashboardJobs() {
@@ -548,17 +559,17 @@ async function playDashboardJob(jobId) {
   }
 }
 
-async function favoriteDashboardJob(job) {
-  try {
-    const response = await callHost({ type: "set_favorite", job_id: job.id, favorite: !job.favorite });
-    if (!response?.ok) {
-      throw new Error(response?.error || "Could not change the favorite.");
-    }
-    void pollDownloads();
-    void handlesPanel.refresh();
-  } catch (error) {
-    showMessage("error", error.message || "Could not change the favorite.");
+// Resolves to the favorite's new state. `favorite` is the state to set; the
+// tile's star flips what the list last showed, the player what it shows now.
+// Throws when the host refused; the caller shows the failure.
+async function favoriteDashboardJob(job, favorite = !job.favorite) {
+  const response = await callHost({ type: "set_favorite", job_id: job.id, favorite });
+  if (!response?.ok) {
+    throw new Error(response?.error || "Could not change the favorite.");
   }
+  void pollDownloads();
+  void handlesPanel.refresh();
+  return Boolean(response.favorite);
 }
 
 async function openDashboardFolder(jobId) {
@@ -597,7 +608,39 @@ function makeActionButton(label, title, extraClass, onClick) {
   return button;
 }
 
-function makeJobActions(job) {
+// The one inline player, made the first time a video is played so it carries
+// the external player's name from the host's config.
+let inlinePlayer = null;
+
+function getPlayer() {
+  inlinePlayer ??= createPlayer({ root: elements.player, playerName: state.playerName });
+  return inlinePlayer;
+}
+
+/**
+ * Plays a finished download in the inline player, with the rest of its
+ * handle group's finished downloads to step through. The player reports a
+ * failed Favorite or Remove itself, so those handlers throw instead of using
+ * the page's message; the list has already refreshed behind it by the time it
+ * closes.
+ */
+function playJob(job, group) {
+  const queue = playableJobs(group);
+  const index = queue.findIndex((entry) => entry.job === job);
+  if (index < 0) {
+    return;
+  }
+
+  getPlayer().open(queue, index, {
+    toggleFavorite: (entry) => favoriteDashboardJob(entry.job, !entry.favorite),
+    remove: (entry) => removeDashboardJob(entry.job, true),
+    external: (entry) => {
+      void playDashboardJob(entry.job.id);
+    },
+  });
+}
+
+function makeJobActions(job, group) {
   const actions = document.createElement("div");
   actions.className = "download-actions";
 
@@ -630,7 +673,10 @@ function makeJobActions(job) {
 
   if (job.status === "complete" && job.filename) {
     actions.append(
-      makeActionButton("Play", "Open this video in the configured player", "", () => {
+      makeActionButton("Play", "Play this video here", "", () => {
+        playJob(job, group);
+      }),
+      makeActionButton(state.playerName, "Open this video in the configured player", "button-muted-small", () => {
         void playDashboardJob(job.id);
       }),
       makeActionButton(
@@ -638,7 +684,7 @@ function makeJobActions(job) {
         job.favorite ? "Remove from favorites" : "Add to this group's favorites",
         job.favorite ? "favorite-button active" : "favorite-button",
         () => {
-          void favoriteDashboardJob(job);
+          favoriteDashboardJob(job).catch(reportToPage);
         }
       )
     );
@@ -662,7 +708,7 @@ function makeJobActions(job) {
           : "Take this download off the list",
         "button-danger",
         () => {
-          void removeDashboardJob(job, deletes);
+          removeDashboardJob(job, deletes).catch(reportToPage);
         }
       )
     );
@@ -692,7 +738,7 @@ function makeJobMeta(job) {
   return meta;
 }
 
-function makeDownloadItem(job) {
+function makeDownloadItem(job, group) {
   const item = document.createElement("article");
   item.className = "download-item";
 
@@ -708,7 +754,7 @@ function makeDownloadItem(job) {
   title.title = job.url || "";
   titleGroup.append(title);
 
-  main.append(titleGroup, makeJobActions(job));
+  main.append(titleGroup, makeJobActions(job, group));
 
   const track = document.createElement("div");
   track.className = "progress-track";
@@ -731,7 +777,7 @@ function makeDownloadItem(job) {
   return item;
 }
 
-function makeDownloadTile(job) {
+function makeDownloadTile(job, group) {
   const tile = document.createElement("article");
   tile.className = "download-tile";
 
@@ -746,8 +792,12 @@ function makeDownloadTile(job) {
   } else {
     picture.textContent = job.status === "complete" ? "No preview" : formatProgress(job);
   }
+  if (job.status === "complete" && job.filename) {
+    picture.classList.add("playable");
+    picture.addEventListener("click", () => playJob(job, group));
+  }
 
-  const actions = makeJobActions(job);
+  const actions = makeJobActions(job, group);
   // The status reads better on the picture than squeezed in with the buttons.
   picture.append(actions.querySelector(".download-status"));
 
@@ -814,7 +864,7 @@ function makeDownloadGroup(group) {
   const items = document.createElement("div");
   items.className = downloadsView === "tiles" ? "group-items tiles" : "group-items";
   const makeItem = downloadsView === "tiles" ? makeDownloadTile : makeDownloadItem;
-  group.jobs.forEach((job) => items.append(makeItem(job)));
+  group.jobs.forEach((job) => items.append(makeItem(job, group)));
 
   details.append(summary, items);
   return details;
@@ -826,7 +876,7 @@ function renderDownloads(jobs, totals) {
 
   // The dashboard is polled every few seconds; rebuilding it when nothing
   // changed would reset scrolling inside it and reload every picture.
-  const renderKey = JSON.stringify([jobs, totals, downloadsView, thumbnails.size]);
+  const renderKey = JSON.stringify([jobs, totals, downloadsView, thumbnails.size, state.playerName]);
   if (renderKey === lastRenderKey) {
     return;
   }
@@ -1117,13 +1167,13 @@ async function startDownload(directory, allowDuplicate = false) {
   }
 }
 
-async function loadDefaultDirectory() {
+async function loadHostConfig() {
   const response = await callHost({ type: "get_config" });
   if (!response?.ok) {
     throw new Error(response?.error || "Could not load native host config.");
   }
 
-  return response.config?.download_dir || "~/Downloads";
+  return response.config || {};
 }
 
 async function initialize() {
@@ -1150,14 +1200,17 @@ async function initialize() {
   }
 
   try {
-    const [defaultDirectory, recentDirectories] = await Promise.all([
-      loadDefaultDirectory(),
-      getRecentDirectories(),
-    ]);
+    const [config, recentDirectories] = await Promise.all([loadHostConfig(), getRecentDirectories()]);
+    const defaultDirectory = config.download_dir || "~/Downloads";
 
     state.defaultDirectory = defaultDirectory;
     elements.downloadDir.value = recentDirectories[0] || defaultDirectory;
     renderRecentDirectories(recentDirectories);
+
+    // The Play buttons carry the external player's name; draw them again if
+    // the list was shown before the config arrived.
+    state.playerName = playerLabel(config.player);
+    renderDownloads(lastJobs, lastTotals);
   } catch (error) {
     showMessage(
       "error",
@@ -1279,6 +1332,8 @@ const libraryViews = initLibraryViews({
     void pollDownloads();
     void handlesPanel.refresh();
   },
+  getPlayer,
+  getPlayerName: () => state.playerName,
 });
 
 const handlesPanel = initHandles({

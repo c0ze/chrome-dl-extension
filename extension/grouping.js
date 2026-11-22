@@ -73,6 +73,24 @@ export function groupSummary(group) {
   return parts.join(", ");
 }
 
+/**
+ * What the inline player steps through for a handle group: its finished
+ * downloads that have a file, in display order. The title is the handle, empty
+ * for downloads that have none (the player adds the "@" itself).
+ */
+export function playableJobs(group) {
+  return group.jobs
+    .filter((job) => job.status === "complete" && job.filename)
+    .map((job) => ({ path: job.filename, title: group.handle, favorite: Boolean(job.favorite), job }));
+}
+
+/** The same for a favorites group: the favorites whose file is still there. */
+export function playableFavorites(favorites) {
+  return favorites
+    .filter((item) => item.exists)
+    .map((item) => ({ path: item.path, title: item.handle, favorite: true, item }));
+}
+
 /** "3 new", for a handle row; empty when a check found nothing. */
 export function pendingLabel(count) {
   return count > 0 ? `${count} new` : "";

@@ -14,6 +14,14 @@ export function fileUrl(path) {
   return "file://" + path.split("/").map(encodeURIComponent).join("/");
 }
 
+// The external player's button label: the program the configured command
+// runs, without its path or arguments, capitalised ("mpv --fs" -> "Mpv").
+export function playerLabel(command) {
+  const program = String(command ?? "").match(/^\s*(?:"([^"]*)"|'([^']*)'|(\S+))/);
+  const name = (program?.[1] ?? program?.[2] ?? program?.[3] ?? "").split("/").pop();
+  return name ? name[0].toUpperCase() + name.slice(1) : "Player";
+}
+
 async function checkFileAccess() {
   try {
     return Boolean(await globalThis.chrome.extension.isAllowedFileSchemeAccess());

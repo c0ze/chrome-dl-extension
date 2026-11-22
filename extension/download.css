@@ -536,6 +536,10 @@ input:disabled {
   font-size: 0.78rem;
 }
 
+.tile-picture.playable {
+  cursor: pointer;
+}
+
 .tile-picture img {
   position: absolute;
   inset: 0;

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
-import { createPlayer, fileUrl } from "../extension/player.js";
+import { createPlayer, fileUrl, playerLabel } from "../extension/player.js";
 
 const PATHS = ["/srv/archive/a.mp4", "/srv/archive/b.mp4", "/srv/archive/c.mp4"];
 
@@ -43,6 +43,20 @@ function setup({ items = PATHS, index = 0, handlers = {}, playerName = "haruna" 
     button: (action) => q(`[data-action="${action}"]`),
   };
 }
+
+test("the external player's button is named after its program", () => {
+  assert.equal(playerLabel("haruna"), "Haruna");
+  assert.equal(playerLabel("mpv --fs"), "Mpv");
+  assert.equal(playerLabel("/usr/bin/haruna"), "Haruna");
+  assert.equal(playerLabel('"/opt/my player/vlc" --fullscreen'), "Vlc");
+  assert.equal(playerLabel("'/opt/my player/vlc'"), "Vlc");
+});
+
+test("with no usable player command the button is just Player", () => {
+  for (const command of ["", "   ", "/", undefined, null]) {
+    assert.equal(playerLabel(command), "Player", String(command));
+  }
+});
 
 test("fileUrl encodes each segment", () => {
   assert.equal(fileUrl("/srv/a b/#1 ?.mp4"), "file:///srv/a%20b/%231%20%3F.mp4");

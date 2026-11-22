@@ -33,7 +33,11 @@ The default download directory is `~/Downloads`.
 3. Open `chrome://extensions`.
 4. Turn on Developer mode.
 5. Click Load unpacked and select the `extension/` folder in this repo.
-6. Optional: open the extension's Options page to adjust the download
+6. Open the extension's Details in `chrome://extensions` and turn on
+   `Allow access to file URLs`. The downloads screen plays finished videos
+   itself and needs this to read them from disk; without it the player says
+   so instead of playing.
+7. Optional: open the extension's Options page to adjust the download
    directory, cookie browser, profile, or extra `yt-dlp` args.
 
 The extension uses a fixed development ID:
@@ -181,6 +185,23 @@ is loaded.
 - Use `Folder` on a dashboard item to open the containing folder. Completed
   downloads use the final filename reported by `yt-dlp`; otherwise the selected
   download folder is opened.
+- `Play` on a finished download, or a click on its tile's picture, plays the
+  video in an overlay over the downloads column, in the same window. It starts
+  muted every time and uses Chrome's own video controls (seek, volume,
+  fullscreen, picture-in-picture). The header shows `@handle · 2 of 5`, and
+  `Prev` and `Next` step through that handle's finished downloads in the order
+  the dashboard lists them. `Favorite` and `Remove` do what they do on the
+  dashboard, so `Remove` asks first and then moves on to the next video;
+  if one fails, the reason shows in the overlay. The button named after your
+  player (`Haruna`, `Mpv`, ...) opens the video in that program instead, and
+  `Esc` or `✕` closes the overlay. This needs `Allow access to file URLs` for
+  the extension in `chrome://extensions` (see Setup); a file that has moved or
+  cannot be decoded is reported in the overlay, where the player's button
+  still works.
+- A group's favorites view plays the same way: `Play` or the tile's picture
+  opens the overlay over that group's favorites whose file is still there,
+  and the view refreshes when the overlay closes. `Play All` still opens the
+  group's favorites as a playlist in your configured player.
 - Use `Clear List` to take finished, failed and queued items off the
   dashboard without touching their files. Running downloads are kept.
 - If a download is interrupted because its worker process died, for example on
@@ -224,8 +245,11 @@ Default config:
 
 You can edit that file manually or use the extension options page.
 
-`player` is the command the dashboard's `Play` button runs with the video file
-as its last argument. It may include arguments, for example `mpv --fs`.
+`player` is the command run with the video file as its last argument by the
+button named after it (`Haruna` for `haruna`, `Mpv` for `mpv --fs`), on the
+dashboard, in the player overlay and in a group's favorites; `Play All` opens
+a playlist with it. `Play` itself uses the overlay. The command may include
+arguments, for example `mpv --fs`.
 
 ### Which browser profile supplies the cookies
 

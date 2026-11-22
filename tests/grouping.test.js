@@ -5,6 +5,8 @@ import {
   groupJobsByHandle,
   groupSummary,
   jobHandle,
+  playableFavorites,
+  playableJobs,
 } from "../extension/grouping.js";
 
 const job = (handle, status, extra = {}) => ({
@@ -246,4 +248,46 @@ test("auto-start waits for a profile scan to find videos", () => {
   assert.equal(autoStartReady({ ...base, isProfile: false }), true);
   assert.equal(autoStartReady({ ...base, isProfile: false, folderEdited: true }), false);
   assert.equal(autoStartReady({ ...base, isProfile: false, started: true }), false);
+});
+
+test("the player steps through a group's finished downloads in display order", () => {
+  const [group] = groupJobsByHandle([
+    job("alice", "complete", { id: "a", filename: "/srv/archive/alice/a.mp4", favorite: true }),
+    job("alice", "running", { id: "b" }),
+    job("alice", "complete", { id: "c", filename: null }),
+    job("alice", "failed", { id: "d", filename: "/srv/archive/alice/d.mp4" }),
+    job("alice", "complete", { id: "e", filename: "/srv/archive/alice/e.mp4" }),
+  ]);
+  const items = playableJobs(group);
+  assert.deepEqual(items.map((item) => item.path), ["/srv/archive/alice/a.mp4", "/srv/archive/alice/e.mp4"]);
+  assert.deepEqual(items.map((item) => item.favorite), [true, false]);
+  assert.deepEqual(items.map((item) => item.title), ["alice", "alice"]);
+  assert.equal(items[0].job, group.jobs[0]);
+  assert.equal(items[1].job, group.jobs[4]);
+});
+
+test("downloads with no handle reach the player with an empty title", () => {
+  const [group] = groupJobsByHandle([
+    { url: "https://www.facebook.com/reel/1", status: "complete", filename: "/srv/archive/other/1.mp4" },
+  ]);
+  assert.deepEqual(playableJobs(group).map((item) => item.title), [""]);
+});
+
+test("the player's list of a group with nothing finished is empty", () => {
+  const [group] = groupJobsByHandle([job("alice", "queued")]);
+  assert.deepEqual(playableJobs(group), []);
+});
+
+test("the player steps through the favorites whose file is still there", () => {
+  const favorites = [
+    { path: "/srv/archive/group a/alice/1.mp4", handle: "alice", exists: true },
+    { path: "/srv/archive/group a/bob/2.mp4", handle: "bob", exists: false },
+    { path: "/srv/archive/group a/bob/3.mp4", handle: "bob", exists: true },
+  ];
+  const items = playableFavorites(favorites);
+  assert.deepEqual(items.map((item) => [item.path, item.title, item.favorite]), [
+    ["/srv/archive/group a/alice/1.mp4", "alice", true],
+    ["/srv/archive/group a/bob/3.mp4", "bob", true],
+  ]);
+  assert.equal(items[1].item, favorites[2]);
 });
