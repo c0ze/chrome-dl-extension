@@ -1988,7 +1988,8 @@ def job_file_missing(job: dict[str, Any]) -> bool:
         return True
     try:
         os.stat(os.path.expanduser(filename))
-    except (FileNotFoundError, NotADirectoryError):
+    except (FileNotFoundError, NotADirectoryError, ValueError):
+        # A name that cannot be a path (a NUL byte) names no file either.
         return True
     except OSError:
         return False
@@ -2967,7 +2968,8 @@ def remember_handle(
     """Record downloaded posts under their handle. Never fails a download."""
 
     def mutator(state: dict[str, Any]) -> None:
-        entry = handle_entry(state, username)
+        # A former handle belongs to the entry that lists it: never a second one.
+        entry = find_handle(state, username) or handle_entry(state, username)
         mark_posts_known(entry, urls)
         if base_dir and not folder_in_base(entry, base_dir) and (replace_folder or not entry["base_dir"]):
             # A batch into a folder the handle does not have yet adds that
@@ -3014,8 +3016,28 @@ def is_handle_folder(username: str, folder_name: str, parent: str) -> bool:
         log_line(f"Could not read the handle list: {error}")
         return False
 
+    if entry and folder_name.lower() == str(entry.get("handle") or "").lower():
+        # A former handle's post goes to a folder named for the current one.
+        return True
+
     folder = folder_in_base(entry, parent) if entry else None
     return folder is not None and folder["name"] == folder_name
+
+
+def mended_folder(folder: dict[str, str]) -> dict[str, str]:
+    """A folder record with the doubled handle folder of old single-post writes undone.
+
+    Those stored <group>/<handle> as base_dir for a folder also named <handle>, so
+    the videos would have gone to <group>/<handle>/<handle>. When no such nested
+    folder exists but the base folder does, the real base is its parent.
+    """
+    base = os.path.normpath(folder["base_dir"])
+    name = folder["name"]
+    if not name or os.path.basename(base).lower() != name.lower():
+        return folder
+    if os.path.isdir(os.path.join(base, name)) or not os.path.isdir(base):
+        return folder
+    return {**folder, "base_dir": os.path.dirname(base)}
 
 
 def entry_folders(entry: dict[str, Any]) -> list[dict[str, str]]:
@@ -3032,7 +3054,7 @@ def entry_folders(entry: dict[str, Any]) -> list[dict[str, str]]:
     for extra in entry.get("extra_folders") or []:
         if isinstance(extra, dict) and extra.get("base_dir") and extra.get("name"):
             folders.append({"base_dir": str(extra["base_dir"]), "name": str(extra["name"])})
-    return folders
+    return [mended_folder(folder) for folder in folders]
 
 
 def set_entry_folders(entry: dict[str, Any], folders: list[dict[str, str]]) -> None:
@@ -3103,15 +3125,16 @@ def group_of(base_dir: str, root: Path) -> str:
 
 
 def handle_for_response(entry: dict[str, Any], root: Path | None = None) -> dict[str, Any]:
+    folders = entry_folders(entry)
+    base_dir = folders[0]["base_dir"] if folders else str(entry.get("base_dir") or "")
     return {
         "handle": entry.get("handle", ""),
         "name": entry.get("name") or entry.get("handle", ""),
         "profile_url": f"https://x.com/{entry.get('handle', '')}/media",
-        "base_dir": entry.get("base_dir", ""),
-        "group": group_of(str(entry.get("base_dir") or ""), root) if root else "",
+        "base_dir": base_dir,
+        "group": group_of(base_dir, root) if root else "",
         "folders": [
-            {**folder, "group": group_of(folder["base_dir"], root) if root else ""}
-            for folder in entry_folders(entry)
+            {**folder, "group": group_of(folder["base_dir"], root) if root else ""} for folder in folders
         ],
         "aliases": list(entry.get("aliases") or []),
         "video_count": int(entry.get("video_count") or 0),

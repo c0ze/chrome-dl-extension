@@ -1542,12 +1542,103 @@ class RememberDownloadedPostTests(HandleStateCase):
         folders = self.only_handle()["folders"]
         self.assertEqual([(folder["group"], folder["name"]) for folder in folders], [("group b", "Bob B")])
 
+    def with_former_handle(self) -> None:
+        host.remember_handle("alice", [], base_dir=str(self.library / "group a"))
+        host.mutate_handles(lambda state: state["handles"]["alice"]["aliases"].append("old_alice"))
+
+    def test_a_post_through_a_former_handle_belongs_to_the_current_handle(self) -> None:
+        self.with_former_handle()
+
+        host.remember_downloaded_post(self.post(1001, "old_alice"), str(self.library / "group a" / "alice"))
+
+        entry = self.only_handle()  # no second entry under the former name
+        self.assertEqual(entry["handle"], "alice")
+        self.assertEqual(entry["known_count"], 1)
+        self.assertEqual([folder["group"] for folder in entry["folders"]], ["group a"])
+
+    def test_a_post_through_a_former_handle_into_a_new_group_adds_the_group_to_the_current_handle(self) -> None:
+        self.with_former_handle()
+
+        host.remember_downloaded_post(self.post(1001, "old_alice"), str(self.library / "group b" / "alice"))
+
+        entry = self.only_handle()
+        self.assertEqual(entry["handle"], "alice")
+        self.assertEqual(entry["known_count"], 1)
+        self.assertEqual(
+            [(folder["group"], folder["name"]) for folder in entry["folders"]],
+            [("group a", "alice"), ("group b", "alice")],
+        )
+
+    def test_remembering_under_a_former_handle_updates_the_current_entry(self) -> None:
+        self.with_former_handle()
+
+        host.remember_handle("old_alice", [self.post(1002, "old_alice")])
+
+        entry = self.only_handle()
+        self.assertEqual((entry["handle"], entry["known_count"]), ("alice", 1))
+
     def test_a_post_in_another_folder_is_recorded_as_before(self) -> None:
         host.remember_downloaded_post(self.post(1001), str(self.library / "misc"))
 
         entry = self.only_handle()
         self.assertEqual(entry["base_dir"], str(self.library / "misc"))
         self.assertEqual(entry["group"], "misc")
+
+
+class LegacyHandleFolderTests(HandleStateCase):
+    """Old single-post writes stored <group>/<handle> as the base folder of a handle named the same."""
+
+    def write_entry(self, base_dir: Path, name: str = "alice") -> None:
+        entry = {
+            "handle": "alice", "name": name, "base_dir": str(base_dir), "aliases": [],
+            "video_count": 0, "known": [], "pending": [],
+        }
+        host.HANDLES_PATH.write_text(json.dumps({"handles": {"alice": entry}}))
+
+    def test_a_doubled_folder_is_read_as_its_group(self) -> None:
+        (self.library / "group a" / "alice").mkdir(parents=True)
+        self.write_entry(self.library / "group a" / "alice")
+
+        entry = self.only_handle()
+
+        self.assertEqual(entry["base_dir"], str(self.library / "group a"))
+        self.assertEqual(entry["group"], "group a")
+        self.assertEqual(entry["folders"][0]["base_dir"], str(self.library / "group a"))
+        self.assertEqual(
+            host.known_handle_folder("alice", str(self.library / "group a")), ("alice", "alice")
+        )
+
+    def test_the_match_ignores_case(self) -> None:
+        (self.library / "group a" / "Alice").mkdir(parents=True)
+        self.write_entry(self.library / "group a" / "Alice")
+
+        self.assertEqual(self.only_handle()["base_dir"], str(self.library / "group a"))
+
+    def test_a_real_nested_folder_is_left_alone(self) -> None:
+        (self.library / "group a" / "alice" / "alice").mkdir(parents=True)
+        self.write_entry(self.library / "group a" / "alice")
+
+        entry = self.only_handle()
+
+        self.assertEqual(entry["base_dir"], str(self.library / "group a" / "alice"))
+        self.assertEqual(entry["group"], "group a/alice")
+
+    def test_a_folder_that_is_not_there_is_left_alone(self) -> None:
+        # An offline share must not make the host guess.
+        self.write_entry(self.library / "group a" / "alice")
+
+        self.assertEqual(self.only_handle()["base_dir"], str(self.library / "group a" / "alice"))
+
+    def test_another_post_into_the_folder_does_not_add_a_second_one(self) -> None:
+        (self.library / "group a" / "alice").mkdir(parents=True)
+        self.write_entry(self.library / "group a" / "alice")
+
+        host.remember_downloaded_post("https://x.com/alice/status/1001", str(self.library / "group a" / "alice"))
+
+        self.assertEqual(
+            self.only_handle()["folders"],
+            [{"base_dir": str(self.library / "group a"), "name": "alice", "group": "group a"}],
+        )
 
 
 class ThumbnailTests(HandleStateCase):
@@ -2114,6 +2205,16 @@ class RemoveDownloadTests(LibraryCase):
 
         self.assertEqual((response["deleted"], response["missing"]), (0, True))
 
+    def test_a_stored_filename_that_cannot_be_a_path_counts_as_missing(self) -> None:
+        # A NUL byte makes os.stat raise ValueError, after the entry is already gone.
+        self.job(filename="/nope/alice\x00.mp4")
+
+        response = self.remove()
+
+        self.assertTrue(response["ok"])
+        self.assertEqual((response["deleted"], response["missing"]), (0, True))
+        self.assertIsNone(host.get_download_job("a" * 32))
+
     def test_a_download_with_no_file_has_nothing_on_disk(self) -> None:
         self.job(status="failed", filename=None)
 
@@ -2213,6 +2314,42 @@ class RemoveLibraryFilesTests(LibraryCase):
         self.assertTrue(response["ok"])
         self.assertFalse((self.library / "group d/alice/copy.mp4").exists())
         self.assertEqual(host.curation.read_removed(self.root)[0]["reason"], "duplicate")
+
+    def test_a_video_removed_from_favorites_stays_refused_under_another_link(self) -> None:
+        # The record has no post link, only the id in the file name.
+        self.video("group d/alice/alice-1234567890001.mp4")
+        with unittest.mock.patch.object(host.curation, "video_length", return_value=None):
+            host.handle_message(
+                {"type": "remove_library_files", "paths": ["group d/alice/alice-1234567890001.mp4"], "reason": "removed"}
+            )
+
+        with unittest.mock.patch.object(host, "launch_next_queued_job", return_value={"started": True}):
+            for url in ("https://twitter.com/alice/status/1234567890001", "https://x.com/i/status/1234567890001"):
+                response = host.start_download_job(url, "toolbar", str(self.library), True)
+                self.assertFalse(response["ok"], url)
+                self.assertTrue(response["removed"], url)
+            batch = host.start_profile_download_jobs(
+                "https://x.com/alice/media", "toolbar", str(self.library),
+                ["https://x.com/alice/status/1234567890001"], True,
+            )
+        self.assertFalse(batch["ok"])
+
+    def test_allowing_such_a_video_again_lifts_the_refusal(self) -> None:
+        self.video("group d/alice/alice-1234567890001.mp4")
+        with unittest.mock.patch.object(host.curation, "video_length", return_value=None):
+            host.handle_message(
+                {"type": "remove_library_files", "paths": ["group d/alice/alice-1234567890001.mp4"], "reason": "removed"}
+            )
+        record = host.curation.read_removed(self.root)[0]
+        host.handle_message({"type": "allow_removed", "id": record["id"]})
+        self.write_jobs([])
+
+        with unittest.mock.patch.object(host, "launch_next_queued_job", return_value={"started": True}):
+            response = host.start_download_job(
+                "https://x.com/alice/status/1234567890001", "toolbar", str(self.library)
+            )
+
+        self.assertTrue(response["ok"])
 
     def test_only_library_videos_can_be_removed(self) -> None:
         outside = self.root / "outside.mp4"

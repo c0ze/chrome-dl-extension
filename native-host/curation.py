@@ -339,5 +339,16 @@ def allow_again(state_dir: Path, archive: Path, record_id: str) -> dict[str, Any
 
 
 def removed_url_keys(state_dir: Path, key: Any) -> set[str]:
-    """The posts of removed videos, by the host's duplicate key."""
-    return {key(item["url"]) for item in read_removed(state_dir) if item.get("url")}
+    """The posts of removed videos, by the host's duplicate key.
+
+    A removal made from a file alone (Favorites, the library check) has no post
+    link, but its file name still carries the post's id, the one the archive holds.
+    """
+    keys = set()
+    for item in read_removed(state_dir):
+        if item.get("url"):
+            keys.add(key(item["url"]))
+        ident = str(item.get("video_id") or "")
+        if ident.isdigit():
+            keys.add(key(f"https://x.com/i/status/{ident}"))
+    return keys
