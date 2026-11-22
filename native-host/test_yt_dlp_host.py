@@ -1577,6 +1577,20 @@ class RememberDownloadedPostTests(HandleStateCase):
         entry = self.only_handle()
         self.assertEqual((entry["handle"], entry["known_count"]), ("alice", 1))
 
+    def test_a_current_handle_beats_an_earlier_former_handle_of_the_same_name(self) -> None:
+        host.remember_handle("carol", [], base_dir=str(self.library / "group a"))
+
+        def add_dave(state: dict[str, Any]) -> None:
+            state["handles"]["carol"]["aliases"].append("dave")
+            host.handle_entry(state, "dave")["base_dir"] = str(self.library / "group b")
+
+        host.mutate_handles(add_dave)
+
+        host.remember_downloaded_post(self.post(1001, "dave"), str(self.library / "group b" / "dave"))
+
+        entries = {entry["handle"]: entry for entry in host.get_handles()["handles"]}
+        self.assertEqual((entries["dave"]["known_count"], entries["carol"]["known_count"]), (1, 0))
+
     def test_a_post_in_another_folder_is_recorded_as_before(self) -> None:
         host.remember_downloaded_post(self.post(1001), str(self.library / "misc"))
 
