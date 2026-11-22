@@ -1622,11 +1622,56 @@ class LegacyHandleFolderTests(HandleStateCase):
             host.known_handle_folder("alice", str(self.library / "group a")), ("alice", "alice")
         )
 
-    def test_the_match_ignores_case(self) -> None:
+    def test_the_match_ignores_case_and_the_folder_keeps_its_real_name(self) -> None:
+        # The stored name is the handle's; the folder on disk is the one that exists.
         (self.library / "group a" / "Alice").mkdir(parents=True)
         self.write_entry(self.library / "group a" / "Alice")
 
-        self.assertEqual(self.only_handle()["base_dir"], str(self.library / "group a"))
+        entry = self.only_handle()
+
+        self.assertEqual(entry["base_dir"], str(self.library / "group a"))
+        self.assertEqual(entry["name"], "Alice")
+        self.assertEqual(
+            entry["folders"], [{"base_dir": str(self.library / "group a"), "name": "Alice", "group": "group a"}]
+        )
+        self.assertEqual(
+            host.known_handle_folder("alice", str(self.library / "group a")), ("alice", "Alice")
+        )
+
+    def test_a_mended_folder_and_a_correct_one_for_the_same_directory_are_one_folder(self) -> None:
+        (self.library / "group a" / "alice").mkdir(parents=True)
+        entry = {
+            "handle": "alice", "name": "alice", "base_dir": str(self.library / "group a" / "alice"),
+            "extra_folders": [{"base_dir": str(self.library / "group a"), "name": "alice"}],
+            "aliases": [], "video_count": 0, "known": [], "pending": [],
+        }
+        host.HANDLES_PATH.write_text(json.dumps({"handles": {"alice": entry}}))
+
+        shown = self.only_handle()
+
+        self.assertEqual(
+            shown["folders"], [{"base_dir": str(self.library / "group a"), "name": "alice", "group": "group a"}]
+        )
+
+    def test_two_real_folders_in_one_group_are_still_two(self) -> None:
+        entry = {
+            "handle": "frank", "name": "frank", "base_dir": str(self.library / "group a"),
+            "extra_folders": [{"base_dir": str(self.library / "group a"), "name": "frank 2"}],
+            "aliases": [], "video_count": 0, "known": [], "pending": [],
+        }
+        host.HANDLES_PATH.write_text(json.dumps({"handles": {"frank": entry}}))
+
+        self.assertEqual([folder["name"] for folder in host.get_handles()["handles"][0]["folders"]], ["frank", "frank 2"])
+
+    def test_folders_that_differ_only_in_case_are_two_directories(self) -> None:
+        entry = {
+            "handle": "alice", "name": "alice", "base_dir": str(self.library / "group a"),
+            "extra_folders": [{"base_dir": str(self.library / "group a"), "name": "Alice"}],
+            "aliases": [], "video_count": 0, "known": [], "pending": [],
+        }
+        host.HANDLES_PATH.write_text(json.dumps({"handles": {"alice": entry}}))
+
+        self.assertEqual(len(host.get_handles()["handles"][0]["folders"]), 2)
 
     def test_a_real_nested_folder_is_left_alone(self) -> None:
         (self.library / "group a" / "alice" / "alice").mkdir(parents=True)
@@ -2347,6 +2392,32 @@ class RemoveLibraryFilesTests(LibraryCase):
                 ["https://x.com/alice/status/1234567890001"], True,
             )
         self.assertFalse(batch["ok"])
+
+    def test_a_removed_video_of_another_provider_refuses_only_its_own_post(self) -> None:
+        # A Facebook reel's file name also ends in a numeric id: it must not
+        # make an X post with that id unreachable.
+        host.curation.write_removed(
+            self.root,
+            [
+                {"id": "1" * 32, "relative": "fb/page/100000000000003-1234567890123.mp4",
+                 "url": "https://www.facebook.com/reel/555", "video_id": "1234567890123"},
+                {"id": "2" * 32, "relative": "group d/alice/alice-1234567890001.mp4",
+                 "url": None, "video_id": "1234567890001"},
+                {"id": "3" * 32, "relative": "group d/bob/bob-1234567890002.mp4",
+                 "url": "https://x.com/bob/status/1234567890002", "video_id": "1234567890002"},
+            ],
+        )
+
+        keys = host.removed_post_keys()
+
+        self.assertIn(host.normalized_url_key("https://www.facebook.com/reel/555"), keys)
+        self.assertNotIn("https://x.com/i/status/1234567890123", keys)
+        self.assertIn("https://x.com/i/status/1234567890001", keys, "no link: the id names an X post")
+        self.assertIn("https://x.com/i/status/1234567890002", keys)
+
+    def test_a_removal_with_no_link_and_no_library_path_names_no_post(self) -> None:
+        host.curation.write_removed(self.root, [{"id": "4" * 32, "relative": "", "url": None, "video_id": "1234567890123"}])
+        self.assertEqual(host.removed_post_keys(), set())
 
     def test_allowing_such_a_video_again_lifts_the_refusal(self) -> None:
         self.video("group d/alice/alice-1234567890001.mp4")

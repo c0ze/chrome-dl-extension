@@ -343,12 +343,17 @@ def removed_url_keys(state_dir: Path, key: Any) -> set[str]:
 
     A removal made from a file alone (Favorites, the library check) has no post
     link, but its file name still carries the post's id, the one the archive holds.
+    That id names an X post only for a record with an X link or no link at all
+    (and a path in the library); a Facebook reel's own id says nothing about X.
     """
+    x_prefix = key("https://x.com/i/status/1")[:-1]
     keys = set()
     for item in read_removed(state_dir):
-        if item.get("url"):
-            keys.add(key(item["url"]))
+        url = item.get("url")
+        if url:
+            keys.add(key(url))
         ident = str(item.get("video_id") or "")
-        if ident.isdigit():
+        names_x_post = key(url).startswith(x_prefix) if url else bool(item.get("relative"))
+        if ident.isdigit() and names_x_post:
             keys.add(key(f"https://x.com/i/status/{ident}"))
     return keys

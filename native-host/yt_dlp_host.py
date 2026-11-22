@@ -3029,7 +3029,9 @@ def mended_folder(folder: dict[str, str]) -> dict[str, str]:
 
     Those stored <group>/<handle> as base_dir for a folder also named <handle>, so
     the videos would have gone to <group>/<handle>/<handle>. When no such nested
-    folder exists but the base folder does, the real base is its parent.
+    folder exists but the base folder does, the real base is its parent and the
+    folder is named as the directory is on disk (its exact case), not as the
+    handle is spelled.
     """
     base = os.path.normpath(folder["base_dir"])
     name = folder["name"]
@@ -3037,7 +3039,7 @@ def mended_folder(folder: dict[str, str]) -> dict[str, str]:
         return folder
     if os.path.isdir(os.path.join(base, name)) or not os.path.isdir(base):
         return folder
-    return {**folder, "base_dir": os.path.dirname(base)}
+    return {**folder, "base_dir": os.path.dirname(base), "name": os.path.basename(base)}
 
 
 def entry_folders(entry: dict[str, Any]) -> list[dict[str, str]]:
@@ -3054,7 +3056,17 @@ def entry_folders(entry: dict[str, Any]) -> list[dict[str, str]]:
     for extra in entry.get("extra_folders") or []:
         if isinstance(extra, dict) and extra.get("base_dir") and extra.get("name"):
             folders.append({"base_dir": str(extra["base_dir"]), "name": str(extra["name"])})
-    return [mended_folder(folder) for folder in folders]
+    # Mending can make a legacy main folder and a correct extra one the same
+    # directory: that is one folder, the first (main) one kept. Case counts, since
+    # the library lives on a case-sensitive filesystem.
+    unique: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for folder in map(mended_folder, folders):
+        place = os.path.normpath(os.path.join(folder["base_dir"], folder["name"]))
+        if place not in seen:
+            seen.add(place)
+            unique.append(folder)
+    return unique
 
 
 def set_entry_folders(entry: dict[str, Any], folders: list[dict[str, str]]) -> None:
@@ -3129,7 +3141,7 @@ def handle_for_response(entry: dict[str, Any], root: Path | None = None) -> dict
     base_dir = folders[0]["base_dir"] if folders else str(entry.get("base_dir") or "")
     return {
         "handle": entry.get("handle", ""),
-        "name": entry.get("name") or entry.get("handle", ""),
+        "name": folders[0]["name"] if folders else entry.get("name") or entry.get("handle", ""),
         "profile_url": f"https://x.com/{entry.get('handle', '')}/media",
         "base_dir": base_dir,
         "group": group_of(base_dir, root) if root else "",
