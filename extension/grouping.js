@@ -182,6 +182,102 @@ export function folderForTarget(entries, handle, isProfile) {
   };
 }
 
+function findHandleEntry(entries, handle) {
+  const wanted = String(handle || "").toLowerCase();
+  if (!wanted) {
+    return null;
+  }
+  return (
+    entries.find(
+      (candidate) =>
+        String(candidate.handle).toLowerCase() === wanted ||
+        (candidate.aliases || []).some((alias) => String(alias).toLowerCase() === wanted)
+    ) || null
+  );
+}
+
+/**
+ * Where a download from this handle goes without asking: a creator with exactly
+ * one folder starts there (`auto`); one with folders in several groups waits for
+ * a group choice, and `groups` says which. A profile batch names the folder's
+ * base and the host adds the handle's own folder; a single post is saved
+ * exactly where the path points.
+ */
+export function downloadPlan(entries, handle, isProfile) {
+  const entry = findHandleEntry(entries, handle);
+  const folders = entry?.folders || [];
+  if (!folders.length) {
+    return { auto: null, groups: [] };
+  }
+  const groups = [...new Set(folders.map((folder) => folder.group || ""))];
+  if (folders.length > 1) {
+    return { auto: null, groups };
+  }
+  const [folder] = folders;
+  return {
+    auto: {
+      directory: isProfile ? folder.base_dir : `${folder.base_dir}/${folder.name}`,
+      group: folder.group || "",
+      handle: entry.handle,
+    },
+    groups,
+  };
+}
+
+function trimSlashes(path) {
+  const text = String(path || "");
+  return text.replace(/\/+$/, "") || text;
+}
+
+/**
+ * The folder a group button files a download in. A post goes in the handle's own
+ * folder inside the group (its recorded name there, else the handle); a profile
+ * batch, or a post with no handle, names the group folder itself.
+ */
+export function groupDirectory(root, group, handle, entries, isProfile) {
+  const groupDir = `${trimSlashes(root)}/${group}`;
+  if (isProfile || !handle) {
+    return groupDir;
+  }
+  const folder = (findHandleEntry(entries, handle)?.folders || []).find((candidate) => candidate.group === group);
+  return `${groupDir}/${folder?.name || handle}`;
+}
+
+/**
+ * A path as the library shows it: from the root's parent folder when it is under
+ * there ("media/twitter/group a"), `~/…` under the home folder, else in full.
+ */
+export function shortPath(path, root, home = "") {
+  const full = trimSlashes(path);
+  const base = trimSlashes(root);
+  if (base) {
+    const anchor = base.split("/").slice(0, -2).join("/") + "/";
+    if (full.startsWith(anchor)) {
+      return full.slice(anchor.length);
+    }
+  }
+  const homeDir = trimSlashes(home);
+  if (homeDir && full === homeDir) {
+    return "~";
+  }
+  if (homeDir && full.startsWith(`${homeDir}/`)) {
+    return `~/${full.slice(homeDir.length + 1)}`;
+  }
+  return full;
+}
+
+/**
+ * Whether the picker may start the download itself: the creator's folder is
+ * known, the user has not touched it, and nothing started yet. A profile also
+ * waits for its scan to finish with videos in hand.
+ */
+export function autoStartReady({ auto, isProfile, scanStatus, urlCount, folderEdited, started }) {
+  if (!auto || folderEdited || started) {
+    return false;
+  }
+  return !isProfile || (scanStatus === "done" && urlCount > 0);
+}
+
 export function formatBytes(bytes) {
   const value = Number(bytes) || 0;
   if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} GB`;

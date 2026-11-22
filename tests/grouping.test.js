@@ -193,3 +193,45 @@ test("the scan line says what is happening or what the last scan found", () => {
     "100 videos scanned on 2026-11-12 18:00:00. Broken: 2. Duplicate sets: 5, taking 2.0 GB extra."
   );
 });
+
+import { autoStartReady, downloadPlan, groupDirectory, shortPath } from "../extension/grouping.js";
+
+const R = "/srv/archive/media/twitter";
+const alice = { handle: "alice", aliases: ["oldalice"], folders: [{ base_dir: `${R}/group a`, name: "alice", group: "group a" }] };
+const bob = { handle: "bob", aliases: [], folders: [
+  { base_dir: `${R}/group a`, name: "bob", group: "group a" }, { base_dir: `${R}/group b`, name: "Bob B", group: "group b" }] };
+test("a known creator with one folder starts there", () => {
+  assert.deepEqual(downloadPlan([alice], "Alice", false), { auto: { directory: `${R}/group a/alice`, group: "group a", handle: "alice" }, groups: ["group a"] });
+  assert.equal(downloadPlan([alice], "alice", true).auto.directory, `${R}/group a`);
+});
+test("a former handle starts in the current folder", () => {
+  assert.equal(downloadPlan([alice], "OldAlice", false).auto.directory, `${R}/group a/alice`);
+});
+test("a creator in two groups waits for a choice", () => {
+  assert.deepEqual(downloadPlan([bob], "bob", false), { auto: null, groups: ["group a", "group b"] });
+});
+test("someone new has no plan", () => {
+  assert.deepEqual(downloadPlan([alice], "carol", false), { auto: null, groups: [] });
+  assert.deepEqual(downloadPlan([alice], "", false), { auto: null, groups: [] });
+});
+test("a group button files a post in the handle's folder for that group", () => {
+  assert.equal(groupDirectory(R, "group b", "bob", [bob], false), `${R}/group b/Bob B`);
+  assert.equal(groupDirectory(R, "group c", "carol", [bob], false), `${R}/group c/carol`);
+  assert.equal(groupDirectory(R, "group c", "carol", [], true), `${R}/group c`);
+  assert.equal(groupDirectory(R, "group c", "", [], false), `${R}/group c`);
+});
+test("paths are shown from the library root's parent", () => {
+  assert.equal(shortPath(`${R}/group a/alice`, R), "media/twitter/group a/alice");
+  assert.equal(shortPath(`${R}/`, R), "media/twitter");
+  assert.equal(shortPath("/home/u/Downloads", R, "/home/u"), "~/Downloads");
+  assert.equal(shortPath("/other/place", R, "/home/u"), "/other/place");
+});
+test("auto-start waits for a profile scan to find videos", () => {
+  const base = { auto: { directory: "d" }, isProfile: true, scanStatus: "scanning", urlCount: 0, folderEdited: false, started: false };
+  assert.equal(autoStartReady(base), false);
+  assert.equal(autoStartReady({ ...base, scanStatus: "done", urlCount: 3 }), true);
+  assert.equal(autoStartReady({ ...base, scanStatus: "done", urlCount: 0 }), false);
+  assert.equal(autoStartReady({ ...base, isProfile: false }), true);
+  assert.equal(autoStartReady({ ...base, isProfile: false, folderEdited: true }), false);
+  assert.equal(autoStartReady({ ...base, isProfile: false, started: true }), false);
+});
