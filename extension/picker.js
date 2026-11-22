@@ -9,29 +9,27 @@ import { RESERVED_PROFILE_USERNAMES, TWITTER_HOSTS, batchTargetForUrl } from "./
 //   /<handle>/status/<id>   the handle is a valid name and not one of X's own routes
 //   /i/status/<id>          a link with no author
 //   /i/web/status/<id>
-// The match is anchored at the start of the path: a status id deeper in some
-// other page (/settings/profile/status/1001) is not a post, and neither are the
-// other X pages (/home, /search, /alice/followers).
+// The match is anchored at the start of the path and allows no empty segment
+// (/alice//status/1001 is another path, as in twitterProfileUsername): a status
+// id deeper in some other page (/settings/profile/status/1001) is not a post,
+// and neither are the other X pages (/home, /search, /alice/followers).
+const TWITTER_POST_PATH = /^\/(i\/web|[^/]+)\/status\/\d+(?:\/[^/]+)*\/?$/;
+
 function isTwitterPost(rawUrl) {
   try {
     const url = new URL(rawUrl);
     if (!TWITTER_HOSTS.includes(url.hostname)) {
       return false;
     }
-    const parts = url.pathname.split("/").filter(Boolean);
-    const isId = (part) => /^\d+$/.test(part ?? "");
-    if (parts[0]?.toLowerCase() === "i") {
-      return (
-        (parts[1] === "status" && isId(parts[2])) ||
-        (parts[1] === "web" && parts[2] === "status" && isId(parts[3]))
-      );
+    const match = url.pathname.match(TWITTER_POST_PATH);
+    if (!match) {
+      return false;
     }
-    return (
-      /^[A-Za-z0-9_]{1,15}$/.test(parts[0] ?? "") &&
-      !RESERVED_PROFILE_USERNAMES.includes(parts[0].toLowerCase()) &&
-      parts[1] === "status" &&
-      isId(parts[2])
-    );
+    const owner = match[1];
+    if (owner === "i/web" || owner === "i") {
+      return true;
+    }
+    return /^[A-Za-z0-9_]{1,15}$/.test(owner) && !RESERVED_PROFILE_USERNAMES.includes(owner.toLowerCase());
   } catch (_error) {
     return false;
   }

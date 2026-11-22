@@ -103,6 +103,8 @@ test("a post link with no author is still a Twitter post, without a handle", () 
 test("a post's own sub-pages are the post", () => {
   assert.deepEqual(pickerTarget("https://x.com/alice/status/1001/video/1"), { twitter: true, handle: "alice", isProfile: false });
   assert.deepEqual(pickerTarget("https://x.com/alice/status/1001/photo/1").twitter, true);
+  assert.equal(pickerTarget("https://x.com/alice/status/1001/").twitter, true, "a trailing slash is fine");
+  assert.equal(pickerTarget("https://x.com/alice/status/1001/video/1/").twitter, true);
 });
 
 test("other X pages are neither a post nor a profile, so they get no group buttons", () => {
@@ -129,6 +131,17 @@ test("other X pages are neither a post nor a profile, so they get no group butto
     "https://x.com/Search/status/1001",
     "https://x.com/not-a-handle/status/1001",
     "https://x.com/waytoolongtobeahandle/status/1001",
+    // An empty path segment anywhere makes it a different path.
+    "https://x.com/alice//status/1001",
+    "https://x.com//alice/status/1001",
+    "https://x.com/i/web//status/1001",
+    "https://x.com/i//status/1001",
+    "https://x.com/i//web/status/1001",
+    "https://x.com/alice/status//1001",
+    "https://x.com/alice/status/1001//video",
+    "https://x.com/alice/status/1001/video//1",
+    "https://x.com/alice/status/1001//",
+    "https://x.com/alice/status/1001abc",
   ]) {
     assert.deepEqual(pickerTarget(url), { twitter: false, handle: "", isProfile: false }, url);
   }
