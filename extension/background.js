@@ -4,6 +4,7 @@ import {
   RESERVED_PROFILE_USERNAMES,
   batchTargetForUrl,
   profileScanChunk,
+  twitterMediaUrl,
   twitterPostsUrl,
 } from "./providers.js";
 
@@ -379,7 +380,7 @@ async function showDownloadPicker(pickerUrl, sourceTab, { keepTarget = false } =
   await chrome.tabs.create({ url: pickerUrl, ...placement });
 }
 
-async function openDownloadPicker(url, source, tab) {
+async function openDownloadPicker(url, source, tab, { fromLink = false } = {}) {
   if (tab?.url?.startsWith(PICKER_URL)) {
     // The button was clicked on the picker itself; it is already in front.
     return;
@@ -394,9 +395,14 @@ async function openDownloadPicker(url, source, tab) {
 
   void sweepProfileBatches();
 
-  const params = new URLSearchParams({ url, source });
   const target = batchTargetForUrl(url);
-  const scannable = Boolean(target) && typeof tab?.id === "number";
+  // A Twitter profile batch always runs from the profile's media page, whichever
+  // tab or link the profile was seen on.
+  const pickerUrl = target?.provider === "twitter" ? twitterMediaUrl(target.key) : url;
+  const params = new URLSearchParams({ url: pickerUrl, source });
+  // A right-clicked link points at some other page than the tab the click
+  // happened in, so only the toolbar button and the page menu scan a tab.
+  const scannable = Boolean(target) && !fromLink && typeof tab?.id === "number";
   const batchKey = scannable ? makeProfileBatchKey() : null;
 
   if (batchKey) {
@@ -447,7 +453,9 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     return;
   }
 
-  void openDownloadPicker(getTargetUrl(info, tab), "context-menu", tab);
+  void openDownloadPicker(getTargetUrl(info, tab), "context-menu", tab, {
+    fromLink: Boolean(info.linkUrl),
+  });
 });
 
 chrome.action.onClicked.addListener((tab) => {

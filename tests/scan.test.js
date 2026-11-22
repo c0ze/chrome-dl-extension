@@ -1,10 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 import {
+  RESERVED_PROFILE_USERNAMES,
   batchTargetForUrl,
   profileScanChunk,
   facebookPeopleUrlName,
+  twitterMediaUrl,
 } from "../extension/providers.js";
 
 function withPage(html, url) {
@@ -24,6 +27,29 @@ test("batchTargetForUrl matches a Twitter profile media URL", () => {
 
 test("batchTargetForUrl rejects reserved Twitter routes", () => {
   assert.equal(batchTargetForUrl("https://x.com/home/media"), null);
+});
+
+test("every profile tab is the same batch target", () => {
+  for (const path of ["alice", "alice/", "alice/media", "alice/Media/?s=20", "alice/with_replies",
+                      "alice/highlights", "alice/articles", "alice/likes"]) {
+    assert.deepEqual(batchTargetForUrl(`https://x.com/${path}`), { provider: "twitter", key: "alice" }, path);
+  }
+});
+
+test("a post, an unknown tab or a reserved route is not a profile", () => {
+  for (const path of ["alice/status/1001", "alice/followers", "search", "compose/post", "home/media", "i/lists"]) {
+    assert.equal(batchTargetForUrl(`https://x.com/${path}`), null, path);
+  }
+});
+
+test("the host reserves the same Twitter routes as the extension", () => {
+  const source = readFileSync(new URL("../native-host/yt_dlp_host.py", import.meta.url), "utf8");
+  const hostSet = source.match(/TWITTER_RESERVED_USERNAMES = \{([^}]*)\}/)[1].match(/"([^"]+)"/g).map((s) => s.slice(1, -1));
+  assert.deepEqual([...hostSet].sort(), [...RESERVED_PROFILE_USERNAMES].sort());
+});
+
+test("twitterMediaUrl is the profile's media page", () => {
+  assert.equal(twitterMediaUrl("alice"), "https://x.com/alice/media");
 });
 
 test("Twitter scan collects only video-backed posts owned by the profile", async () => {

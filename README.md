@@ -52,8 +52,9 @@ is loaded.
 - Click the extension button on a page with nothing to download, such as a new
   tab, to open the downloads screen on its own (or bring an open one forward)
   without queueing anything.
-- Open an X/Twitter profile media URL, such as `https://x.com/username/media`,
-  and click the extension button to scan the profile for video posts. The scan
+- Open any tab of an X/Twitter profile (Posts, Replies, Highlights, Articles,
+  Videos or Likes, such as `https://x.com/username/media`) and click the
+  extension button to scan the profile for video posts. The scan
   switches that tab to the profile's Posts tab (`https://x.com/username`) and
   reads that: X's Videos tab only lists posts holding exactly one video and
   nothing else, so posts with two videos, or a video and photos, are missing
@@ -61,6 +62,9 @@ is loaded.
   runs; the page is scrolled automatically and returned to its original
   position when the scan ends. The host queues those videos one by one and downloads them into
   a `username/` folder inside the selected target folder.
+- Right-clicking a link to a profile and choosing `Download with yt-dlp` opens
+  the picker for that profile but does not scan: the link is not the tab you
+  are on. Open the profile in a tab and use the toolbar button there.
 - The picker is one tab with three columns: the folder picker on the left, the
   download dashboard in the middle and the handle list on the right. The
   dashboard groups downloads by handle and switches between a list and a tile
@@ -129,8 +133,11 @@ is loaded.
   and use `Scan Again` to pick up older posts.
 - Reserved X/Twitter routes are never treated as profile batches, by either the
   extension or the host: `home`, `explore`, `notifications`, `messages`, `i`,
-  and `settings`. A URL such as `https://x.com/home/media` is queued as a single
-  ordinary download instead.
+  `settings`, `search`, `compose`, `jobs`, `lists`, `bookmarks`, `communities`,
+  `premium`, `tos`, `privacy`, `login`, `signup`, `logout`, `account`,
+  `intent`, `share`, `hashtag`, `topics`, `verified-choose` and `download`. A
+  URL such as `https://x.com/home/media` is queued as a single ordinary
+  download instead.
 - Open a Facebook profile's reels tab and click the extension button to scan
   it the same way. Two URL forms are recognised, across the `www`, `m`, and
   `web` subdomains: `facebook.com/profile.php?id=<digits>&sk=reels_tab` and

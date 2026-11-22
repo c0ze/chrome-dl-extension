@@ -1145,7 +1145,7 @@ async function initialize() {
     state.profileScanError =
       batchTargetForUrl(state.targetUrl)?.provider === "facebook"
         ? "Open the Facebook profile reels page in a tab and use the toolbar button there to scan it."
-        : "Open the X/Twitter profile media page in a tab and use the toolbar button there to scan it.";
+        : "Open the profile in a tab and use the toolbar button there.";
     showMessage("error", state.profileScanError);
   }
 

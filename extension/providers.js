@@ -20,16 +20,46 @@ export const RESERVED_PROFILE_USERNAMES = [
   "messages",
   "i",
   "settings",
+  "search",
+  "compose",
+  "jobs",
+  "lists",
+  "bookmarks",
+  "communities",
+  "premium",
+  "tos",
+  "privacy",
+  "login",
+  "signup",
+  "logout",
+  "account",
+  "intent",
+  "share",
+  "hashtag",
+  "topics",
+  "verified-choose",
+  "download",
 ];
 
-export function twitterProfileMediaUsername(rawUrl) {
+// The tabs of a profile page that all belong to the same profile.
+const TWITTER_PROFILE_TABS = ["media", "with_replies", "highlights", "articles", "likes"];
+
+/**
+ * The handle of the X/Twitter profile a URL shows: the profile itself or one of
+ * its tabs (/<handle>, /<handle>/media, /<handle>/with_replies, ...). A post,
+ * an unknown sub-page or a reserved route is not a profile.
+ */
+export function twitterProfileUsername(rawUrl) {
   try {
     const url = new URL(rawUrl);
     if (!TWITTER_HOSTS.includes(url.hostname)) {
       return null;
     }
     const parts = url.pathname.split("/").filter(Boolean);
-    if (parts.length < 2 || parts[1].toLowerCase() !== "media") {
+    if (parts.length === 0 || parts.length > 2) {
+      return null;
+    }
+    if (parts.length === 2 && !TWITTER_PROFILE_TABS.includes(parts[1].toLowerCase())) {
       return null;
     }
     const candidate = parts[0];
@@ -49,6 +79,14 @@ export function twitterProfileMediaUsername(rawUrl) {
  */
 export function twitterPostsUrl(username) {
   return `https://x.com/${username}`;
+}
+
+/**
+ * The one URL a Twitter profile batch is always started with, whichever tab
+ * the profile was seen on, so the host validates a single shape.
+ */
+export function twitterMediaUrl(handle) {
+  return `https://x.com/${handle}/media`;
 }
 
 export const FACEBOOK_RESERVED_SEGMENTS = [
@@ -124,7 +162,7 @@ export function facebookPeopleUrlName(rawUrl) {
 }
 
 export function batchTargetForUrl(rawUrl) {
-  const twitterKey = twitterProfileMediaUsername(rawUrl);
+  const twitterKey = twitterProfileUsername(rawUrl);
   if (twitterKey) {
     return { provider: "twitter", key: twitterKey };
   }

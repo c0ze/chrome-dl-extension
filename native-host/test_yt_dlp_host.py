@@ -66,7 +66,8 @@ class TwitterBatchMatchingTests(unittest.TestCase):
         )
 
     def test_rejects_reserved_usernames(self) -> None:
-        for name in ["home", "explore", "notifications", "messages", "i", "settings"]:
+        for name in ["home", "explore", "notifications", "messages", "i", "settings",
+                     "search", "compose", "bookmarks", "download"]:
             with self.subTest(name=name):
                 self.assertIsNone(
                     host.twitter_profile_media_username(f"https://x.com/{name}/media")

@@ -76,7 +76,12 @@ TWITTER_STATUS_SEGMENTS = {"status", "statuses"}
 TWITTER_USERNAME_RE = re.compile(r"[A-Za-z0-9_]{1,15}")
 TWITTER_STATUS_ID_RE = re.compile(r"\d+")
 TWITTER_STATUS_PATH_RE = re.compile(r"/status/(\d+)$")
-TWITTER_RESERVED_USERNAMES = {"home", "explore", "notifications", "messages", "i", "settings"}
+TWITTER_RESERVED_USERNAMES = {
+    "home", "explore", "notifications", "messages", "i", "settings", "search", "compose",
+    "jobs", "lists", "bookmarks", "communities", "premium", "tos", "privacy", "login",
+    "signup", "logout", "account", "intent", "share", "hashtag", "topics",
+    "verified-choose", "download",
+}
 FACEBOOK_HOSTS = {
     "facebook.com",
     "www.facebook.com",
