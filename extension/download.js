@@ -1,5 +1,12 @@
 import { batchTargetForUrl } from "./providers.js";
-import { folderForTarget, groupJobsByHandle, groupSummary, jobHandle, playableJobs } from "./grouping.js";
+import {
+  folderForTarget,
+  groupJobsByHandle,
+  groupSummary,
+  jobHandle,
+  playableJobs,
+  videoRemoved,
+} from "./grouping.js";
 import { initHandles } from "./handles.js";
 import { initLibraryViews } from "./library-views.js";
 import { createPlayer, playerLabel } from "./player.js";
@@ -510,7 +517,9 @@ async function cancelDashboardJob(jobId) {
 // Resolves to true when the job's video is gone: deleted now, or already
 // missing from disk when the job was taken off the list. False when the
 // confirmation was declined, or when there was no video to delete (a failed or
-// queued job). Throws when the host refused; the caller shows the failure.
+// queued job). Throws when the host refused, or when it took the job off the
+// list but left a video on disk (one outside the library folder); the caller
+// shows the failure.
 async function removeDashboardJob(job, deletes) {
   if (
     deletes &&
@@ -526,12 +535,13 @@ async function removeDashboardJob(job, deletes) {
     throw new Error(response?.error || "Could not remove this download.");
   }
 
+  // The entry is off the list whatever happened to the file.
+  void pollDownloads();
   if (response.deleted) {
     showMessage("success", `Deleted ${formatJobTitle(job)}. It is listed under Removed.`);
     void handlesPanel.refresh();
   }
-  void pollDownloads();
-  return Boolean(response.deleted || deletes);
+  return videoRemoved(response, deletes);
 }
 
 async function clearDashboardJobs() {
@@ -608,8 +618,8 @@ function makeActionButton(label, title, extraClass, onClick) {
   return button;
 }
 
-// The one inline player, made the first time a video is played so it carries
-// the external player's name from the host's config.
+// The one inline player, made the first time a video is played. Its external
+// player button gets the name from the host's config, now or when it arrives.
 let inlinePlayer = null;
 
 function getPlayer() {
@@ -1207,9 +1217,11 @@ async function initialize() {
     elements.downloadDir.value = recentDirectories[0] || defaultDirectory;
     renderRecentDirectories(recentDirectories);
 
-    // The Play buttons carry the external player's name; draw them again if
-    // the list was shown before the config arrived.
+    // The Play buttons carry the external player's name. The list and the
+    // overlay may both have been drawn before the config arrived (the jobs
+    // and the config load independently), so rename what exists.
     state.playerName = playerLabel(config.player);
+    inlinePlayer?.setPlayerName(state.playerName);
     renderDownloads(lastJobs, lastTotals);
   } catch (error) {
     showMessage(

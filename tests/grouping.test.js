@@ -7,6 +7,7 @@ import {
   jobHandle,
   playableFavorites,
   playableJobs,
+  videoRemoved,
 } from "../extension/grouping.js";
 
 const job = (handle, status, extra = {}) => ({
@@ -290,4 +291,24 @@ test("the player steps through the favorites whose file is still there", () => {
     ["/srv/archive/group a/bob/3.mp4", "bob", true],
   ]);
   assert.equal(items[1].item, favorites[2]);
+});
+
+test("a Remove that deleted the video is done", () => {
+  assert.equal(videoRemoved({ ok: true, deleted: 1, missing: false }, true), true);
+});
+
+test("a video that was already gone counts as removed, so the player can move on", () => {
+  assert.equal(videoRemoved({ ok: true, deleted: 0, missing: true }, true), true);
+});
+
+test("a video the host left on disk is an error, not a removal", () => {
+  assert.throws(
+    () => videoRemoved({ ok: true, deleted: 0, missing: false }, true),
+    /outside the library folder, so it was not deleted/
+  );
+});
+
+test("taking a failed or queued download off the list removes no video", () => {
+  assert.equal(videoRemoved({ ok: true, deleted: 0, missing: true }, false), false);
+  assert.equal(videoRemoved({ ok: true, deleted: 0 }, false), false);
 });

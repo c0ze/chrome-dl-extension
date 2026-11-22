@@ -1987,8 +1987,12 @@ def remove_download(job_id: str) -> dict[str, Any]:
     root = library_root()
     relative = job_video(job, root) if job.get("status") == "complete" else ""
     if not relative or not (root / relative).is_file():
-        # Nothing on disk (failed, cancelled, or already gone): only the entry goes.
-        return {**remove_download_job(job_id), "deleted": 0}
+        # Nothing in the library to delete (failed, cancelled, already gone, or a
+        # file outside the library, which is never touched): only the entry goes.
+        # "missing" tells the last two apart: no file at all on disk.
+        filename = str(job.get("filename") or "").strip().strip('"')
+        missing = not filename or not Path(os.path.expanduser(filename)).is_file()
+        return {**remove_download_job(job_id), "deleted": 0, "missing": missing}
 
     thumb = thumbnail_path(job_id)
     with curation.open_favorites(library_root()) as db:
@@ -2001,7 +2005,7 @@ def remove_download(job_id: str) -> dict[str, Any]:
         )
     if response["ok"]:
         remove_download_job(job_id)
-    return {**response, "deleted": response["removed"]}
+    return {**response, "deleted": response["removed"], "missing": False}
 
 
 def remove_library_files(paths: list[Any], reason: str) -> dict[str, Any]:

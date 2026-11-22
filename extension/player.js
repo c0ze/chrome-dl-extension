@@ -268,5 +268,11 @@ export function createPlayer({ root, playerName }) {
     else s.handlers.closed?.();
   }
 
-  return { open, close };
+  // The caller may only learn the external player's name after the overlay
+  // was made, or even opened; this renames its button in place.
+  function setPlayerName(name) {
+    external.textContent = name || "Player";
+  }
+
+  return { open, close, setPlayerName };
 }

@@ -91,6 +91,29 @@ export function playableFavorites(favorites) {
     .map((item) => ({ path: item.path, title: item.handle, favorite: true, item }));
 }
 
+/**
+ * Whether a finished download's video is gone once the host has answered
+ * `remove_download`: deleted now, or already missing from disk. `deletes` is
+ * whether this was a finished download with a file (a failed or queued one has
+ * no video to remove). The host only deletes inside the library folder, so a
+ * file outside it stays on disk while its list entry goes; that throws, so
+ * nothing claims a deletion that did not happen.
+ */
+export function videoRemoved(response, deletes) {
+  if (response.deleted) {
+    return true;
+  }
+  if (!deletes) {
+    return false;
+  }
+  if (response.missing) {
+    return true;
+  }
+  throw new Error(
+    "This video is outside the library folder, so it was not deleted. The download was taken off the list."
+  );
+}
+
 /** "3 new", for a handle row; empty when a check found nothing. */
 export function pendingLabel(count) {
   return count > 0 ? `${count} new` : "";

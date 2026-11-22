@@ -188,6 +188,16 @@ test("the external button carries the player's name and opens the current video"
   assert.equal(opened, list[2]);
 });
 
+test("the external button is renamed once the configured player is known", () => {
+  // The overlay can be opened before the host's config has answered.
+  const { button, player } = setup({ playerName: "" });
+  assert.equal(button("external").textContent, "Player");
+  player.setPlayerName("Haruna");
+  assert.equal(button("external").textContent, "Haruna");
+  player.setPlayerName("");
+  assert.equal(button("external").textContent, "Player");
+});
+
 test("closing pauses, unloads the video and hides the overlay", () => {
   const { button, video, root, calls, player } = setup();
   const pausesBefore = calls.pause;

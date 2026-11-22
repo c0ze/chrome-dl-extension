@@ -2060,6 +2060,44 @@ class RemoveDownloadTests(LibraryCase):
 
         self.assertTrue(outside.exists())
 
+    def test_the_answer_says_whether_a_file_was_deleted_or_was_never_there(self) -> None:
+        self.job()
+        response = self.remove()
+        self.assertEqual((response["deleted"], response["missing"]), (1, False))
+
+        # The same download once the file has been moved away by hand.
+        self.job()
+        self.assertFalse(self.video_path.exists())
+        response = self.remove()
+        self.assertTrue(response["ok"])
+        self.assertEqual((response["deleted"], response["missing"]), (0, True))
+
+    def test_a_file_outside_the_library_is_reported_as_still_there(self) -> None:
+        outside = self.root / "elsewhere.mp4"
+        outside.write_bytes(b"x")
+        self.job(filename=str(outside))
+
+        response = self.remove()
+
+        self.assertTrue(response["ok"])
+        self.assertEqual((response["deleted"], response["missing"]), (0, False))
+        self.assertTrue(outside.exists())
+        self.assertIsNone(host.get_download_job("a" * 32))
+
+    def test_an_outside_file_that_is_gone_counts_as_missing(self) -> None:
+        self.job(filename=str(self.root / "gone.mp4"))
+
+        response = self.remove()
+
+        self.assertEqual((response["deleted"], response["missing"]), (0, True))
+
+    def test_a_download_with_no_file_has_nothing_on_disk(self) -> None:
+        self.job(status="failed", filename=None)
+
+        response = self.remove()
+
+        self.assertEqual((response["deleted"], response["missing"]), (0, True))
+
     def test_a_download_in_flight_is_not_removed(self) -> None:
         self.job(status="queued")
 
