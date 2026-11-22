@@ -68,10 +68,15 @@ is loaded.
   out the creator's replies and sensitive posts shown behind a warning. The
   picker tab opens immediately and reports scan progress while it runs,
   counting the videos of both tabs together; the page is scrolled
-  automatically. When the scan ends the tab goes back to the exact page it was
-  on when you clicked the button and is scrolled back to where it was, and then
-  the picker shows the result. The host queues those videos one by one and
-  downloads them into a `username/` folder inside the selected target folder.
+  automatically. Each tab is read from its top, so the first scan finds the
+  same videos whichever tab, and wherever in it, you clicked the button. When
+  the scan ends the tab goes back to the exact page it was on when you clicked
+  the button and is scrolled back to where it was, and then the picker shows
+  the result; if you opened another page in that tab while the scan ran, the
+  tab is left where you took it. Clicking the button again on a tab that is
+  still being scanned starts a new scan there, and the older one stops. The
+  host queues those videos one by one and downloads them into a `username/`
+  folder inside the selected target folder.
 - Right-clicking a link to a profile and choosing `Download with yt-dlp` opens
   the picker for that profile but does not scan: the link is not the tab you
   are on. Open the profile in a tab and use the toolbar button there.
@@ -196,8 +201,12 @@ is loaded.
 - A scan that hits its round limit on either tab, or whose Videos tab could not
   be opened after the Posts tab was read, is reported as partial, and starting
   a partial download asks for confirmation first. The videos that were found
-  are kept. Scroll the media page further and use `Scan Again` to pick up older
-  posts.
+  are kept. To pick up older posts, scroll further down the profile's Posts or
+  Videos tab and use `Scan Again`: when the tab is on one of those two pages it
+  carries on from where you scrolled, reads only that tab and adds what it finds
+  to the videos already found. From any other tab of the profile `Scan Again`
+  runs the whole two-tab scan again, from the top of each, and puts the tab back
+  afterwards.
 - Reserved X/Twitter routes are never treated as profile batches, by either the
   extension or the host: `home`, `explore`, `notifications`, `messages`, `i`,
   `settings`, `search`, `compose`, `jobs`, `lists`, `bookmarks`, `communities`,

@@ -3,6 +3,7 @@ import {
   FACEBOOK_HOSTS,
   RESERVED_PROFILE_USERNAMES,
   batchTargetForUrl,
+  isScanPageUrl,
   mergeScanPasses,
   profileScanChunk,
   twitterMediaUrl,
@@ -22,10 +23,26 @@ const HANDLE_CHECK_LOAD_TIMEOUT_MS = 30000;
 const HANDLE_CHECK_SETTLE_MS = 2500;
 const SCROLL_RESTORE_TIMEOUT_MS = 4000;
 const SCROLL_RESTORE_RETRY_MS = 500;
+// After a page is scrolled back to the top, X's feed takes a moment to draw
+// the posts there; the scan reads the page only once they are in.
+const SCROLL_TOP_SETTLE_MS = 800;
 
 // Batch keys whose scan is running in this worker instance. Empty after a
 // worker restart, which is exactly when a popup-driven rescan should be allowed.
 const activeScans = new Set();
+
+// The scan that owns each source tab: { key, returnUrl, startScrollY }. Starting
+// another scan on a tab replaces its entry, and the older scan, seeing it is no
+// longer the owner, stops at its next step without touching the tab or writing a
+// result. The newer one takes over where the older one meant to leave the tab.
+const tabScans = new Map();
+
+class ScanSuperseded extends Error {
+  constructor() {
+    super("A newer scan took over this tab.");
+    this.name = "ScanSuperseded";
+  }
+}
 
 function isTwitterHost(hostname) {
   return TWITTER_HOSTS.includes(hostname);
@@ -150,6 +167,13 @@ async function restoreScrollUntilReached(tabId, scrollY, url) {
   }
 }
 
+// Scrolls the tab to its top and waits for the posts there to be drawn, so a
+// pass reads a page from the same place whatever the user had scrolled to.
+async function scrollToTop(tabId) {
+  await restoreScrollPosition(tabId, 0);
+  await sleep(SCROLL_TOP_SETTLE_MS);
+}
+
 /**
  * Scans a profile page for the picker and settles `key` with one final record.
  * A Twitter profile is read twice, Posts then Media, in the tab it was started
@@ -159,27 +183,48 @@ async function restoreScrollUntilReached(tabId, scrollY, url) {
  * was and the scan guard is released, because the picker offers Scan Again the
  * moment it sees the record and a restart must then be able to run.
  */
-async function scanProfileTab(tabId, provider, username, key, returnUrl = null) {
+async function scanProfileTab(tabId, provider, username, key, returnUrl = null, { continuation = false } = {}) {
   if (activeScans.has(key)) {
     return;
   }
 
   activeScans.add(key);
-  let record;
+  // Replacing a scan that is mid-way means the tab is no longer where the user
+  // left it, so its start page and scroll are the ones to go back to.
+  const previous = tabScans.get(tabId);
+  const run = {
+    key,
+    returnUrl: previous?.returnUrl ?? returnUrl,
+    startScrollY: previous?.returnUrl ? previous.startScrollY : null,
+  };
+  tabScans.set(tabId, run);
+  const current = () => tabScans.get(tabId) === run;
+  let record = null;
   try {
     record =
       provider === "twitter"
-        ? await scanTwitterProfile(tabId, username, key, returnUrl)
+        ? await scanTwitterProfile(tabId, username, key, run, { current, continuation })
         : await runProfileScan(tabId, provider, username, key);
   } catch (error) {
-    record = {
-      status: "error",
-      provider,
-      username,
-      error: error?.message || "Could not scan the profile media page.",
-    };
+    if (!(error instanceof ScanSuperseded)) {
+      record = {
+        status: "error",
+        provider,
+        username,
+        error: error?.message || "Could not scan the profile media page.",
+      };
+    }
   } finally {
     activeScans.delete(key);
+    if (current()) {
+      tabScans.delete(tabId);
+    }
+  }
+  if (!record) {
+    // Replaced by a newer scan: the picker that waited on this key was pointed
+    // at the newer one, so there is nothing to settle.
+    await chrome.storage.session.remove(key).catch(() => {});
+    return;
   }
   await writeScanRecord(key, record);
 }
@@ -228,26 +273,56 @@ const SCAN_HEARTBEAT_MS = 5000;
 
 async function whileKeepingScanAlive(key, record, work) {
   await writeScanRecord(key, record);
-  const timer = setInterval(() => void writeScanRecord(key, record), SCAN_HEARTBEAT_MS);
+  // A write still in flight when the work ends must land before the caller
+  // writes the result, or it could overwrite it.
+  let inflight = Promise.resolve();
+  const timer = setInterval(() => {
+    inflight = writeScanRecord(key, record);
+  }, SCAN_HEARTBEAT_MS);
   try {
     return await work();
   } finally {
     clearInterval(timer);
+    await inflight;
   }
 }
 
-// Resolves to the record that settles the scan (see scanProfileTab).
-async function scanTwitterProfile(tabId, username, key, returnUrl) {
+// Resolves to the record that settles the scan (see scanProfileTab). `run` is
+// the tab's scan entry: where to put the tab back (`returnUrl`, with the scroll
+// read before the scan moves the tab away). `current` says whether this scan
+// still owns the tab; throws ScanSuperseded when it does not. A `continuation`
+// reads only the tab as it stands (Scan Again on the profile's Posts or Media
+// tab, scrolled where the user left it) and the picker adds what it finds to
+// what it had; otherwise both tabs are read, each from its top.
+async function scanTwitterProfile(tabId, username, key, run, { current = () => true, continuation = false } = {}) {
+  const stillOurs = () => {
+    if (!current()) {
+      throw new ScanSuperseded();
+    }
+  };
+  if (continuation) {
+    const pass = await scanPass(tabId, "twitter", username, key, { current });
+    return { ...scanRecord("twitter", username, pass, pass.profileName), continuation: true };
+  }
+
   // Where the user left the page, read before the scan moves the tab away.
-  const startScrollY = returnUrl ? await readScrollPosition(tabId) : null;
+  const { returnUrl } = run;
+  if (returnUrl && run.startScrollY === null) {
+    run.startScrollY = await readScrollPosition(tabId);
+  }
   let postsPass = null;
   let mediaPass = null;
   try {
     try {
-      await whileKeepingScanAlive(key, scanningRecord(username, 0), () =>
-        showTwitterPosts(tabId, username)
-      );
+      await whileKeepingScanAlive(key, scanningRecord(username, 0), async () => {
+        await showTwitterPosts(tabId, username);
+        stillOurs();
+        await scrollToTop(tabId);
+      });
     } catch (error) {
+      if (error instanceof ScanSuperseded) {
+        throw error;
+      }
       return {
         status: "error",
         provider: "twitter",
@@ -256,17 +331,19 @@ async function scanTwitterProfile(tabId, username, key, returnUrl) {
       };
     }
 
-    postsPass = await scanPass(tabId, "twitter", username, key);
+    stillOurs();
+    postsPass = await scanPass(tabId, "twitter", username, key, { current });
     if (postsPass.ok) {
-      mediaPass = await scanTwitterMedia(tabId, username, key, postsPass);
+      mediaPass = await scanTwitterMedia(tabId, username, key, postsPass, { current, fromTop: true });
     }
     const merged = mergeScanPasses(postsPass, mediaPass);
     return scanRecord("twitter", username, merged, postsPass.profileName);
   } finally {
-    if (returnUrl) {
+    // A scan that lost the tab leaves it to the one that took it over.
+    if (returnUrl && current()) {
       const found = new Set([...(postsPass?.urls ?? []), ...(mediaPass?.urls ?? [])]).size;
       await whileKeepingScanAlive(key, scanningRecord(username, found), () =>
-        returnToStartPage(tabId, returnUrl, startScrollY)
+        returnToStartPage(tabId, returnUrl, run.startScrollY, username)
       );
     }
   }
@@ -278,25 +355,50 @@ async function scanTwitterProfile(tabId, username, key, returnUrl) {
  * throws: a Media tab that will not open is a failed pass, which the merge
  * keeps the Posts videos for.
  */
-async function scanTwitterMedia(tabId, username, key, postsPass, { stopAtId = null } = {}) {
+async function scanTwitterMedia(
+  tabId,
+  username,
+  key,
+  postsPass,
+  { stopAtId = null, current = () => true, fromTop = false } = {}
+) {
+  if (!current()) {
+    throw new ScanSuperseded();
+  }
   try {
-    await whileKeepingScanAlive(key, scanningRecord(username, postsPass.urls.length), () =>
-      showTabUrl(tabId, twitterMediaUrl(username))
-    );
+    await whileKeepingScanAlive(key, scanningRecord(username, postsPass.urls.length), async () => {
+      await showTabUrl(tabId, twitterMediaUrl(username));
+      if (!current()) {
+        throw new ScanSuperseded();
+      }
+      // A tab that was already on Media keeps its scroll through the "move".
+      if (fromTop) {
+        await scrollToTop(tabId);
+      }
+    });
   } catch (error) {
+    if (error instanceof ScanSuperseded) {
+      throw error;
+    }
     return { ok: false, error: error?.message || "Could not open the profile's Media tab.", urls: [] };
   }
-  return scanPass(tabId, "twitter", username, key, { stopAtId, carryUrls: postsPass.urls });
+  return scanPass(tabId, "twitter", username, key, { stopAtId, carryUrls: postsPass.urls, current });
 }
 
 /**
  * Puts the tab back on exactly the URL the scan was started from (query and
  * fragment included) and scrolls it to where the user had it, but only while
  * the page is really on that URL: a redirect lands on some other page, which
- * the old offset says nothing about. Best effort: the tab may be gone.
+ * the old offset says nothing about. Only a tab still on one of the profile's
+ * own pages the scan opened (or already on the start URL) is moved: one the
+ * user has taken somewhere else is left alone. Best effort: the tab may be gone.
  */
-async function returnToStartPage(tabId, returnUrl, scrollY) {
+async function returnToStartPage(tabId, returnUrl, scrollY, username) {
   try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.url !== returnUrl && !isScanPageUrl(tab.url, username)) {
+      return;
+    }
     await showTabUrl(tabId, returnUrl, { exact: true });
     await restoreScrollUntilReached(tabId, scrollY, returnUrl);
   } catch (_error) {
@@ -320,7 +422,7 @@ async function scanPass(
   provider,
   expectedUsername,
   key,
-  { maxRounds = PROFILE_SCAN_MAX_ROUNDS, stopAtId = null, carryUrls = [] } = {}
+  { maxRounds = PROFILE_SCAN_MAX_ROUNDS, stopAtId = null, carryUrls = [], current = () => true } = {}
 ) {
   let progress = null;
   let profileName = "";
@@ -338,6 +440,9 @@ async function scanPass(
 
   try {
     for (let round = 0; round < maxRounds; round += 1) {
+      if (!current()) {
+        throw new ScanSuperseded();
+      }
       const [injection] = await chrome.scripting.executeScript({
         target: { tabId },
         func: profileScanChunk,
@@ -401,6 +506,9 @@ async function scanPass(
       newestId: progress?.newestId || null,
     });
   } catch (error) {
+    if (error instanceof ScanSuperseded) {
+      throw error;
+    }
     return pass({
       ok: false,
       error: error?.message || "Could not scan the profile media page. Try reloading it first.",
@@ -441,9 +549,22 @@ async function restartProfileScan(message) {
     return { ok: true, alreadyRunning: true };
   }
 
+  // Scan Again on a tab that is already on the profile's Posts or Media page
+  // carries on from where the user scrolled it, without moving the tab; the
+  // picker adds what it finds to the videos it already has. From any other tab
+  // the whole two-tab scan runs again, and the tab goes back where it was.
+  let tab = null;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch (_error) {
+    // The scan reports the tab as unreadable.
+  }
+  const continuation = provider === "twitter" && Boolean(tab) && isScanPageUrl(tab.url, username);
+  const returnUrl = provider === "twitter" && !continuation ? tab?.url || null : null;
+
   await writeScanRecord(key, { status: "scanning", provider, username });
-  void scanProfileTab(tabId, provider, username, key);
-  return { ok: true };
+  void scanProfileTab(tabId, provider, username, key, returnUrl, { continuation });
+  return { ok: true, continuation };
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -597,6 +718,13 @@ async function openDownloadPicker(url, source, tab, { fromLink = false } = {}) {
   // tab or link the profile was seen on.
   const pickerUrl = target?.provider === "twitter" ? twitterMediaUrl(target.key) : url;
   const params = new URLSearchParams({ url: pickerUrl, source });
+  // The picker may start the download by itself for this one click of the
+  // toolbar button or the page menu, never for a link that was right-clicked,
+  // and never when the picker is reloaded or restored: it takes the marker off
+  // its own address before it acts on it.
+  if (!fromLink) {
+    params.set("auto", "1");
+  }
   // A right-clicked link points at some other page than the tab the click
   // happened in, so only the toolbar button and the page menu scan a tab.
   const scannable = Boolean(target) && !fromLink && typeof tab?.id === "number";

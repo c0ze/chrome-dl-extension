@@ -85,6 +85,24 @@ export function twitterPostsUrl(username) {
 }
 
 /**
+ * Whether a URL is the Posts tab (/<handle>) or the Media tab (/<handle>/media)
+ * of this profile, the two pages a scan reads. A query or fragment does not
+ * matter; another tab of the profile, or another page, is not one.
+ */
+export function isScanPageUrl(rawUrl, username) {
+  try {
+    const url = new URL(rawUrl);
+    if (!username || !TWITTER_HOSTS.includes(url.hostname)) {
+      return false;
+    }
+    const match = url.pathname.match(/^\/([^/]+)(?:\/media)?\/?$/i);
+    return Boolean(match) && match[1].toLowerCase() === String(username).toLowerCase();
+  } catch (_error) {
+    return false;
+  }
+}
+
+/**
  * The one URL a Twitter profile batch is always started with, whichever tab
  * the profile was seen on, so the host validates a single shape.
  */
@@ -836,6 +854,12 @@ export async function profileScanChunk(options) {
     return parts.length === 2 && parts[1].toLowerCase() === "media";
   }
 
+  // The timeline is in the page's main column: a link to some other post in a
+  // sidebar ("who to follow", trends) is not a place in it, even on the Media tab.
+  function inTimeline(node) {
+    return Boolean(node.closest("main, [role='main'], [data-testid='primaryColumn']"));
+  }
+
   function collectVisibleLinks() {
     document.querySelectorAll("article").forEach((article) => {
       if (isEmbeddedContent(article, document.body)) {
@@ -872,7 +896,7 @@ export async function profileScanChunk(options) {
       if (!ownedByProfile(status)) {
         return;
       }
-      if (mediaTab) {
+      if (mediaTab && inTimeline(anchor)) {
         notePostId(status.id);
       }
       if (!status.isVideoPath && !hasOwnVideoElement(anchor)) {

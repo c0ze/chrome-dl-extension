@@ -939,6 +939,41 @@ test("a check on the Media tab stops at the previous check's post", async () => 
   assert.deepEqual(result.urls.sort(), ["https://x.com/alice/status/500", "https://x.com/alice/status/600"]);
 });
 
+test("a link in a sidebar next to newer grid cells does not stop a Media check", async () => {
+  // An old post suggested in a sidebar is not a place in the timeline.
+  withPage(`<div class="layout">
+      <main><a href="/alice/status/600/video/1"></a><a href="/alice/status/550/video/1"></a></main>
+      <aside><a href="/alice/status/400/photo/1"></a></aside>
+    </div>`, "https://x.com/alice/media");
+  const result = await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, stopAtId: "500", maxPasses: 1 });
+  assert.equal(result.ok, true);
+  assert.equal(result.reachedStop, false);
+  assert.equal(result.newestId, "600");
+});
+
+test("the primary column counts as the timeline too, and a photo cell can be the stop", async () => {
+  withPage(`<div data-testid="primaryColumn">
+      <a href="/alice/status/600/video/1"></a>
+      <a href="/alice/status/500/photo/1"></a>
+    </div>
+    <div data-testid="sidebarColumn"><a href="/alice/status/100/video/1"></a></div>`, "https://x.com/alice/media");
+  const result = await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, stopAtId: "500" });
+  assert.equal(result.reachedStop, true);
+  assert.equal(result.newestId, "600");
+});
+
+test("a scan page is the profile's Posts or Media tab, whatever the query", async () => {
+  const { isScanPageUrl } = await import("../extension/providers.js");
+  for (const url of ["https://x.com/alice", "https://x.com/alice/", "https://x.com/Alice/media", "https://twitter.com/alice/media/?s=20", "https://x.com/alice?s=20#top"]) {
+    assert.equal(isScanPageUrl(url, "alice"), true, url);
+  }
+  for (const url of ["https://x.com/alice/with_replies", "https://x.com/alice/likes", "https://x.com/bob", "https://x.com/home",
+                     "https://x.com/alice/status/1001", "https://example.com/alice", "chrome://newtab/", "", null]) {
+    assert.equal(isScanPageUrl(url, "alice"), false, String(url));
+  }
+  assert.equal(isScanPageUrl("https://x.com/alice", ""), false);
+});
+
 const pass = (o) => ({ ok: true, urls: [], partial: false, complete: true, newestId: null, ...o });
 
 test("both passes merge without duplicates and keep the newer position", () => {
@@ -955,6 +990,14 @@ test("a failed Media pass keeps the Posts videos and marks the scan partial", ()
   assert.deepEqual(m.urls, ["u1"]);
   assert.equal(m.partial, true);
   assert.equal(m.complete, false);
+});
+
+test("a failed Media pass after an empty Posts pass is an incomplete result, not an empty complete one", () => {
+  const m = mergeScanPasses(pass({ urls: [], newestId: "9" }), { ok: false, error: "x", urls: [] });
+  assert.equal(m.ok, true);
+  assert.deepEqual(m.urls, []);
+  assert.equal(m.complete, false);
+  assert.equal(m.partial, true);
 });
 
 test("a gone profile stops the scan", () => {
