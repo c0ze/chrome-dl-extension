@@ -304,7 +304,7 @@ test("a video that was already gone counts as removed, so the player can move on
 test("a video the host left on disk is an error, not a removal", () => {
   assert.throws(
     () => videoRemoved({ ok: true, deleted: 0, missing: false }, true),
-    /outside the library folder, so it was not deleted/
+    /was not deleted: it is outside the library folder or cannot be accessed/
   );
 });
 

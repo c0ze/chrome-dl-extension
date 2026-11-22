@@ -1976,6 +1976,25 @@ def job_video(job: dict[str, Any], root: Path) -> str:
         return ""
 
 
+def job_file_missing(job: dict[str, Any]) -> bool:
+    """True only when the job has no file, or the system confirms its path does not exist.
+
+    Any other failure to look it up (permission denied, a loop, ...) leaves the file's
+    state unknown, and an unknown file must not be treated as gone. Path.is_file() cannot
+    tell these apart: since Python 3.14 it answers False whatever the error.
+    """
+    filename = str(job.get("filename") or "").strip().strip('"')
+    if not filename:
+        return True
+    try:
+        os.stat(os.path.expanduser(filename))
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def remove_download(job_id: str) -> dict[str, Any]:
     """Take a download off the dashboard; a finished one's video is deleted and recorded."""
     job = get_download_job(job_id)
@@ -1989,10 +2008,8 @@ def remove_download(job_id: str) -> dict[str, Any]:
     if not relative or not (root / relative).is_file():
         # Nothing in the library to delete (failed, cancelled, already gone, or a
         # file outside the library, which is never touched): only the entry goes.
-        # "missing" tells the last two apart: no file at all on disk.
-        filename = str(job.get("filename") or "").strip().strip('"')
-        missing = not filename or not Path(os.path.expanduser(filename)).is_file()
-        return {**remove_download_job(job_id), "deleted": 0, "missing": missing}
+        # "missing" tells the last two apart: the file is confirmed not to exist.
+        return {**remove_download_job(job_id), "deleted": 0, "missing": job_file_missing(job)}
 
     thumb = thumbnail_path(job_id)
     with curation.open_favorites(library_root()) as db:

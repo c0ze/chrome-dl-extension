@@ -118,9 +118,10 @@ is loaded.
   even through the duplicate prompt. `Allow Again` there lifts that. `Remove`
   on a failed or queued download only takes it off the list, and `Clear List`
   takes everything but running downloads off the list without touching files.
-  A finished download whose file is outside the download folder is never
-  deleted: `Remove` takes it off the list and says the file was kept, and the
-  player stays on that video.
+  A finished download whose file is outside the download folder, or that the
+  host cannot access, is never deleted: `Remove` takes it off the list and says
+  the file was kept, and the player stays on that video. Only a file that is
+  confirmed gone lets the player move on.
 - Favorites are shared with `vtag`, the Haruna helper that lives in this
   repository (`native-host/vtag.py`, linked as `~/.local/bin/vtag` by the
   installer): Haruna's custom command `vtag fav`, bound to a mouse button,

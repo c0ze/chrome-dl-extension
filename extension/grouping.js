@@ -96,8 +96,9 @@ export function playableFavorites(favorites) {
  * `remove_download`: deleted now, or already missing from disk. `deletes` is
  * whether this was a finished download with a file (a failed or queued one has
  * no video to remove). The host only deletes inside the library folder, so a
- * file outside it stays on disk while its list entry goes; that throws, so
- * nothing claims a deletion that did not happen.
+ * file outside it stays on disk while its list entry goes, and a file it
+ * cannot look up is not known to be gone; both throw, so nothing claims a
+ * deletion that did not happen. `missing` is the host's confirmed absence.
  */
 export function videoRemoved(response, deletes) {
   if (response.deleted) {
@@ -110,7 +111,7 @@ export function videoRemoved(response, deletes) {
     return true;
   }
   throw new Error(
-    "This video is outside the library folder, so it was not deleted. The download was taken off the list."
+    "This video was not deleted: it is outside the library folder or cannot be accessed. The download was taken off the list."
   );
 }
 

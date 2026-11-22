@@ -1,6 +1,7 @@
 """Unit tests for the yt-dlp native messaging host."""
 from __future__ import annotations
 
+import errno
 import json
 import os
 import tempfile
@@ -2083,6 +2084,28 @@ class RemoveDownloadTests(LibraryCase):
         self.assertEqual((response["deleted"], response["missing"]), (0, False))
         self.assertTrue(outside.exists())
         self.assertIsNone(host.get_download_job("a" * 32))
+
+    def test_a_file_that_cannot_be_looked_up_is_not_reported_as_missing(self) -> None:
+        # Python 3.14's Path.is_file() answers False when permission is denied, so
+        # only a lookup that fails with "no such file" may say the file is gone.
+        target = self.video_path
+        real_stat, real_is_file = os.stat, Path.is_file
+
+        def stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+            if isinstance(path, (str, os.PathLike)) and os.fspath(path) == str(target):
+                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(target))
+            return real_stat(path, *args, **kwargs)
+
+        def is_file(path: Path, *args: Any, **kwargs: Any) -> bool:
+            return False if path == target else real_is_file(path, *args, **kwargs)
+
+        self.job()
+        with unittest.mock.patch.object(os, "stat", stat), unittest.mock.patch.object(Path, "is_file", is_file):
+            response = self.remove()
+
+        self.assertTrue(response["ok"])
+        self.assertEqual((response["deleted"], response["missing"]), (0, False))
+        self.assertTrue(target.exists())
 
     def test_an_outside_file_that_is_gone_counts_as_missing(self) -> None:
         self.job(filename=str(self.root / "gone.mp4"))
