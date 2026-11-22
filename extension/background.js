@@ -20,6 +20,8 @@ const PROFILE_SCAN_MAX_ROUNDS = 16;
 // newest posts are; the full-depth scan stays with the toolbar button.
 const HANDLE_CHECK_LOAD_TIMEOUT_MS = 30000;
 const HANDLE_CHECK_SETTLE_MS = 2500;
+const SCROLL_RESTORE_TIMEOUT_MS = 4000;
+const SCROLL_RESTORE_RETRY_MS = 500;
 
 // Batch keys whose scan is running in this worker instance. Empty after a
 // worker restart, which is exactly when a popup-driven rescan should be allowed.
@@ -102,21 +104,41 @@ async function readScrollPosition(tabId) {
   }
 }
 
+// Scrolls the tab to `scrollY` once; resolves to where the page ended up (a page
+// shorter than that stops at its bottom), or null when it could not be done.
 async function restoreScrollPosition(tabId, scrollY) {
   if (typeof scrollY !== "number") {
-    return;
+    return null;
   }
 
   try {
-    await chrome.scripting.executeScript({
+    const [injection] = await chrome.scripting.executeScript({
       target: { tabId },
       func: (y) => {
         window.scrollTo(0, y);
+        return window.scrollY;
       },
       args: [scrollY],
     });
+    return typeof injection?.result === "number" ? injection.result : null;
   } catch (_error) {
     // The tab may be gone or navigated away; nothing to restore.
+    return null;
+  }
+}
+
+// A page that was just reloaded is shorter than the one the user left: the feed
+// loads more as it is scrolled. So scroll again, a moment apart, until the page
+// has reached `scrollY` or the time is up; best effort, the position may never
+// be reachable.
+async function restoreScrollUntilReached(tabId, scrollY) {
+  const deadline = Date.now() + SCROLL_RESTORE_TIMEOUT_MS;
+  while (true) {
+    const reached = await restoreScrollPosition(tabId, scrollY);
+    if (reached === null || reached >= scrollY - 2 || Date.now() >= deadline) {
+      return;
+    }
+    await sleep(SCROLL_RESTORE_RETRY_MS);
   }
 }
 
@@ -261,13 +283,16 @@ async function scanTwitterMedia(tabId, username, key, postsPass, { stopAtId = nu
 
 /**
  * Puts the tab back on exactly the URL the scan was started from (query and
- * fragment included) and scrolls it to where the user had it. Best effort: the
- * tab may be gone.
+ * fragment included) and scrolls it to where the user had it, but only when the
+ * tab really ended up on that URL: a redirect lands on some other page, which
+ * the old offset says nothing about. Best effort: the tab may be gone.
  */
 async function returnToStartPage(tabId, returnUrl, scrollY) {
   try {
     await showTabUrl(tabId, returnUrl, { exact: true });
-    await restoreScrollPosition(tabId, scrollY);
+    if ((await chrome.tabs.get(tabId)).url === returnUrl) {
+      await restoreScrollUntilReached(tabId, scrollY);
+    }
   } catch (_error) {
     // The tab was closed or would not load; there is nothing to go back to.
   }
