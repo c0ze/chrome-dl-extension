@@ -96,7 +96,8 @@ test("a post is a Twitter target with its author, and not a profile", () => {
 test("a post link with no author is still a Twitter post, without a handle", () => {
   assert.deepEqual(pickerTarget("https://x.com/i/status/1001"), { twitter: true, handle: "", isProfile: false });
   assert.deepEqual(pickerTarget("https://x.com/i/web/status/1001"), { twitter: true, handle: "", isProfile: false });
-  assert.deepEqual(pickerTarget("https://twitter.com/i/statuses/1001"), { twitter: true, handle: "", isProfile: false });
+  assert.deepEqual(pickerTarget("https://twitter.com/i/status/1001/video/1"), { twitter: true, handle: "", isProfile: false });
+  assert.deepEqual(pickerTarget("https://x.com/i/web/status/1001/photo/1"), { twitter: true, handle: "", isProfile: false });
 });
 
 test("a post's own sub-pages are the post", () => {
@@ -116,6 +117,18 @@ test("other X pages are neither a post nor a profile, so they get no group butto
     "https://x.com/alice/status",
     "https://x.com/alice/status/abc",
     "https://x.com/",
+    // A status id somewhere deeper in the path is not a post.
+    "https://x.com/settings/profile/status/1001",
+    "https://x.com/alice/likes/status/1001",
+    "https://x.com/i/lists/status/1001",
+    "https://x.com/i/web/other/status/1001",
+    "https://x.com/i/web/status/abc",
+    // A reserved route is not a handle, and neither is a name X would not accept.
+    "https://x.com/settings/status/1001",
+    "https://x.com/home/status/1001",
+    "https://x.com/Search/status/1001",
+    "https://x.com/not-a-handle/status/1001",
+    "https://x.com/waytoolongtobeahandle/status/1001",
   ]) {
     assert.deepEqual(pickerTarget(url), { twitter: false, handle: "", isProfile: false }, url);
   }

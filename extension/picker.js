@@ -2,12 +2,16 @@
 // group buttons. download.js decides when a download starts; nothing here does.
 
 import { jobHandle } from "./grouping.js";
-import { TWITTER_HOSTS, batchTargetForUrl } from "./providers.js";
+import { RESERVED_PROFILE_USERNAMES, TWITTER_HOSTS, batchTargetForUrl } from "./providers.js";
 
-// A post: a status link on an X/Twitter host, with or without an author in front
-// (/alice/status/1001, /i/status/1001, /i/web/status/1001), the same shapes the
-// host reads a post from. Other X pages (/home, /search, /alice/followers) are
-// neither a post nor a profile.
+// A post, by the shapes X serves one under, each optionally followed by sub-pages
+// such as /video/1 or /photo/1:
+//   /<handle>/status/<id>   the handle is a valid name and not one of X's own routes
+//   /i/status/<id>          a link with no author
+//   /i/web/status/<id>
+// The match is anchored at the start of the path: a status id deeper in some
+// other page (/settings/profile/status/1001) is not a post, and neither are the
+// other X pages (/home, /search, /alice/followers).
 function isTwitterPost(rawUrl) {
   try {
     const url = new URL(rawUrl);
@@ -15,8 +19,18 @@ function isTwitterPost(rawUrl) {
       return false;
     }
     const parts = url.pathname.split("/").filter(Boolean);
-    return parts.some(
-      (part, index) => ["status", "statuses"].includes(part.toLowerCase()) && /^\d+$/.test(parts[index + 1] ?? "")
+    const isId = (part) => /^\d+$/.test(part ?? "");
+    if (parts[0]?.toLowerCase() === "i") {
+      return (
+        (parts[1] === "status" && isId(parts[2])) ||
+        (parts[1] === "web" && parts[2] === "status" && isId(parts[3]))
+      );
+    }
+    return (
+      /^[A-Za-z0-9_]{1,15}$/.test(parts[0] ?? "") &&
+      !RESERVED_PROFILE_USERNAMES.includes(parts[0].toLowerCase()) &&
+      parts[1] === "status" &&
+      isId(parts[2])
     );
   } catch (_error) {
     return false;
