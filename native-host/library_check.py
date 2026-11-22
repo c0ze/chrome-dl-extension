@@ -623,6 +623,21 @@ def library_file(root: Path, relative_path: Any) -> Path:
     return path
 
 
+def inside_library(root: Path, video: Path) -> bool:
+    """True when video really lives under root: every symlink in its parents followed.
+
+    library_file() only looks at the words of a path, so a symlinked folder inside
+    the library could still lead a delete to a file somewhere else. Call this on
+    the path right before acting on it.
+    """
+    try:
+        parent = video.parent.resolve(strict=True)
+        base = root.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return parent == base or base in parent.parents
+
+
 def forget_files(state_dir: Path, gone: set[str]) -> None:
     index = load_index(state_dir)
     for path in gone:

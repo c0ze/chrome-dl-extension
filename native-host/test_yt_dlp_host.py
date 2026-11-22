@@ -2225,6 +2225,90 @@ class RemoveLibraryFilesTests(LibraryCase):
         self.assertTrue((self.library / "notes.txt").exists())
 
 
+class RemoveThroughSymlinkTests(LibraryCase):
+    """A symlinked folder inside the library must never lead a deletion outside it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        patcher = unittest.mock.patch.object(host.curation.vtag, "DB_PATH", Path(temp.name) / "vtag.db")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.elsewhere = self.root / "elsewhere"
+        self.elsewhere.mkdir()
+        self.target = self.elsewhere / "alice-1234567890001.mp4"
+        self.target.write_bytes(b"x")
+        (self.library / "group d").mkdir()
+        (self.library / "group d" / "alice").symlink_to(self.elsewhere, target_is_directory=True)
+        self.relative = "group d/alice/alice-1234567890001.mp4"
+
+    def assert_nothing_changed(self) -> None:
+        self.assertTrue(self.target.exists())
+        self.assertEqual(host.curation.read_removed(self.root), [])
+        self.assertFalse(host.ARCHIVE_PATH.exists())
+
+    def test_a_library_check_removal_through_a_symlinked_folder_is_refused(self) -> None:
+        response = host.handle_message({"type": "remove_library_files", "paths": [self.relative], "reason": "removed"})
+
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["removed"], 0)
+        self.assert_nothing_changed()
+
+    def test_a_dashboard_removal_through_a_symlinked_folder_is_refused_and_keeps_the_job(self) -> None:
+        self.write_jobs(
+            [
+                {
+                    "id": "c" * 32,
+                    "url": "https://x.com/alice/status/1",
+                    "status": "complete",
+                    "filename": str(self.library / self.relative),
+                }
+            ]
+        )
+
+        response = host.remove_download("c" * 32)
+
+        self.assertFalse(response["ok"])
+        self.assert_nothing_changed()
+        self.assertEqual([job["id"] for job in host.get_jobs()["jobs"]], ["c" * 32])
+
+    def test_a_symlink_swapped_in_after_the_check_is_still_refused_at_deletion(self) -> None:
+        # The path passes the first check, then a parent is swapped for a symlink before the unlink.
+        real = self.video("group a/bob/bob-1234567890002.mp4")
+        outside = self.elsewhere / "bob-1234567890002.mp4"
+        outside.write_bytes(b"x")
+
+        def swap(video, picture):
+            (self.library / "group a" / "bob").rename(self.library / "group a" / "bob-real")
+            (self.library / "group a" / "bob").symlink_to(self.elsewhere, target_is_directory=True)
+            return False
+
+        with unittest.mock.patch.object(host.curation, "grab_frame", swap), \
+                unittest.mock.patch.object(host.curation, "video_length", return_value=None):
+            response = host.curation.remove_videos(
+                self.library, self.root, host.ARCHIVE_PATH, [{"relative": "group a/bob/bob-1234567890002.mp4"}], None
+            )
+
+        self.assertFalse(response["ok"])
+        self.assertTrue(outside.exists())
+        self.assertEqual(host.curation.read_removed(self.root), [])
+        self.assertTrue((self.library / "group a" / "bob-real" / real.name).exists())
+
+    def test_a_library_root_that_is_itself_a_symlink_still_works(self) -> None:
+        real = self.video("group a/bob/bob-1234567890003.mp4")
+        linked_root = self.root / "linked-library"
+        linked_root.symlink_to(self.library, target_is_directory=True)
+
+        with unittest.mock.patch.object(host.curation, "video_length", return_value=None):
+            response = host.curation.remove_videos(
+                linked_root, self.root, host.ARCHIVE_PATH, [{"relative": "group a/bob/bob-1234567890003.mp4"}], None
+            )
+
+        self.assertTrue(response["ok"])
+        self.assertFalse(real.exists())
+
+
 class CheckedThroughTests(LibraryCase):
     """A check stops where the previous complete one began, so its marker must never skip posts."""
 

@@ -12,6 +12,7 @@ that block. Nothing here decides which files to remove: callers pass them.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -200,14 +201,16 @@ def archive_lines(archive: Path) -> list[str]:
         return []
 
 
-def block_download(archive: Path, ident: str) -> None:
+def block_download(archive: Path, ident: str) -> bool:
+    """Add the id to the archive; True when this call added it (it was not there)."""
     line = f"twitter {ident}"
     if line in archive_lines(archive):
-        return
+        return False
     archive.parent.mkdir(mode=PRIVATE_DIR_MODE, parents=True, exist_ok=True)
     descriptor = os.open(archive, os.O_WRONLY | os.O_CREAT | os.O_APPEND, PRIVATE_FILE_MODE)
     with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
         handle.write(line + "\n")
+    return True
 
 
 def unblock_download(archive: Path, ident: str) -> None:
@@ -245,6 +248,8 @@ def remove_videos(
             video = library_check.library_file(root, relative)
             if not video.is_file():
                 raise ValueError("the file is not there any more")
+            if not library_check.inside_library(root, video):
+                raise ValueError("the file is outside the library")
         except (OSError, ValueError) as error:
             failed.append(f"{relative or '?'}: {error}")
             continue
@@ -280,16 +285,20 @@ def remove_videos(
         }
         records.insert(0, record)
         write_removed(state_dir, records)
-        if ident:
-            block_download(archive, ident)
+        blocked = block_download(archive, ident) if ident else False
 
         try:
+            # Checked again now: a folder may have been swapped for a symlink since.
+            if not library_check.inside_library(root, video):
+                raise OSError(errno.EPERM, "the file is outside the library")
             video.unlink()
         except OSError as error:
             # Keep the list honest: the file is still there.
             records.remove(record)
             write_removed(state_dir, records)
             picture.unlink(missing_ok=True)
+            if blocked and ident:
+                unblock_download(archive, ident)
             failed.append(f"{relative}: {error.strerror or error}")
             continue
 
