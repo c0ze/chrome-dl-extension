@@ -908,6 +908,23 @@ test("without a marker a check reads on and reports the newest post it saw", asy
   assert.equal(result.newestId, "505");
 });
 
+test("a status link outside a post on the Posts tab does not stop a check", async () => {
+  // A sidebar or "who to follow" link is not a position in the timeline.
+  withPage(
+    `<div role="main">
+       <article><video></video><a href="/alice/status/600"><time></time></a></article>
+       <a href="/alice/status/400"></a>
+     </div>`,
+    "https://x.com/alice"
+  );
+
+  const result = await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, stopAtId: "500", maxPasses: 1 });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.reachedStop, false);
+  assert.equal(result.newestId, "600");
+});
+
 test("a check on the Media tab stops at the previous check's post", async () => {
   withPage(`<div role="main">
       <a href="/alice/status/600/video/1"></a>

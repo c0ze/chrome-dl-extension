@@ -770,6 +770,13 @@ export async function profileScanChunk(options) {
     notePostId(id);
   }
 
+  // On the Media tab (/<handle>/media) the grid cells are the timeline; on the
+  // Posts tab a status link outside an article (a sidebar suggestion, say) is not.
+  function onMediaTab() {
+    const parts = window.location.pathname.split("/").filter(Boolean);
+    return parts.length === 2 && parts[1].toLowerCase() === "media";
+  }
+
   function collectVisibleLinks() {
     document.querySelectorAll("article").forEach((article) => {
       if (isEmbeddedContent(article, document.body)) {
@@ -794,7 +801,9 @@ export async function profileScanChunk(options) {
     });
 
     // Media-grid cells are plain anchors rather than articles. The grid is in
-    // date order and has no pinned posts or reposts, so every cell is a position.
+    // date order and has no pinned posts or reposts, so on the Media tab every
+    // cell is a position.
+    const mediaTab = onMediaTab();
     document.querySelectorAll("a[href*='/status/']").forEach((anchor) => {
       if (anchor.closest("article")) {
         return;
@@ -804,7 +813,9 @@ export async function profileScanChunk(options) {
       if (!ownedByProfile(status)) {
         return;
       }
-      notePostId(status.id);
+      if (mediaTab) {
+        notePostId(status.id);
+      }
       if (!status.isVideoPath && !hasOwnVideoElement(anchor)) {
         return;
       }
