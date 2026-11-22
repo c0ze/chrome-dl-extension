@@ -35,7 +35,7 @@ const entry = (handle, pending = 0) => ({
 // The handle list over a fake host and a fake chrome. `scanResults[handle]` is
 // the pending count a check of that profile leaves; the permission prompt and
 // the scans can be held open with `holdPermission()` and `holdScans()`.
-async function setup({ scanResults = {} } = {}) {
+async function setup({ scanResults = {}, gone = [] } = {}) {
   const dom = new JSDOM(
     `<!doctype html><button id="check-all"></button><button id="import"></button>
      <button id="add"></button><div id="chips"></div><div id="list"></div>
@@ -56,7 +56,9 @@ async function setup({ scanResults = {} } = {}) {
   let permissionGate = null;
   let scanGate = null;
   let importGate = null;
+  let refreshGate = null;
   let grant = true;
+  let complete = true;
 
   const callHost = async (payload) => {
     log.push(payload);
@@ -66,6 +68,7 @@ async function setup({ scanResults = {} } = {}) {
         if (importGate) await importGate;
         return { ok: true, found: 2, videos: 6, added: 0, skipped_count: 0, in_several_groups: 0 };
       case "get_handles":
+        if (refreshGate) await refreshGate;
         return { ok: true, handles: JSON.parse(JSON.stringify(entries)), groups: ["group a"], library_root: "/srv/archive/media/twitter" };
       case "get_favorites":
         return { ok: true, groups: {} };
@@ -78,7 +81,7 @@ async function setup({ scanResults = {} } = {}) {
       case "download_handle_pending": {
         const queued = target.pending_count;
         target.pending_count = 0;
-        return { ok: true, queued_count: queued, download_dir: "/srv/archive/media/twitter/group a" };
+        return { ok: true, queued_count: queued, download_dir: "/srv/archive/media/twitter/group a/alice" };
       }
       default:
         return { ok: true };
@@ -95,9 +98,11 @@ async function setup({ scanResults = {} } = {}) {
     },
     runtime: {
       sendMessage: async (message) => {
-        scans.push(message.profileUrl.split("/")[3]);
+        const handle = message.profileUrl.split("/")[3];
+        scans.push(handle);
         if (scanGate) await scanGate;
-        return { ok: true, urls: [], newestId: "1001", complete: true };
+        if (gone.includes(handle)) return { ok: false, gone: true };
+        return { ok: true, urls: [], newestId: "1001", complete };
       },
     },
   };
@@ -138,11 +143,22 @@ async function setup({ scanResults = {} } = {}) {
     permissionRequests: () => permissionRequests,
     changes: () => changed,
     importButton: $("import"),
+    list: $("list"),
+    setComplete: (value) => { complete = value; },
+    holdRefresh() {
+      const [gate, release] = open();
+      refreshGate = gate;
+      return () => {
+        refreshGate = null;
+        release();
+      };
+    },
     holdImport() {
       const [gate, release] = open();
       importGate = gate;
       return release;
     },
+    window: dom.window,
     deny: () => { grant = false; },
     allow: () => { grant = true; },
     holdPermission() {
@@ -227,57 +243,63 @@ test("a second Check during a prompt that ends in a refusal is turned away, then
   assert.deepEqual(page.scans, ["bob"]);
 });
 
-test("an Import that finishes while the permission prompt is open does not free the check slot", async () => {
+test("an Import is refused while a check holds the slot, from the permission prompt to the last scan", async () => {
   const page = await setup();
   const answer = page.holdPermission();
   const finishScan = page.holdScans();
   const first = page.panel.checkHandles([page.entry("alice")]);
 
+  // The page was redrawn inside the click, before the prompt.
+  assert.equal(page.importButton.disabled, true);
   page.importButton.click();
   await settle();
-  assert.ok(page.log.some((message) => message.type === "import_library"), "the Import ran during the wait");
+  assert.equal(page.log.some((message) => message.type === "import_library"), false, "a disabled button does nothing");
+
+  // And the action itself refuses, should a click get through.
+  page.importButton.disabled = false;
+  page.importButton.click();
+  await settle();
+  assert.deepEqual(page.messages.at(-1), ["info", "Another handle list action is still running."]);
+  assert.equal(page.log.some((message) => message.type === "import_library"), false, "the Import never ran");
 
   answer();
   await settle();
   assert.deepEqual(page.scans, ["alice"]);
   assert.equal(page.panel.isChecking("alice"), true);
+  assert.equal(page.importButton.disabled, true, "still off during the scan");
 
   await within(page.panel.checkHandles([page.entry("bob")]), "the second Check");
   await settle();
-  assert.deepEqual(page.messages.at(-1), ["info", "Another handle list action is still running."]);
   assert.deepEqual(page.scans, ["alice"], "only one scan runs");
   assert.equal(page.permissionRequests(), 1);
   assert.equal(page.panel.isChecking("alice"), true, "the first check keeps its mark until its scan ends");
-  assert.equal(page.panel.isChecking("bob"), false);
 
   finishScan();
   await first;
   assert.equal(page.panel.isChecking("alice"), false);
+  assert.equal(page.importButton.disabled, false, "the Import is back once the check ends");
 });
 
-test("an Import that ends in the middle of a scan does not free the check slot", async () => {
+test("Edit's Save is refused and disabled while a check holds the slot", async () => {
   const page = await setup();
+  const edit = [...page.list.querySelectorAll("button")].find((b) => b.textContent === "Edit");
+  edit.click();
+  const form = () => page.list.querySelector("form");
+  assert.ok(form(), "the edit form is open");
+  assert.equal(form().querySelector("[type=submit]").disabled, false);
+
   const answer = page.holdPermission();
-  const finishScan = page.holdScans();
-  const finishImport = page.holdImport();
-  const first = page.panel.checkHandles([page.entry("alice")]);
-
-  page.importButton.click();
+  const first = page.panel.checkHandles([page.entry("bob")]);
+  assert.equal(form().querySelector("[type=submit]").disabled, true, "Save is off during the prompt");
+  const field = form().querySelector("input");
+  field.value = "renamed";
+  form().dispatchEvent(new page.window.Event("submit", { cancelable: true }));
   await settle();
+  assert.equal(page.log.some((message) => message.type === "update_handle"), false, "nothing was sent");
+  assert.deepEqual(page.messages.at(-1), ["info", "Another handle list action is still running."]);
+
   answer();
-  await settle();
-  assert.equal(page.panel.isChecking("alice"), true);
-
-  finishImport();
-  await settle();
-  assert.equal(page.panel.isChecking("alice"), true, "the Import's end did not end the check's mark");
-  await within(page.panel.checkHandles([page.entry("bob")]), "the second Check");
-  assert.deepEqual(page.scans, ["alice"], "only one scan runs");
-  assert.equal(page.permissionRequests(), 1);
-
-  finishScan();
   await first;
-  assert.equal(page.panel.isChecking("alice"), false);
 });
 
 test("a check that is running does not free an Import's slot either", async () => {
@@ -358,4 +380,68 @@ test("the dashboard is told when a check starts and when the list refreshes", as
   const before = page.changes();
   await page.panel.checkHandles([page.entry("alice")]);
   assert.ok(page.changes() >= before + 2, "once on start, once after the refresh");
+});
+
+test("a check that found nothing but did not read everything is partial, never nothing new", async () => {
+  const page = await setup({ scanResults: { alice: 0 } });
+  page.setComplete(false);
+  await page.panel.checkHandles([page.entry("alice")]);
+  assert.equal(page.panel.foundNothingNew("alice"), false);
+  assert.equal(page.panel.checkedPartial("alice"), true);
+  assert.match(page.messages.at(-1)[1], /^No new videos in what was read.*Check again\.$/);
+
+  // A later complete check replaces it.
+  page.setComplete(true);
+  await page.panel.checkHandles([page.entry("alice")]);
+  assert.equal(page.panel.foundNothingNew("alice"), true);
+  assert.equal(page.panel.checkedPartial("alice"), false);
+  assert.deepEqual(page.messages.at(-1), ["info", "No new videos."]);
+});
+
+test("Seen and Download take a partial result off the handle too", async () => {
+  const page = await setup({ scanResults: { alice: 0 } });
+  page.setComplete(false);
+  await page.panel.checkHandles([page.entry("alice")]);
+  assert.equal(page.panel.checkedPartial("alice"), true);
+  await page.panel.markSeen(page.entry("alice"));
+  assert.equal(page.panel.checkedPartial("alice"), false);
+});
+
+test("a check that found videos is not partial-nothing even when it stopped early", async () => {
+  const page = await setup({ scanResults: { alice: 2 } });
+  page.setComplete(false);
+  await page.panel.checkHandles([page.entry("alice")]);
+  assert.equal(page.panel.checkedPartial("alice"), false);
+  assert.equal(page.panel.foundNothingNew("alice"), false);
+});
+
+test("a check's summary names the accounts it found gone, whatever check starts after it", async () => {
+  const page = await setup({ gone: ["alice"] });
+  const release = page.holdRefresh();
+  const first = page.panel.checkHandles([page.entry("alice")]);
+  await settle();
+  // The first check has freed its slot and waits for the refreshed list.
+  const second = page.panel.checkHandles([page.entry("bob")]);
+  await settle();
+  release();
+  await first;
+  await second;
+
+  const summaries = page.messages.map(([, text]) => text);
+  assert.ok(summaries.some((text) => text.includes("Gone, marked stale: @alice")), summaries.join(" | "));
+  assert.equal(
+    summaries.filter((text) => text.includes("@alice")).length,
+    1,
+    "only the first check reports it"
+  );
+});
+
+test("the queued message shows the folder the way the picker does", async () => {
+  const page = await setup({ scanResults: { alice: 3 } });
+  await page.panel.checkHandles([page.entry("alice")]);
+  await page.panel.downloadPending(page.entry("alice"), "group a");
+  assert.deepEqual(page.messages.at(-1), [
+    "success",
+    "Queued 3 new videos from @alice in media/twitter/group a/alice",
+  ]);
 });

@@ -1,7 +1,15 @@
 // The handle list: every X/Twitter account in the library, filed under its
 // group, with a check that looks at a profile for videos not downloaded yet.
 
-import { favoriteChips, findHandleEntry, formatChecked, groupHandles, handleGroups, pendingLabel } from "./grouping.js";
+import {
+  favoriteChips,
+  findHandleEntry,
+  formatChecked,
+  groupHandles,
+  handleGroups,
+  pendingLabel,
+  shortPath,
+} from "./grouping.js";
 import { favoritesGroupFor } from "./library-views.js";
 
 const SCAN_ORIGINS = ["https://x.com/*"];
@@ -19,14 +27,17 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
   let checkRunning = false;
   const working = () => busy || checkRunning;
   let progressText = "";
-  let staleFound = [];
-  // Lower-cased handles: the ones in the check that is running, and the ones
-  // whose latest check since this page opened found nothing new. A later check
-  // of the handle, a failed one, Download and Seen all take it out of the
-  // second set again. The downloads pane reads them through `isChecking` and
-  // `foundNothingNew`.
+  let libraryRoot = "";
+  // Lower-cased handles: the ones in the check that is running, the ones whose
+  // latest check since this page opened read everything it had to and found
+  // nothing new, and the ones whose latest check found nothing but stopped
+  // before it had read everything (a partial check never claims "nothing new").
+  // A later check of the handle, a failed one, Download and Seen all take it
+  // out of the last two sets again. The downloads pane reads them through
+  // `isChecking`, `foundNothingNew` and `checkedPartial`.
   const checking = new Set();
   const foundNothing = new Set();
+  const partialNothing = new Set();
   let editing = null;
   let adding = false;
   // Groups start closed (a library has hundreds of handles); a group the user
@@ -85,6 +96,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
     save.type = "submit";
     save.className = "download-action-button";
     save.textContent = entry ? "Save" : "Add";
+    save.disabled = working();
     actions.append(
       save,
       makeButton("Cancel", "Close without changing anything", "button-muted-small", () => {
@@ -343,9 +355,10 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
       }
       handles = Array.isArray(response.handles) ? response.handles : [];
       groups = Array.isArray(response.groups) ? response.groups : [];
+      libraryRoot = typeof response.library_root === "string" ? response.library_root : "";
       const favorites = await callHost({ type: "get_favorites" });
       favoriteCounts = favorites?.ok ? favorites.groups || {} : {};
-      onLoaded(handles, groups, typeof response.library_root === "string" ? response.library_root : "");
+      onLoaded(handles, groups, libraryRoot);
     } catch (error) {
       handles = [];
       progressText = error.message || "Handle list unavailable";
@@ -372,8 +385,13 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
     await refresh();
   }
 
-  function markSeen(entry) {
+  function forgetCheckResult(entry) {
     foundNothing.delete(entry.handle.toLowerCase());
+    partialNothing.delete(entry.handle.toLowerCase());
+  }
+
+  function markSeen(entry) {
+    forgetCheckResult(entry);
     return simpleAction("mark_handle_seen", entry);
   }
 
@@ -389,6 +407,10 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
   }
 
   async function saveEdit(entry, rowGroup, handle, group) {
+    if (working()) {
+      showMessage("info", "Another handle list action is still running.");
+      return;
+    }
     const payload = { type: "update_handle", handle: entry.handle };
     if (handle !== entry.handle) {
       payload.new_handle = handle;
@@ -427,6 +449,10 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
   }
 
   async function importLibrary() {
+    if (working()) {
+      showMessage("info", "Another handle list action is still running.");
+      return;
+    }
     busy = true;
     progressText = "Reading the download folder…";
     render();
@@ -450,7 +476,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
   }
 
   async function downloadPending(entry, rowGroup) {
-    foundNothing.delete(entry.handle.toLowerCase());
+    forgetCheckResult(entry);
     try {
       const response = await hostAction(
         { type: "download_handle_pending", handle: entry.handle, group: rowGroup },
@@ -458,7 +484,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
       );
       showMessage(
         "success",
-        `Queued ${response.queued_count} new videos from @${entry.handle} in ${response.download_dir}`
+        `Queued ${response.queued_count} new videos from @${entry.handle} in ${shortPath(response.download_dir, libraryRoot)}`
       );
       onQueued();
     } catch (error) {
@@ -467,8 +493,11 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
     await refresh();
   }
 
-  /** The handle's new videos after the check, or null when the account is gone. */
-  async function checkOne(entry) {
+  /**
+   * What a check of the handle found: its new videos and whether it read all it
+   * had to ({ pending, complete }), or null when the account is gone.
+   */
+  async function checkOne(entry, staleFound) {
     const scan = await chrome.runtime.sendMessage({
       type: "check-handle",
       profileUrl: entry.profile_url,
@@ -493,7 +522,7 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
       },
       "The check could not be saved."
     );
-    return response.handle.pending_count;
+    return { pending: response.handle.pending_count, complete: Boolean(scan.complete) };
   }
 
   async function checkHandles(entries) {
@@ -510,6 +539,9 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
     // Chrome only shows the prompt for a user gesture, and a scan cannot read a
     // tab it opened itself without it.
     checkRunning = true;
+    // Drawn now, still inside the click: Import and Edit are off for the whole
+    // wait. Updating the page does not use up the click the prompt needs.
+    render();
     let granted = false;
     try {
       granted = await chrome.permissions.request({ origins: SCAN_ORIGINS });
@@ -524,23 +556,27 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
     }
 
     let found = 0;
+    let partial = 0;
     const failures = [];
-    staleFound = [];
+    const staleFound = [];
     try {
       for (const entry of entries) {
         checking.add(entry.handle.toLowerCase());
-        foundNothing.delete(entry.handle.toLowerCase());
+        forgetCheckResult(entry);
       }
       onChanged();
       for (const [index, entry] of entries.entries()) {
         progressText = `Checking ${index + 1} of ${entries.length}: @${entry.handle}`;
         render();
         try {
-          const pending = await checkOne(entry);
-          if (pending !== null) {
-            found += pending;
-            if (pending === 0) {
-              foundNothing.add(entry.handle.toLowerCase());
+          const result = await checkOne(entry, staleFound);
+          if (result !== null) {
+            found += result.pending;
+            if (!result.complete) {
+              partial += 1;
+            }
+            if (result.pending === 0) {
+              (result.complete ? foundNothing : partialNothing).add(entry.handle.toLowerCase());
             }
           }
         } catch (error) {
@@ -554,7 +590,13 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
     }
 
     await refresh();
-    const parts = [found ? `Found ${found} new videos.` : "No new videos."];
+    const parts = [
+      found
+        ? `Found ${found} new videos.`
+        : partial
+          ? `No new videos in what was read, but ${partial === 1 ? "a check" : `${partial} checks`} stopped before reading everything. Check again.`
+          : "No new videos.",
+    ];
     if (staleFound.length) {
       parts.push(
         `Gone, marked stale: ${staleFound.slice(0, 5).map((handle) => `@${handle}`).join(", ")}` +
@@ -610,6 +652,11 @@ export function initHandles({ callHost, showMessage, onQueued, onLoaded, onChang
     foundNothingNew: (handle) => {
       const entry = findHandleEntry(handles, handle);
       return Boolean(entry) && foundNothing.has(entry.handle.toLowerCase());
+    },
+    // True when the latest check found nothing but did not read everything.
+    checkedPartial: (handle) => {
+      const entry = findHandleEntry(handles, handle);
+      return Boolean(entry) && partialNothing.has(entry.handle.toLowerCase());
     },
   };
 }
