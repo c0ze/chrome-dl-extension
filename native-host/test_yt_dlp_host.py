@@ -2415,6 +2415,28 @@ class RemoveLibraryFilesTests(LibraryCase):
         self.assertIn("https://x.com/i/status/1234567890001", keys, "no link: the id names an X post")
         self.assertIn("https://x.com/i/status/1234567890002", keys)
 
+    def test_every_x_link_form_keeps_the_filename_id_refusal(self) -> None:
+        # twitter.com/i/videos/tweet/<id> and the like are X posts to the host too,
+        # though their key is not the canonical status one.
+        forms = [
+            "https://twitter.com/i/videos/tweet/1234567890004",
+            "https://mobile.twitter.com/alice/status/1234567890005",
+            "https://x.com/i/web/status/1234567890006",
+            "https://www.x.com/i/status/1234567890007",
+        ]
+        host.curation.write_removed(
+            self.root,
+            [
+                {"id": f"{n}" * 32, "relative": f"group d/alice/alice-{url[-13:]}.mp4", "url": url, "video_id": url[-13:]}
+                for n, url in enumerate(forms)
+            ],
+        )
+
+        keys = host.removed_post_keys()
+
+        for url in forms:
+            self.assertIn(f"https://x.com/i/status/{url[-13:]}", keys, url)
+
     def test_a_removal_with_no_link_and_no_library_path_names_no_post(self) -> None:
         host.curation.write_removed(self.root, [{"id": "4" * 32, "relative": "", "url": None, "video_id": "1234567890123"}])
         self.assertEqual(host.removed_post_keys(), set())

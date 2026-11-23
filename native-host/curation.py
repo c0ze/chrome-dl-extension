@@ -338,22 +338,22 @@ def allow_again(state_dir: Path, archive: Path, record_id: str) -> dict[str, Any
     return {"ok": True, "url": record.get("url")}
 
 
-def removed_url_keys(state_dir: Path, key: Any) -> set[str]:
+def removed_url_keys(state_dir: Path, key: Any, is_x_url: Any) -> set[str]:
     """The posts of removed videos, by the host's duplicate key.
 
     A removal made from a file alone (Favorites, the library check) has no post
     link, but its file name still carries the post's id, the one the archive holds.
     That id names an X post only for a record with an X link or no link at all
     (and a path in the library); a Facebook reel's own id says nothing about X.
+    `is_x_url` is the host's own test for an X link, whatever form the link takes.
     """
-    x_prefix = key("https://x.com/i/status/1")[:-1]
     keys = set()
     for item in read_removed(state_dir):
         url = item.get("url")
         if url:
             keys.add(key(url))
         ident = str(item.get("video_id") or "")
-        names_x_post = key(url).startswith(x_prefix) if url else bool(item.get("relative"))
+        names_x_post = is_x_url(url) if url else bool(item.get("relative"))
         if ident.isdigit() and names_x_post:
             keys.add(key(f"https://x.com/i/status/{ident}"))
     return keys

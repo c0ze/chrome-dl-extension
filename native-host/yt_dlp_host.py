@@ -2149,9 +2149,18 @@ def handle_curation_message(message_type: str, message: dict[str, Any]) -> dict[
     return None
 
 
+def is_twitter_url(raw_url: Any) -> bool:
+    """Whether the host takes this link for X, in any of its forms (the provider's hosts)."""
+    try:
+        provider = provider_for_url(str(raw_url))
+    except ValueError:
+        return False
+    return bool(provider) and provider["name"] == "twitter"
+
+
 def removed_post_keys() -> set[str]:
     try:
-        return curation.removed_url_keys(STATE_DIR, normalized_url_key)
+        return curation.removed_url_keys(STATE_DIR, normalized_url_key, is_twitter_url)
     except Exception as error:  # noqa: BLE001
         log_line(f"Could not read the removed list: {error}")
         return set()
