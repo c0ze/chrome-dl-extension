@@ -865,6 +865,11 @@ export async function profileScanChunk(options) {
     return parts.length === 2 && parts[1].toLowerCase() === "media";
   }
 
+  // Which of the profile's two scanned tabs this page is, read from the page
+  // itself so the caller can label a pass with what it really read.
+  const pageTab = () => (onMediaTab() ? "media" : "posts");
+  const startTab = pageTab();
+
   // The timeline is X's primary column: a link to some other post in the
   // sidebar column ("who to follow", trends) is not a place in it, even on the
   // Media tab and even though X puts both columns inside `main`. Only a page
@@ -882,7 +887,8 @@ export async function profileScanChunk(options) {
 
   function collectVisibleLinks() {
     document.querySelectorAll("article").forEach((article) => {
-      if (isEmbeddedContent(article, document.body)) {
+      // Posts the sidebar suggests are not the profile's: not read, not a place.
+      if (isEmbeddedContent(article, document.body) || article.closest("[data-testid='sidebarColumn']")) {
         return;
       }
 
@@ -891,7 +897,9 @@ export async function profileScanChunk(options) {
       if (!permalink) {
         return;
       }
-      notePostPosition(article, permalink.id);
+      if (inTimeline(article)) {
+        notePostPosition(article, permalink.id);
+      }
 
       const hasVideoAnchor = entries.some(
         (entry) => entry.status.isVideoPath && entry.status.id === permalink.id
@@ -908,7 +916,7 @@ export async function profileScanChunk(options) {
     // cell is a position.
     const mediaTab = onMediaTab();
     document.querySelectorAll("a[href*='/status/']").forEach((anchor) => {
-      if (anchor.closest("article")) {
+      if (anchor.closest("article") || anchor.closest("[data-testid='sidebarColumn']")) {
         return;
       }
 
@@ -957,8 +965,9 @@ export async function profileScanChunk(options) {
 
     window.scrollBy(0, Math.max(700, Math.floor(window.innerHeight * 0.86)));
     await sleep(900);
-    // The tab may have moved on during the wait.
-    if (profileUsername(window.location.href) !== username) {
+    // The tab may have moved on during the wait, to another profile or to the
+    // profile's other tab.
+    if (profileUsername(window.location.href) !== username || pageTab() !== startTab) {
       return {
         ok: false,
         error: "The page changed during the scan. Open the profile again and rescan.",
@@ -979,6 +988,7 @@ export async function profileScanChunk(options) {
   return {
     ok: true,
     username,
+    tab: startTab,
     done,
     capped,
     progress,

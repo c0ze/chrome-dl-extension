@@ -33,11 +33,19 @@ const SCROLL_TOP_SETTLE_MS = 800;
 // worker restart, which is exactly when a popup-driven rescan should be allowed.
 const activeScans = new Set();
 
-// The scan that owns each source tab: { key, returnUrl, startScrollY }. Starting
-// another scan on a tab replaces its entry, and the older scan, seeing it is no
-// longer the owner, stops at its next step without touching the tab or writing a
-// result. The newer one takes over where the older one meant to leave the tab.
+// The scan that owns each source tab: { key, username, chain }. Starting another
+// scan on a tab replaces its entry, and the older scan, seeing it is no longer
+// the owner, stops at its next step without touching the tab or writing a result.
 const tabScans = new Map();
+
+// Where a run of overlapping scans on one tab puts the tab back: { username,
+// returnUrl, scrollY }, `scrollY` being the promise of the scroll read before
+// the run's first scan moved the tab. It is made once, by that first scan; each
+// scan that replaces another for the same creator, while the tab is still on
+// that creator's profile, uses the same entry and never changes it, so a third
+// scan cannot inherit anything half-settled. It is dropped when the scan that
+// owns the tab finishes.
+const tabReturns = new Map();
 
 class ScanSuperseded extends Error {
   constructor() {
@@ -191,18 +199,18 @@ async function scanProfileTab(tabId, provider, username, key, returnUrl = null, 
   }
 
   activeScans.add(key);
-  const previous = tabScans.get(tabId);
-  const run = { key, username, returnUrl, startScrollY: null };
+  const replacing = tabScans.has(tabId);
+  const run = { key, username, chain: null };
   tabScans.set(tabId, run);
   const current = () => tabScans.get(tabId) === run;
   let record = null;
   let owner = false;
   try {
-    await inheritReturnPoint(tabId, run, previous);
+    run.chain = await joinReturnChain(tabId, username, returnUrl, replacing, current);
     record =
       provider === "twitter"
         ? await scanTwitterProfile(tabId, username, key, run, { current, continuation })
-        : await runProfileScan(tabId, provider, username, key);
+        : await runProfileScan(tabId, provider, username, key, current);
   } catch (error) {
     if (!(error instanceof ScanSuperseded)) {
       record = {
@@ -219,6 +227,7 @@ async function scanProfileTab(tabId, provider, username, key, returnUrl = null, 
     activeScans.delete(key);
     if (owner) {
       tabScans.delete(tabId);
+      tabReturns.delete(tabId);
     }
   }
   if (!record || !owner) {
@@ -230,29 +239,47 @@ async function scanProfileTab(tabId, provider, username, key, returnUrl = null, 
   await writeScanRecord(key, record);
 }
 
-// A scan that replaces one that is mid-way finds the tab moved by it, so it
-// takes over the older scan's return page and scroll, but only while the tab is
-// still on the same creator's profile. On anything else (the user went to
-// another creator or page) the page the tab is on now is the one to go back to.
-async function inheritReturnPoint(tabId, run, previous) {
-  const wanted = String(run.username).toLowerCase();
-  if (!previous?.returnUrl || String(previous.username).toLowerCase() !== wanted) {
-    return;
-  }
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    if (twitterProfileUsername(tab.url)?.toLowerCase() === wanted) {
-      run.returnUrl = previous.returnUrl;
-      run.startScrollY = previous.startScrollY;
+// The return point a scan works to. One that replaces a scan on the same
+// creator, while the tab is still on one of that creator's profile pages, joins
+// the entry the run already has (the tab was moved by the older scan, so its
+// own page is not where the user left it). Any other scan makes a new entry from
+// the page it started on; one that no longer owns the tab publishes nothing.
+async function joinReturnChain(tabId, username, returnUrl, replacing, current) {
+  const wanted = String(username).toLowerCase();
+  const running = () => {
+    const chain = tabReturns.get(tabId);
+    return chain?.returnUrl && String(chain.username).toLowerCase() === wanted ? chain : null;
+  };
+  if (replacing && running()) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      // Asked again after the wait: the entry may have been replaced meanwhile.
+      const chain = running();
+      if (chain && twitterProfileUsername(tab.url)?.toLowerCase() === wanted) {
+        return chain;
+      }
+    } catch (_error) {
+      // The tab is gone; the scan reports that itself.
     }
-  } catch (_error) {
-    // The tab is gone; the scan reports that itself.
   }
+  const chain = {
+    username,
+    returnUrl,
+    scrollY: returnUrl ? readScrollPosition(tabId) : Promise.resolve(null),
+  };
+  if (returnUrl && current()) {
+    tabReturns.set(tabId, chain);
+  }
+  return chain;
 }
 
 // Resolves to the record that settles the scan (see scanProfileTab).
-async function runProfileScan(tabId, provider, username, key) {
-  const pass = await scanPass(tabId, provider, username, key);
+async function runProfileScan(tabId, provider, username, key, current = () => true) {
+  const pass = await scanPass(tabId, provider, username, key, { current });
+  // A scan that lost the tab leaves its scroll to the one that took it over.
+  if (!current()) {
+    throw new ScanSuperseded();
+  }
   await restoreScrollPosition(tabId, pass.originalScrollY);
   return scanRecord(provider, username, pass, pass.profileName);
 }
@@ -324,17 +351,17 @@ async function scanTwitterProfile(tabId, username, key, run, { current = () => t
     }
   };
   if (continuation) {
-    // `continuation` names the tab that is read ("posts" or "media"); the
-    // picker keeps the other tab's partial state as it was.
+    // The record names the tab the pass read, as the scanned page itself said
+    // (the user may have switched tabs since the request): the picker settles
+    // that tab alone and keeps the other's partial state as it was.
     const pass = await scanPass(tabId, "twitter", username, key, { current });
-    return { ...scanRecord("twitter", username, pass, pass.profileName), continuation: true, tab: continuation };
+    const record = scanRecord("twitter", username, pass, pass.profileName);
+    return pass.ok ? { ...record, continuation: true, tab: pass.tab || continuation } : record;
   }
 
-  // Where the user left the page, read before the scan moves the tab away.
-  const { returnUrl } = run;
-  if (returnUrl && run.startScrollY === null) {
-    run.startScrollY = await readScrollPosition(tabId);
-  }
+  // Where the user left the page, shared by the scans that replace one another.
+  const { returnUrl } = run.chain;
+  const startScrollY = returnUrl ? await run.chain.scrollY : null;
   let postsPass = null;
   let mediaPass = null;
   try {
@@ -369,7 +396,7 @@ async function scanTwitterProfile(tabId, username, key, run, { current = () => t
     if (returnUrl && current()) {
       const found = new Set([...(postsPass?.urls ?? []), ...(mediaPass?.urls ?? [])]).size;
       await whileKeepingScanAlive(key, scanningRecord(username, found), () =>
-        returnToStartPage(tabId, returnUrl, run.startScrollY, username, current)
+        returnToStartPage(tabId, returnUrl, startScrollY, username, current)
       );
     }
   }
@@ -454,6 +481,8 @@ async function scanPass(
 ) {
   let progress = null;
   let profileName = "";
+  // The profile tab the page reported on (X only), to label the pass with.
+  let readTab = null;
   const hosts = provider === "facebook" ? FACEBOOK_HOSTS : TWITTER_HOSTS;
   const pass = (fields) => ({
     ok: true,
@@ -461,6 +490,7 @@ async function scanPass(
     partial: false,
     complete: false,
     newestId: null,
+    tab: readTab,
     profileName,
     originalScrollY: progress?.originalScrollY ?? null,
     ...fields,
@@ -498,6 +528,15 @@ async function scanPass(
           gone: Boolean(result.gone),
           error: result.error || "Could not scan the profile media page.",
         });
+      }
+
+      // The page moving to the profile's other tab between two reads means the
+      // pass read both: it can be labelled with neither.
+      if (result.tab) {
+        if (readTab && readTab !== result.tab) {
+          return pass({ ok: false, error: "The page changed during the scan. Open the profile again and rescan." });
+        }
+        readTab = result.tab;
       }
 
       progress = result.progress;

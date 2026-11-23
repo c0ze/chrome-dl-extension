@@ -1104,3 +1104,42 @@ test("a pass without a position leaves the other one's", () => {
   assert.equal(mergeScanPasses(pass({ newestId: "7" }), pass({ newestId: null })).newestId, "7");
   assert.equal(mergeScanPasses(pass({}), pass({})).newestId, null);
 });
+
+test("an article in X's sidebar column is not a position or a video of the timeline", async () => {
+  withPage(`<main>
+      <div data-testid="primaryColumn">
+        <a href="/alice/status/600/video/1"></a>
+        <article><video></video><a href="/alice/status/580"><time></time></a></article>
+      </div>
+      <div data-testid="sidebarColumn">
+        <article><video></video><a href="/alice/status/400"><time></time></a></article>
+      </div>
+    </main>`, "https://x.com/alice/media");
+  const result = await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, stopAtId: "500", maxPasses: 1 });
+  assert.equal(result.ok, true);
+  assert.equal(result.reachedStop, false, "the sidebar article's old id did not stop the scan");
+  assert.equal(result.newestId, "600");
+  assert.deepEqual(result.urls.sort(), ["https://x.com/alice/status/580", "https://x.com/alice/status/600"]);
+});
+
+test("an article in the primary column still sets the position and the stop", async () => {
+  withPage(`<main>
+      <div data-testid="primaryColumn">
+        <article><video></video><a href="/alice/status/600"><time></time></a></article>
+        <article><video></video><a href="/alice/status/500"><time></time></a></article>
+      </div>
+      <div data-testid="sidebarColumn"><a href="/alice/status/900/video/1"></a></div>
+    </main>`, "https://x.com/alice");
+  const result = await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, stopAtId: "500" });
+  assert.equal(result.reachedStop, true);
+  assert.equal(result.newestId, "600");
+});
+
+test("a pass says which tab of the profile its page was, from the page itself", async () => {
+  withPage(`<div role="main"><article><video></video><a href="/alice/status/600"><time></time></a></article></div>`, "https://x.com/alice/media");
+  assert.equal((await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, maxPasses: 1 })).tab, "media");
+  withPage(`<div role="main"><article><video></video><a href="/alice/status/600"><time></time></a></article></div>`, "https://x.com/alice");
+  assert.equal((await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, maxPasses: 1 })).tab, "posts");
+  withPage(`<div role="main"></div>`, "https://x.com/Alice/Media/");
+  assert.equal((await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, maxPasses: 1 })).tab, "media");
+});

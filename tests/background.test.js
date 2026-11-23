@@ -26,6 +26,7 @@ function makeWorld({ tabUrl, scrollY = 0, pages = {} }) {
     listeners: {},
     chunkHook: null,
     setHook: null,
+    getDelays: [], // virtual ms the next tabs.get calls take, one entry per call
   };
   const register = (name) => ({ addListener: (listener) => (world.listeners[name] = listener) });
   world.chrome = {
@@ -40,6 +41,8 @@ function makeWorld({ tabUrl, scrollY = 0, pages = {} }) {
     windows: { update: async () => {} },
     tabs: {
       get: async (id) => {
+        const delay = world.getDelays.shift();
+        if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
         const tab = world.tabs.get(id);
         if (!tab) throw new Error("No tab with that id.");
         return { ...tab };
@@ -64,6 +67,7 @@ function makeWorld({ tabUrl, scrollY = 0, pages = {} }) {
         const tab = world.tabs.get(target.tabId);
         if (func === profileScanChunk) {
           const [options] = args;
+          const startedAtY = tab.scrollY;
           world.chunks.push({ url: tab.url, scrollY: tab.scrollY });
           const hooked = world.chunkHook ? await world.chunkHook(tab, options) : null;
           if (hooked) return [{ result: hooked }];
@@ -73,13 +77,15 @@ function makeWorld({ tabUrl, scrollY = 0, pages = {} }) {
               result: {
                 ok: true,
                 username: options.expectedUsername,
+                // The page the pass ran on, as the injected scan reads it.
+                tab: /\/media\/?$/i.test(new URL(tab.url).pathname) ? "media" : "posts",
                 done: true,
                 capped: false,
                 reachedStop: false,
                 newestId: "1001",
                 profileName: "Alice",
                 urls,
-                progress: { urls, originalScrollY: tab.scrollY },
+                progress: { urls, originalScrollY: startedAtY },
               },
             },
           ];
@@ -491,4 +497,148 @@ test("a scan that replaces one on another creator's page goes back to the page i
   letFirstGo();
   await until(() => !world.store.has(batchKey(world)), "the first scan to stop");
   assert.equal(world.log.length, touched, "the first scan touched nothing");
+});
+
+// --- S2: a Facebook scan that lost the tab does not scroll it ----------------
+
+test("a superseded Facebook scan does not restore its scroll over the newer scan's", async () => {
+  const REELS = "https://www.facebook.com/somepage/reels";
+  const world = makeWorld({ tabUrl: REELS, scrollY: 640, pages: { [plain(REELS)]: ["https://www.facebook.com/reel/1"] } });
+  let calls = 0;
+  let letFirstGo;
+  const held = new Promise((resolve) => (letFirstGo = resolve));
+  world.chunkHook = async () => {
+    calls += 1;
+    if (calls === 1) await held; // the older scan's read of the page
+    return null;
+  };
+  await load(world);
+
+  await clickToolbar(world);
+  await until(() => world.created.length === 1 && world.chunks.length === 1, "the first scan");
+  // The user scrolls on and scans again.
+  world.tabs.get(7).scrollY = 1700;
+  await clickToolbar(world);
+  await until(() => world.created.length === 2 && settledRecord(world, secondBatchKey(world)), "the second scan");
+  assert.equal(world.tabs.get(7).scrollY, 1700, "the newer scan left the page where the user had it");
+
+  const scrolls = world.log.length;
+  letFirstGo();
+  await until(() => !world.store.has(batchKey(world)), "the older scan to stop");
+
+  assert.equal(world.log.length, scrolls, "the older scan scrolled nothing");
+  assert.equal(world.tabs.get(7).scrollY, 1700);
+});
+
+// --- S4: a continuation is labelled with the page it ran on ------------------
+
+test("a continuation is labelled with the tab its pass actually read", async () => {
+  const world = makeWorld({ tabUrl: MEDIA, scrollY: 1500, pages: { [plain(POSTS)]: ["p2"], [plain(MEDIA)]: ["m2"] } });
+  let first = true;
+  world.chunkHook = (tab) => {
+    if (first) {
+      first = false;
+      // The user switches to the Posts tab after Scan Again looked at the tab.
+      tab.url = POSTS;
+    }
+    return null;
+  };
+  await load(world);
+  const key = "profileBatch:1:s4";
+
+  const response = await scanAgain(world, key, MEDIA);
+  await until(() => settledRecord(world, key), "the result");
+
+  assert.equal(response.continuation, true);
+  const record = settledRecord(world, key);
+  assert.equal(record.status, "done");
+  assert.equal(record.tab, "posts", "labelled with the page the pass ran on, not the one sampled before");
+  assert.deepEqual(record.urls, ["p2"]);
+});
+
+test("a continuation whose page changes tab part way ends as an error, not a label", async () => {
+  const world = makeWorld({ tabUrl: MEDIA, scrollY: 1500 });
+  let calls = 0;
+  world.chunkHook = (tab) => {
+    calls += 1;
+    const pageTab = calls === 1 ? "media" : "posts";
+    return {
+      ok: true,
+      username: "alice",
+      tab: pageTab,
+      done: calls > 1,
+      capped: false,
+      reachedStop: false,
+      newestId: "1001",
+      profileName: "Alice",
+      urls: [`u${calls}`],
+      progress: { urls: [`u${calls}`], originalScrollY: 1500 },
+    };
+  };
+  await load(world);
+  const key = "profileBatch:1:s4b";
+
+  await scanAgain(world, key, MEDIA);
+  await until(() => settledRecord(world, key), "the result");
+
+  const record = settledRecord(world, key);
+  assert.equal(record.status, "error");
+  assert.match(record.error, /page changed/i);
+  assert.equal(record.tab, undefined);
+});
+
+// --- S6: three scans on one tab still return to where the user was -----------
+
+test("three overlapping scans on one tab end where the user started", async () => {
+  const world = makeWorld({ tabUrl: REPLIES, scrollY: 640, pages: { [plain(POSTS)]: ["p1"], [plain(MEDIA)]: ["m1"] } });
+  let calls = 0;
+  let letFirstGo;
+  const held = new Promise((resolve) => (letFirstGo = resolve));
+  world.chunkHook = async () => {
+    calls += 1;
+    if (calls === 1) await held; // the first scan's Posts pass hangs
+    return null;
+  };
+  await load(world);
+
+  await clickToolbar(world);
+  await until(() => world.created.length === 1 && world.chunks.length === 1, "the first scan");
+
+  // Two more clicks land together. Each looks the tab up twice: once for the
+  // click and once for the scan's own start. The second scan's lookup is slow
+  // and the third's quick, so the third starts before the second has settled
+  // where it will return to.
+  world.getDelays = [300, 300, 1000, 100];
+  const second = clickToolbar(world);
+  const third = clickToolbar(world);
+  await until(() => world.created.length === 3, "both pickers");
+  await Promise.all([second, third]);
+  const thirdKey = new URL(world.created[2].url).searchParams.get("profileBatchKey");
+  await until(() => settledRecord(world, thirdKey), "the third scan");
+
+  assert.equal(world.tabs.get(7).url, REPLIES, "back on the page the user started on");
+  assert.equal(world.tabs.get(7).scrollY, 640);
+  assert.equal(settledRecord(world, thirdKey).status, "done");
+
+  const touched = world.log.length;
+  letFirstGo();
+  await until(() => !world.store.has(batchKey(world)), "the first scan to stop");
+  assert.equal(world.log.length, touched);
+});
+
+test("a scan that follows a finished one starts a new return point", async () => {
+  const world = makeWorld({ tabUrl: REPLIES, scrollY: 640, pages: { [plain(POSTS)]: ["p1"], [plain(MEDIA)]: ["m1"] } });
+  await load(world);
+
+  await clickToolbar(world);
+  await until(() => world.created.length === 1 && settledRecord(world, batchKey(world)), "the first scan");
+  // The user moves on, to another page of the same creator, and scans again.
+  const tab = world.tabs.get(7);
+  tab.url = "https://x.com/alice/with_replies?s=9";
+  tab.scrollY = 90;
+  await clickToolbar(world);
+  await until(() => world.created.length === 2 && settledRecord(world, secondBatchKey(world)), "the second scan");
+
+  assert.equal(world.tabs.get(7).url, "https://x.com/alice/with_replies?s=9", "its own start page, not the first scan's");
+  assert.equal(world.tabs.get(7).scrollY, 90);
 });
