@@ -85,21 +85,29 @@ export function twitterPostsUrl(username) {
 }
 
 /**
- * Whether a URL is the Posts tab (/<handle>) or the Media tab (/<handle>/media)
- * of this profile, the two pages a scan reads. A query or fragment does not
- * matter; another tab of the profile, or another page, is not one.
+ * Which of the two pages a scan reads a URL is for this profile: "posts"
+ * (/<handle>) or "media" (/<handle>/media), else null. A query or fragment does
+ * not matter; another tab of the profile, or another page, is null.
  */
-export function isScanPageUrl(rawUrl, username) {
+export function scanPageTab(rawUrl, username) {
   try {
     const url = new URL(rawUrl);
     if (!username || !TWITTER_HOSTS.includes(url.hostname)) {
-      return false;
+      return null;
     }
-    const match = url.pathname.match(/^\/([^/]+)(?:\/media)?\/?$/i);
-    return Boolean(match) && match[1].toLowerCase() === String(username).toLowerCase();
+    const match = url.pathname.match(/^\/([^/]+)(\/media)?\/?$/i);
+    if (!match || match[1].toLowerCase() !== String(username).toLowerCase()) {
+      return null;
+    }
+    return match[2] ? "media" : "posts";
   } catch (_error) {
-    return false;
+    return null;
   }
+}
+
+/** Whether a URL is the profile's Posts or Media tab (see scanPageTab). */
+export function isScanPageUrl(rawUrl, username) {
+  return scanPageTab(rawUrl, username) !== null;
 }
 
 /**
@@ -249,6 +257,9 @@ export function mergeScanPasses(posts, media) {
     gone: false,
     error: null,
     urls: [...new Set([...postUrls, ...mediaUrls])],
+    // Which tab is only part read, so a later pass over one tab cannot clear
+    // the other's: Media counts when it could not be opened at all.
+    partialTabs: [posts.partial ? "posts" : null, !mediaRead || media.partial ? "media" : null].filter(Boolean),
     partial: Boolean(posts.partial) || !mediaRead || Boolean(media.partial),
     complete: Boolean(posts.complete) && mediaRead && Boolean(media.complete),
     newestId: newerPostId(posts.newestId, mediaRead ? media.newestId : null),
@@ -854,10 +865,19 @@ export async function profileScanChunk(options) {
     return parts.length === 2 && parts[1].toLowerCase() === "media";
   }
 
-  // The timeline is in the page's main column: a link to some other post in a
-  // sidebar ("who to follow", trends) is not a place in it, even on the Media tab.
+  // The timeline is X's primary column: a link to some other post in the
+  // sidebar column ("who to follow", trends) is not a place in it, even on the
+  // Media tab and even though X puts both columns inside `main`. Only a page
+  // with no primary column falls back to `main`.
   function inTimeline(node) {
-    return Boolean(node.closest("main, [role='main'], [data-testid='primaryColumn']"));
+    if (node.closest("[data-testid='sidebarColumn']")) {
+      return false;
+    }
+    const primary = document.querySelector("[data-testid='primaryColumn']");
+    if (primary) {
+      return primary.contains(node);
+    }
+    return Boolean(node.closest("main, [role='main']"));
   }
 
   function collectVisibleLinks() {

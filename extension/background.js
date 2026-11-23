@@ -5,9 +5,11 @@ import {
   batchTargetForUrl,
   isScanPageUrl,
   mergeScanPasses,
+  scanPageTab,
   profileScanChunk,
   twitterMediaUrl,
   twitterPostsUrl,
+  twitterProfileUsername,
 } from "./providers.js";
 
 const MENU_ID = "download-with-ytdlp";
@@ -156,9 +158,9 @@ async function restoreScrollPosition(tabId, scrollY, expectedUrl = null) {
 // be reachable. Every try is for `url` only: the page may be left (a redirect, a
 // click) between tries, and the offset means nothing on another page, so the
 // first try on a different URL ends it.
-async function restoreScrollUntilReached(tabId, scrollY, url) {
+async function restoreScrollUntilReached(tabId, scrollY, url, current = () => true) {
   const deadline = Date.now() + SCROLL_RESTORE_TIMEOUT_MS;
-  while (true) {
+  while (current()) {
     const reached = await restoreScrollPosition(tabId, scrollY, url);
     if (reached === null || reached >= scrollY - 2 || Date.now() >= deadline) {
       return;
@@ -189,18 +191,14 @@ async function scanProfileTab(tabId, provider, username, key, returnUrl = null, 
   }
 
   activeScans.add(key);
-  // Replacing a scan that is mid-way means the tab is no longer where the user
-  // left it, so its start page and scroll are the ones to go back to.
   const previous = tabScans.get(tabId);
-  const run = {
-    key,
-    returnUrl: previous?.returnUrl ?? returnUrl,
-    startScrollY: previous?.returnUrl ? previous.startScrollY : null,
-  };
+  const run = { key, username, returnUrl, startScrollY: null };
   tabScans.set(tabId, run);
   const current = () => tabScans.get(tabId) === run;
   let record = null;
+  let owner = false;
   try {
+    await inheritReturnPoint(tabId, run, previous);
     record =
       provider === "twitter"
         ? await scanTwitterProfile(tabId, username, key, run, { current, continuation })
@@ -215,18 +213,41 @@ async function scanProfileTab(tabId, provider, username, key, returnUrl = null, 
       };
     }
   } finally {
+    // Asked here, with nothing awaited before the write below: a scan that lost
+    // the tab at any point, even during its last read, settles nothing.
+    owner = current();
     activeScans.delete(key);
-    if (current()) {
+    if (owner) {
       tabScans.delete(tabId);
     }
   }
-  if (!record) {
+  if (!record || !owner) {
     // Replaced by a newer scan: the picker that waited on this key was pointed
     // at the newer one, so there is nothing to settle.
     await chrome.storage.session.remove(key).catch(() => {});
     return;
   }
   await writeScanRecord(key, record);
+}
+
+// A scan that replaces one that is mid-way finds the tab moved by it, so it
+// takes over the older scan's return page and scroll, but only while the tab is
+// still on the same creator's profile. On anything else (the user went to
+// another creator or page) the page the tab is on now is the one to go back to.
+async function inheritReturnPoint(tabId, run, previous) {
+  const wanted = String(run.username).toLowerCase();
+  if (!previous?.returnUrl || String(previous.username).toLowerCase() !== wanted) {
+    return;
+  }
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (twitterProfileUsername(tab.url)?.toLowerCase() === wanted) {
+      run.returnUrl = previous.returnUrl;
+      run.startScrollY = previous.startScrollY;
+    }
+  } catch (_error) {
+    // The tab is gone; the scan reports that itself.
+  }
 }
 
 // Resolves to the record that settles the scan (see scanProfileTab).
@@ -254,6 +275,8 @@ function scanRecord(provider, username, merged, profileName = "") {
     urls: merged.urls,
     found: merged.urls.length,
     partial: merged.partial,
+    // Which tab is only part read (a full Twitter scan only): see mergeScanPasses.
+    ...(merged.partialTabs ? { partialTabs: merged.partialTabs } : {}),
     newestId: merged.newestId,
     profileName,
   };
@@ -301,8 +324,10 @@ async function scanTwitterProfile(tabId, username, key, run, { current = () => t
     }
   };
   if (continuation) {
+    // `continuation` names the tab that is read ("posts" or "media"); the
+    // picker keeps the other tab's partial state as it was.
     const pass = await scanPass(tabId, "twitter", username, key, { current });
-    return { ...scanRecord("twitter", username, pass, pass.profileName), continuation: true };
+    return { ...scanRecord("twitter", username, pass, pass.profileName), continuation: true, tab: continuation };
   }
 
   // Where the user left the page, read before the scan moves the tab away.
@@ -315,7 +340,8 @@ async function scanTwitterProfile(tabId, username, key, run, { current = () => t
   try {
     try {
       await whileKeepingScanAlive(key, scanningRecord(username, 0), async () => {
-        await showTwitterPosts(tabId, username);
+        stillOurs();
+        await showTwitterPosts(tabId, username, current);
         stillOurs();
         await scrollToTop(tabId);
       });
@@ -343,7 +369,7 @@ async function scanTwitterProfile(tabId, username, key, run, { current = () => t
     if (returnUrl && current()) {
       const found = new Set([...(postsPass?.urls ?? []), ...(mediaPass?.urls ?? [])]).size;
       await whileKeepingScanAlive(key, scanningRecord(username, found), () =>
-        returnToStartPage(tabId, returnUrl, run.startScrollY, username)
+        returnToStartPage(tabId, returnUrl, run.startScrollY, username, current)
       );
     }
   }
@@ -367,7 +393,7 @@ async function scanTwitterMedia(
   }
   try {
     await whileKeepingScanAlive(key, scanningRecord(username, postsPass.urls.length), async () => {
-      await showTabUrl(tabId, twitterMediaUrl(username));
+      await showTabUrl(tabId, twitterMediaUrl(username), { current });
       if (!current()) {
         throw new ScanSuperseded();
       }
@@ -393,14 +419,16 @@ async function scanTwitterMedia(
  * own pages the scan opened (or already on the start URL) is moved: one the
  * user has taken somewhere else is left alone. Best effort: the tab may be gone.
  */
-async function returnToStartPage(tabId, returnUrl, scrollY, username) {
+async function returnToStartPage(tabId, returnUrl, scrollY, username, current = () => true) {
   try {
     const tab = await chrome.tabs.get(tabId);
-    if (tab.url !== returnUrl && !isScanPageUrl(tab.url, username)) {
+    if (!current() || (tab.url !== returnUrl && !isScanPageUrl(tab.url, username))) {
       return;
     }
-    await showTabUrl(tabId, returnUrl, { exact: true });
-    await restoreScrollUntilReached(tabId, scrollY, returnUrl);
+    // Ownership is asked again right before the navigation and before each
+    // scroll, since a newer scan may take the tab at any of those waits.
+    await showTabUrl(tabId, returnUrl, { exact: true, current });
+    await restoreScrollUntilReached(tabId, scrollY, returnUrl, current);
   } catch (_error) {
     // The tab was closed or would not load; there is nothing to go back to.
   }
@@ -559,12 +587,12 @@ async function restartProfileScan(message) {
   } catch (_error) {
     // The scan reports the tab as unreadable.
   }
-  const continuation = provider === "twitter" && Boolean(tab) && isScanPageUrl(tab.url, username);
+  const continuation = provider === "twitter" && tab ? scanPageTab(tab.url, username) : null;
   const returnUrl = provider === "twitter" && !continuation ? tab?.url || null : null;
 
   await writeScanRecord(key, { status: "scanning", provider, username });
   void scanProfileTab(tabId, provider, username, key, returnUrl, { continuation });
-  return { ok: true, continuation };
+  return { ok: true, continuation: Boolean(continuation) };
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -589,11 +617,14 @@ async function waitForTabLoad(tabId) {
 // A scan's own pages (a profile's tabs) count as there when they differ only in
 // a trailing slash or letter case; with `exact` the URL must be the same string,
 // so a query or fragment is not lost.
-async function showTabUrl(tabId, url, { exact = false } = {}) {
+async function showTabUrl(tabId, url, { exact = false, current = () => true } = {}) {
   const plain = (value) => String(value || "").replace(/\/$/, "").toLowerCase();
   const tab = await chrome.tabs.get(tabId);
   if (exact ? tab.url === url : plain(tab.url) === plain(url)) {
     return;
+  }
+  if (!current()) {
+    return; // A newer scan owns the tab; the caller finds that out and stops.
   }
   await chrome.tabs.update(tabId, { url });
   await sleep(300); // Let the navigation start before waiting for it to finish.
@@ -604,8 +635,8 @@ async function showTabUrl(tabId, url, { exact = false } = {}) {
  * Puts a Twitter profile tab on the Posts tab, where a scan starts (see
  * twitterPostsUrl); a scan started from another tab moves the tab there.
  */
-function showTwitterPosts(tabId, username) {
-  return showTabUrl(tabId, twitterPostsUrl(username));
+function showTwitterPosts(tabId, username, current) {
+  return showTabUrl(tabId, twitterPostsUrl(username), { current });
 }
 
 /**

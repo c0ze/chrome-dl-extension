@@ -951,6 +951,41 @@ test("a link in a sidebar next to newer grid cells does not stop a Media check",
   assert.equal(result.newestId, "600");
 });
 
+test("X's sidebar column inside main is not the timeline: an old link there neither stops nor hides the grid", async () => {
+  withPage(`<main>
+      <div data-testid="primaryColumn">
+        <a href="/alice/status/600/video/1"></a>
+        <a href="/alice/status/550/video/1"></a>
+      </div>
+      <div data-testid="sidebarColumn"><a href="/alice/status/400/photo/1"></a></div>
+    </main>`, "https://x.com/alice/media");
+  const result = await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, stopAtId: "500", maxPasses: 1 });
+  assert.equal(result.ok, true);
+  assert.equal(result.reachedStop, false);
+  assert.equal(result.newestId, "600");
+  assert.deepEqual(result.urls.sort(), ["https://x.com/alice/status/550", "https://x.com/alice/status/600"]);
+});
+
+test("a link inside the sidebar column is never a position, even with no primary column", async () => {
+  withPage(`<main>
+      <a href="/alice/status/600/video/1"></a>
+      <div data-testid="sidebarColumn"><a href="/alice/status/400/photo/1"></a></div>
+    </main>`, "https://x.com/alice/media");
+  const result = await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, stopAtId: "500", maxPasses: 1 });
+  assert.equal(result.reachedStop, false);
+  assert.equal(result.newestId, "600");
+});
+
+test("with a primary column, a link in main outside it is not a position either", async () => {
+  withPage(`<main>
+      <div data-testid="primaryColumn"><a href="/alice/status/600/video/1"></a></div>
+      <div class="rail"><a href="/alice/status/400/photo/1"></a></div>
+    </main>`, "https://x.com/alice/media");
+  const result = await profileScanChunk({ ...TWITTER_SCAN_OPTIONS, stopAtId: "500", maxPasses: 1 });
+  assert.equal(result.reachedStop, false);
+  assert.equal(result.newestId, "600");
+});
+
 test("the primary column counts as the timeline too, and a photo cell can be the stop", async () => {
   withPage(`<div data-testid="primaryColumn">
       <a href="/alice/status/600/video/1"></a>
@@ -975,6 +1010,25 @@ test("a scan page is the profile's Posts or Media tab, whatever the query", asyn
 });
 
 const pass = (o) => ({ ok: true, urls: [], partial: false, complete: true, newestId: null, ...o });
+
+test("a merged scan says which tab is only part read", () => {
+  assert.deepEqual(mergeScanPasses(pass({}), pass({})).partialTabs, []);
+  assert.deepEqual(mergeScanPasses(pass({ partial: true }), pass({})).partialTabs, ["posts"]);
+  assert.deepEqual(mergeScanPasses(pass({}), pass({ partial: true })).partialTabs, ["media"]);
+  assert.deepEqual(mergeScanPasses(pass({}), { ok: false, error: "x", urls: [] }).partialTabs, ["media"], "an unopened Media tab");
+  assert.deepEqual(mergeScanPasses(pass({}), null).partialTabs, ["media"]);
+  assert.deepEqual(mergeScanPasses(pass({ partial: true }), pass({ partial: true })).partialTabs, ["posts", "media"]);
+});
+
+test("a scan page says which of the two tabs it is", async () => {
+  const { scanPageTab } = await import("../extension/providers.js");
+  assert.equal(scanPageTab("https://x.com/alice", "alice"), "posts");
+  assert.equal(scanPageTab("https://x.com/Alice/?s=20", "alice"), "posts");
+  assert.equal(scanPageTab("https://x.com/alice/media", "alice"), "media");
+  assert.equal(scanPageTab("https://x.com/alice/Media/#a", "alice"), "media");
+  assert.equal(scanPageTab("https://x.com/alice/with_replies", "alice"), null);
+  assert.equal(scanPageTab("https://x.com/bob/media", "alice"), null);
+});
 
 test("both passes merge without duplicates and keep the newer position", () => {
   const m = mergeScanPasses(pass({ urls: ["u1", "u2"], newestId: "900" }), pass({ urls: ["u2", "u3"], newestId: "1000" }));

@@ -203,6 +203,7 @@ test("a toolbar scan reads each tab from its top, whichever tab and scroll it st
     assert.equal(record.status, "done");
     assert.deepEqual(record.urls, ["p1", "m1"]);
     assert.equal(record.continuation, undefined);
+    assert.deepEqual(record.partialTabs, [], "both tabs were read to the end");
     // The user's page and scroll are put back.
     const tab = world.tabs.get(7);
     assert.equal(tab.url, startUrl);
@@ -236,6 +237,7 @@ test("Scan Again on the Media tab carries on from where it was scrolled, without
   const record = settledRecord(world, key);
   assert.equal(record.status, "done");
   assert.equal(record.continuation, true);
+  assert.equal(record.tab, "media", "the record says which tab it read");
   assert.deepEqual(record.urls, ["m2"]);
 });
 
@@ -249,6 +251,7 @@ test("Scan Again on the Posts tab carries on there too", async () => {
 
   assert.equal(response.continuation, true);
   assert.deepEqual(world.chunks.map((chunk) => chunk.scrollY), [900]);
+  assert.equal(settledRecord(world, key).tab, "posts");
 });
 
 test("Scan Again from any other tab runs the whole scan from the top and puts the tab back", async () => {
@@ -377,4 +380,115 @@ test("a progress write still in flight when a pass ends cannot overwrite the res
   assert.equal(world.store.get(batchKey(world)).status, "done", "the last write is the result");
   const order = world.writes.filter(([key]) => key === batchKey(world)).map(([, status]) => status);
   assert.equal(order.at(-1), "done");
+});
+
+// --- R5: a scan that lost the tab settles nothing and moves nothing ----------
+
+const secondBatchKey = (world) => new URL(world.created[1].url).searchParams.get("profileBatchKey");
+
+test("a scan replaced during its last read writes no result", async () => {
+  const world = makeWorld({ tabUrl: REPLIES, scrollY: 640, pages: { [plain(POSTS)]: ["p1"], [plain(MEDIA)]: ["m1"] } });
+  let calls = 0;
+  let letFirstGo;
+  const held = new Promise((resolve) => (letFirstGo = resolve));
+  world.chunkHook = async () => {
+    calls += 1;
+    if (calls === 2) await held; // the older scan's Media pass, its last read
+    return null;
+  };
+  await load(world);
+
+  await clickToolbar(world);
+  await until(() => world.created.length === 1 && world.chunks.length === 2, "the first scan's Media pass");
+  const firstKey = batchKey(world);
+  await clickToolbar(world);
+  await until(() => world.created.length === 2 && settledRecord(world, secondBatchKey(world)), "the second scan");
+
+  letFirstGo();
+  await until(() => !world.store.has(firstKey), "the older scan to stop");
+
+  assert.equal(world.writes.filter(([key, status]) => key === firstKey && status !== "scanning").length, 0);
+  assert.equal(settledRecord(world, secondBatchKey(world)).status, "done");
+});
+
+test("a scan replaced while it puts the tab back does not navigate or scroll it", async () => {
+  const world = makeWorld({ tabUrl: REPLIES, scrollY: 640, pages: { [plain(POSTS)]: ["p1"], [plain(MEDIA)]: ["m1"] } });
+  let firstKey = null;
+  let letCleanupGo;
+  const cleanupHeld = new Promise((resolve) => (letCleanupGo = resolve));
+  let cleanupHeldOnce = false;
+  // The older scan's first write after its last read (the start of putting the
+  // tab back) is held up in storage.
+  world.setHook = async (key) => {
+    if (world.chunks.length >= 2 && key === firstKey && !cleanupHeldOnce) {
+      cleanupHeldOnce = true;
+      await cleanupHeld;
+    }
+  };
+  let calls = 0;
+  let letSecondGo;
+  const secondHeld = new Promise((resolve) => (letSecondGo = resolve));
+  world.chunkHook = async () => {
+    calls += 1;
+    if (calls === 3) await secondHeld; // the newer scan's Posts pass
+    return null;
+  };
+  await load(world);
+
+  await clickToolbar(world);
+  await until(() => world.created.length === 1, "the first scan");
+  firstKey = batchKey(world);
+  await until(() => cleanupHeldOnce, "the older scan to start putting the tab back");
+  await clickToolbar(world);
+  await until(() => world.chunks.length === 3, "the newer scan's Posts pass");
+  assert.equal(plain(world.tabs.get(7).url), plain(POSTS), "the newer scan moved the tab to Posts");
+
+  const touched = world.log.length;
+  letCleanupGo();
+  for (let i = 0; i < 100; i += 1) {
+    mock.timers.tick(100);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(world.log.length, touched, "the older scan did not move the tab it lost");
+
+  letSecondGo();
+  await until(() => world.created.length === 2 && settledRecord(world, secondBatchKey(world)), "the newer scan");
+  assert.equal(world.tabs.get(7).url, REPLIES, "the newer scan put it back where the user had it");
+  assert.equal(world.tabs.get(7).scrollY, 640);
+});
+
+test("a scan that replaces one on another creator's page goes back to the page it started on", async () => {
+  const BOB = "https://x.com/bob";
+  const world = makeWorld({
+    tabUrl: REPLIES,
+    scrollY: 640,
+    pages: { [plain(POSTS)]: ["p1"], [plain(MEDIA)]: ["m1"], [plain(BOB)]: ["b1"], [plain(`${BOB}/media`)]: ["b2"] },
+  });
+  let calls = 0;
+  let letFirstGo;
+  const held = new Promise((resolve) => (letFirstGo = resolve));
+  world.chunkHook = async () => {
+    calls += 1;
+    if (calls === 1) await held; // the first creator's scan hangs in its Posts pass
+    return null;
+  };
+  await load(world);
+
+  await clickToolbar(world);
+  await until(() => world.created.length === 1 && world.chunks.length === 1, "the first scan");
+  // The user opens another creator's profile in this tab and scans that.
+  const tab = world.tabs.get(7);
+  tab.url = BOB;
+  tab.scrollY = 200;
+  await clickToolbar(world);
+  await until(() => world.created.length === 2 && settledRecord(world, secondBatchKey(world)), "the second scan");
+
+  assert.equal(world.tabs.get(7).url, BOB, "back on the page it started from, not the first creator's");
+  assert.equal(world.tabs.get(7).scrollY, 200);
+  assert.deepEqual(settledRecord(world, secondBatchKey(world)).urls, ["b1", "b2"]);
+
+  const touched = world.log.length;
+  letFirstGo();
+  await until(() => !world.store.has(batchKey(world)), "the first scan to stop");
+  assert.equal(world.log.length, touched, "the first scan touched nothing");
 });
