@@ -86,6 +86,9 @@ const state = {
   handles: [],
   libraryRoot: "",
   partialAcknowledged: false,
+  // The tabs of the profile that were only part read ("posts", "media"; "all"
+  // when a scan did not say which): a pass over one tab clears only its own.
+  partialTabs: new Set(),
   plan: null,
   playerName: playerLabel(""),
   // The videos a Scan Again was started with: a continuation of the same page
@@ -260,19 +263,20 @@ function duplicatePromptText(duplicateJob, duplicateCount) {
   return `${intro}\n\n${title}${location}\n\nDownload duplicate video files anyway?`;
 }
 
-// Where to scroll before Scan Again: the tab a scan carries on from.
-function scrollAdvice() {
+// What Scan Again does for this profile. On X it carries on from where the Posts
+// or Media tab is scrolled and adds what it finds; on Facebook it is a new scan
+// of the page that replaces these videos, so it is not described as an addition.
+function scanAgainAdvice() {
   return batchTargetForUrl(state.targetUrl)?.provider === "facebook"
-    ? "the profile's reels page"
-    : "the profile's Posts or Media tab";
+    ? "scroll further down the profile's reels page and use Scan Again to scan it afresh"
+    : "scroll further down the profile's Posts or Media tab and use Scan Again to add older posts to them";
 }
 
 function partialScanMessage(count) {
   const label = count === 1 ? "video link" : "video links";
   return (
     `The scan stopped early, so this is only part of the profile: ${count} ${label} found so far. ` +
-    `Queue these first, or scroll further down ${scrollAdvice()} and use Scan Again to ` +
-    "add older posts to them. Already queued videos are skipped."
+    `Queue these first, or ${scanAgainAdvice()}. Already queued videos are skipped.`
   );
 }
 
@@ -280,8 +284,7 @@ function partialScanPromptText(count) {
   const label = count === 1 ? "video" : "videos";
   return (
     "The profile scan stopped early before it reached the end of this profile.\n\n" +
-    `Only ${count} ${label} were found so far. To find older posts, scroll further down ` +
-    `${scrollAdvice()} and use Scan Again before queueing.\n\n` +
+    `Only ${count} ${label} were found so far. You can ${scanAgainAdvice()} before queueing.\n\n` +
     `Queue these ${count} ${label} now anyway?`
   );
 }
@@ -311,6 +314,37 @@ function applyBusyState() {
 function setBusy(isBusy) {
   downloadBusy = isBusy;
   applyBusyState();
+}
+
+// A scan that failed or stalled leaves the videos found before it where they
+// were: still there to queue (with the partial confirmation if they were
+// partial), and the next Scan Again adds to them, never to an empty list.
+function keepEarlierUrls() {
+  state.profileUrls = state.priorUrls;
+  state.scanPartial = state.partialTabs.size > 0 && state.priorUrls.length > 0;
+}
+
+function earlierUrlsNote() {
+  const count = state.priorUrls.length;
+  return count ? ` The ${count} ${count === 1 ? "video" : "videos"} found earlier can still be queued.` : "";
+}
+
+// Which tabs are only part read after this record: a continuation covers one
+// tab and settles that tab alone; a full scan says which tabs it left partial.
+function partialTabsAfter(record) {
+  if (record.continuation && record.tab) {
+    const tabs = new Set(state.partialTabs);
+    if (record.partial) {
+      tabs.add(record.tab);
+    } else {
+      tabs.delete(record.tab);
+    }
+    return tabs;
+  }
+  if (Array.isArray(record.partialTabs)) {
+    return new Set(record.partialTabs);
+  }
+  return record.partial ? new Set(["all"]) : new Set();
 }
 
 function releaseScanRecord() {
@@ -390,9 +424,9 @@ function applyScanRecord(record) {
   if (record.status === "error") {
     state.scanSettled = true;
     state.scanStatus = "error";
-    state.profileUrls = [];
+    keepEarlierUrls();
     state.profileScanError = record.error || "Could not scan the profile media page.";
-    showMessage("error", state.profileScanError);
+    showMessage("error", `${state.profileScanError}${earlierUrlsNote()}`);
     setRescanVisible(canRescan());
     releaseScanRecord();
     applyBusyState();
@@ -410,7 +444,8 @@ function applyScanRecord(record) {
   state.priorUrls = [];
   state.profileUrls = urls;
   state.profileName = record.profileName || "";
-  state.scanPartial = Boolean(record.partial) && urls.length > 0;
+  state.partialTabs = partialTabsAfter(record);
+  state.scanPartial = state.partialTabs.size > 0 && urls.length > 0;
   state.partialAcknowledged = false;
 
   if (state.scanPartial) {
@@ -477,14 +512,14 @@ async function handleScanStall() {
   }
 
   state.scanStatus = "stalled";
-  state.profileUrls = [];
+  keepEarlierUrls();
   state.profileScanError =
     "The profile scan stopped responding — Chrome may have shut down the extension's " +
     "background worker. " +
     (canRescan()
       ? "Use Scan Again to restart it."
       : "Reload the profile media page and start the download again.");
-  showMessage("error", state.profileScanError);
+  showMessage("error", `${state.profileScanError}${earlierUrlsNote()}`);
   setRescanVisible(canRescan());
   applyBusyState();
 }
@@ -523,9 +558,9 @@ async function requestRescan() {
   } catch (error) {
     clearScanWatchdog();
     state.scanStatus = "stalled";
-    state.profileUrls = [];
+    keepEarlierUrls();
     state.profileScanError = error.message || "Could not restart the profile scan.";
-    showMessage("error", state.profileScanError);
+    showMessage("error", `${state.profileScanError}${earlierUrlsNote()}`);
     setRescanVisible(canRescan());
     applyBusyState();
   }
@@ -1329,7 +1364,7 @@ async function startDownload(directory, allowDuplicate = false, notice = "") {
       }
       const suffix = notes.length ? ` (${notes.join("; ")})` : "";
       const partialNote = state.scanPartial
-        ? ` This was a partial scan — scroll ${scrollAdvice()} further and use Scan Again for older posts.`
+        ? ` This was a partial scan. You can ${scanAgainAdvice()}.`
         : "";
       showMessage(
         state.scanPartial ? "warning" : "success",

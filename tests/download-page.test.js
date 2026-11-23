@@ -146,6 +146,9 @@ async function boot(world, search = "") {
         if (message.type === "check-handle") {
           return { ok: true, newestId: "1001", ...world.checkResult };
         }
+        if (message.type === "rescan-profile") {
+          return world.rescanResponse || { ok: true, continuation: true };
+        }
         return { ok: true };
       },
     },
@@ -155,7 +158,8 @@ async function boot(world, search = "") {
         set: async (values) => Object.entries(values).forEach(([key, value]) => storage.set(key, value)),
       },
       session: { get: async () => ({}), remove: async () => {}, set: async () => {} },
-      onChanged: { addListener: noop },
+      // The service worker's scan records arrive through here.
+      onChanged: { addListener: (listener) => (world.onChanged = listener) },
     },
     permissions: { request: async () => true },
   };
@@ -171,6 +175,11 @@ async function boot(world, search = "") {
     $,
     $$,
     sent: (type) => world.log.filter((message) => message.type === type),
+    // The service worker writes a scan record for the picker's key.
+    deliver: (record) => world.onChanged({ [SCAN_KEY]: { newValue: record } }, "session"),
+    rescan: () => $("#rescan-button"),
+    start: () => $("#download-form").dispatchEvent(new window.Event("submit", { cancelable: true })),
+    message: () => $("#message"),
     header: (name) => {
       const group = $$("#download-list > .download-group").find(
         (details) => details.querySelector(".group-handle").textContent === name
@@ -333,4 +342,163 @@ test("opening a favorites view from the chips closes an open player first", asyn
   assert.equal(page.$("#player").classList.contains("hidden"), true, "the player closed");
   assert.equal(page.$("#library-view").classList.contains("hidden"), false);
   assert.match(page.$("#dashboard-label").textContent, /Favorites in group a/);
+});
+
+// --- Scan Again: earlier videos and partial state survive a retry ------------
+
+const SCAN_KEY = "profileBatch:1:picker";
+const MEDIA_PAGE = encodeURIComponent("https://x.com/alice/media");
+const SCANNED = `?url=${MEDIA_PAGE}&source=toolbar&profileBatchKey=${encodeURIComponent(SCAN_KEY)}&profileTabId=7`;
+const link = (id) => `https://x.com/alice/status/${id}`;
+const done = (extra) => ({ status: "done", provider: "twitter", username: "alice", partial: false, ...extra });
+const startedWith = (page) => page.sent("download").at(-1)?.profile_urls;
+
+async function scanned() {
+  const world = makeWorld();
+  const page = await boot(world, SCANNED);
+  return { world, page };
+}
+
+test("a failed Scan Again leaves the earlier videos queueable, and the retry adds to them", async () => {
+  const { page } = await scanned();
+  page.deliver(done({ urls: [link(1001)], partial: true, partialTabs: ["media"] }));
+  assert.equal(page.rescan().classList.contains("hidden"), false, "Scan Again is offered");
+
+  page.rescan().click();
+  await settle();
+  page.deliver({ status: "error", provider: "twitter", username: "alice", error: "The page changed during the scan." });
+  assert.equal(page.rescan().classList.contains("hidden"), false, "and offered again");
+  assert.match(page.message().textContent, /The page changed during the scan\. The 1 video found earlier can still be queued\./);
+
+  page.start();
+  await waitFor(() => page.sent("download").length === 1, "the download");
+  assert.deepEqual(startedWith(page), [link(1001)], "the earlier video is still queued");
+  await settle();
+
+  page.rescan().click();
+  await settle();
+  page.deliver(done({ continuation: true, tab: "media", urls: [link(1002)], partial: false }));
+  page.start();
+  await waitFor(() => page.sent("download").length === 2, "the second download");
+  assert.deepEqual(startedWith(page), [link(1001), link(1002)], "the retry adds to the earlier video, not to nothing");
+});
+
+test("two failures in a row still keep the earlier videos", async () => {
+  const { page } = await scanned();
+  page.deliver(done({ urls: [link(1001)], partial: true, partialTabs: ["media"] }));
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    page.rescan().click();
+    await settle();
+    page.deliver({ status: "error", provider: "twitter", username: "alice", error: "Nope." });
+  }
+  page.rescan().click();
+  await settle();
+  page.deliver(done({ continuation: true, tab: "media", urls: [link(1003)], partial: false }));
+  page.start();
+  await waitFor(() => page.sent("download").length === 1, "the download");
+  assert.deepEqual(startedWith(page), [link(1001), link(1003)]);
+});
+
+test("a Scan Again that cannot be sent leaves the earlier videos too", async () => {
+  const { world, page } = await scanned();
+  world.rescanResponse = { ok: false, error: "The profile tab is gone." };
+  page.deliver(done({ urls: [link(1001)], partial: true, partialTabs: ["media"] }));
+
+  page.rescan().click();
+  await settle();
+
+  assert.match(page.message().textContent, /The profile tab is gone\. The 1 video found earlier can still be queued\./);
+  page.start();
+  await waitFor(() => page.sent("download").length === 1, "the download");
+  assert.deepEqual(startedWith(page), [link(1001)]);
+});
+
+test("a continuation that finds nothing new keeps the videos it was started with", async () => {
+  const { page } = await scanned();
+  page.deliver(done({ urls: [link(1001)], partial: true, partialTabs: ["media"] }));
+  page.rescan().click();
+  await settle();
+  page.deliver(done({ continuation: true, tab: "media", urls: [], partial: false }));
+  page.start();
+  await waitFor(() => page.sent("download").length === 1, "the download");
+  assert.deepEqual(startedWith(page), [link(1001)]);
+});
+
+// --- Partial state is per tab -------------------------------------------------
+
+test("a complete pass over one tab does not clear the other tab's partial warning", async () => {
+  const { page } = await scanned();
+  let confirms = 0;
+  page.window.confirm = () => {
+    confirms += 1;
+    return true;
+  };
+  // The Media tab could not be opened, so only Posts was read.
+  page.deliver(done({ urls: [link(1001)], partial: true, partialTabs: ["media"] }));
+  assert.equal(page.message().className.includes("warning"), true);
+
+  page.rescan().click();
+  await settle();
+  page.deliver(done({ continuation: true, tab: "posts", urls: [link(1002)], partial: false }));
+
+  assert.equal(page.message().className.includes("warning"), true, "Media is still unread");
+  assert.equal(page.rescan().classList.contains("hidden"), false, "Scan Again is still offered");
+  page.start();
+  await waitFor(() => page.sent("download").length === 1, "the download");
+  assert.equal(confirms, 1, "the partial-scan confirmation was asked");
+  assert.deepEqual(startedWith(page), [link(1001), link(1002)]);
+  await settle();
+
+  // Reading Media to the end clears it, and nothing is asked any more.
+  page.rescan().click();
+  await settle();
+  page.deliver(done({ continuation: true, tab: "media", urls: [link(1003)], partial: false }));
+  assert.equal(page.message().className.includes("success"), true);
+  assert.equal(page.rescan().classList.contains("hidden"), true);
+  page.start();
+  await waitFor(() => page.sent("download").length === 2, "the second download");
+  assert.equal(confirms, 1, "no confirmation once nothing is partial");
+});
+
+test("a pass over a tab that is still partial leaves it partial", async () => {
+  const { page } = await scanned();
+  page.deliver(done({ urls: [link(1001)], partial: true, partialTabs: ["posts"] }));
+  page.rescan().click();
+  await settle();
+  page.deliver(done({ continuation: true, tab: "posts", urls: [link(1002)], partial: true }));
+
+  assert.equal(page.rescan().classList.contains("hidden"), false);
+  assert.equal(page.message().className.includes("warning"), true);
+});
+
+test("a complete scan offers no Scan Again", async () => {
+  const { page } = await scanned();
+  page.deliver(done({ urls: [link(1001)], partialTabs: [] }));
+  assert.equal(page.rescan().classList.contains("hidden"), true);
+});
+
+// --- Facebook's Scan Again is a fresh scan -----------------------------------
+
+test("a Facebook partial scan does not promise that Scan Again adds older posts", async () => {
+  const world = makeWorld();
+  const reels = encodeURIComponent("https://www.facebook.com/somepage/reels");
+  const page = await boot(world, `?url=${reels}&source=toolbar&profileBatchKey=${encodeURIComponent(SCAN_KEY)}&profileTabId=7`);
+
+  page.deliver({
+    status: "done",
+    provider: "facebook",
+    username: "somepage",
+    urls: ["https://www.facebook.com/reel/1"],
+    partial: true,
+  });
+
+  const text = page.message().textContent;
+  assert.match(text, /scan it afresh/);
+  assert.doesNotMatch(text, /add older posts/);
+});
+
+test("an X partial scan says Scan Again adds older posts", async () => {
+  const { page } = await scanned();
+  page.deliver(done({ urls: [link(1001)], partial: true, partialTabs: ["media"] }));
+  assert.match(page.message().textContent, /Scan Again to add older posts to them/);
 });

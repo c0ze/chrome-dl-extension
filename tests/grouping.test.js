@@ -201,6 +201,12 @@ test("a known creator with one folder starts there", () => {
 test("a former handle starts in the current folder", () => {
   assert.equal(downloadPlan([alice], "OldAlice", false).auto.directory, `${R}/group a/alice`);
 });
+test("a repaired legacy folder with a mixed-case name starts in the directory that exists", () => {
+  // The host reads group a/Alice (stored for the handle alice) as this folder.
+  const mended = { handle: "alice", aliases: [], folders: [{ base_dir: `${R}/group a`, name: "Alice", group: "group a" }] };
+  assert.equal(downloadPlan([mended], "alice", false).auto.directory, `${R}/group a/Alice`);
+  assert.equal(groupDirectory(R, "group a", "alice", [mended], false), `${R}/group a/Alice`);
+});
 test("a creator in two groups waits for a choice", () => {
   assert.deepEqual(downloadPlan([bob], "bob", false), { auto: null, groups: ["group a", "group b"] });
 });

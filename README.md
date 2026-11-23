@@ -74,8 +74,11 @@ is loaded.
   the button and is scrolled back to where it was, and then the picker shows
   the result; if you opened another page in that tab while the scan ran, the
   tab is left where you took it. Clicking the button again on a tab that is
-  still being scanned starts a new scan there, and the older one stops. The
-  host queues those videos one by one and downloads them into a `username/`
+  still being scanned starts a new scan there, and the older one stops without
+  moving the tab or settling anything; the newer one puts the tab back where
+  the user had it, unless that tab has since been taken to another creator's
+  profile or another page, in which case it goes back to the page it was on
+  when the newer scan started. The host queues those videos one by one and downloads them into a `username/`
   folder inside the selected target folder.
 - Right-clicking a link to a profile and choosing `Download with yt-dlp` opens
   the picker for that profile but does not scan: the link is not the tab you
@@ -101,7 +104,11 @@ is loaded.
   filed under the creator's current handle, never as a second entry, and goes
   into a folder named after the current handle in a group the creator is not
   in yet. A handle list written by an earlier version, which stored a
-  creator's own folder as if it were a group, is read as the group it is in.
+  creator's own folder as if it were a group, is read as the group it is in,
+  with the folder named as the directory is on disk (`group a/Alice`, not
+  `group a/alice`), and a creator whose repaired folder and recorded folder are
+  the same directory is listed once, so auto-start and the header `Download`
+  still work for them.
 - `Edit` on a handle renames it or files it under another group. A rename
   creates a folder for the new handle and moves the old handle's folder inside
   it, so one creator's videos stay under their current handle; renaming to a
@@ -171,7 +178,9 @@ is loaded.
   folder is refused, and its record and the download archive are left alone. A
   video removed from Favorites or Library Check, which has no post link of its
   own, is refused by the post id in its file name, so another form of the
-  link cannot bring it back either.
+  link cannot bring it back either. That holds for an X video (or one with no
+  recorded link, which is taken for one); a removed Facebook reel only refuses
+  its own link.
 - Favorites are shared with `vtag`, the Haruna helper that lives in this
   repository (`native-host/vtag.py`, linked as `~/.local/bin/vtag` by the
   installer): Haruna's custom command `vtag fav`, bound to a mouse button,
@@ -235,7 +244,13 @@ is loaded.
   carries on from where you scrolled, reads only that tab and adds what it finds
   to the videos already found. From any other tab of the profile `Scan Again`
   runs the whole two-tab scan again, from the top of each, and puts the tab back
-  afterwards.
+  afterwards. Each tab is partial or not on its own: a complete pass over Posts
+  does not clear a Videos tab that is still partial, so the warning, `Scan
+  Again` and the confirmation stay until both are read. A `Scan Again` that
+  fails, or finds nothing new, leaves the videos found so far where they are,
+  still queueable, and the next one adds to them. On Facebook `Scan Again` is a
+  fresh scan of the reels page from where it is scrolled, and replaces the
+  videos found.
 - Reserved X/Twitter routes are never treated as profile batches, by either the
   extension or the host: `home`, `explore`, `notifications`, `messages`, `i`,
   `settings`, `search`, `compose`, `jobs`, `lists`, `bookmarks`, `communities`,
