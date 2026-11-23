@@ -97,6 +97,8 @@ const state = {
   profileName: "",
   profileScanError: "",
   profileUrls: null,
+  // The tabs Scan Again has read to their end since the last scan from the top.
+  readTabs: new Set(),
   rescanTabId: null,
   scanKey: "",
   scanPartial: false,
@@ -329,22 +331,35 @@ function earlierUrlsNote() {
   return count ? ` The ${count} ${count === 1 ? "video" : "videos"} found earlier can still be queued.` : "";
 }
 
-// Which tabs are only part read after this record: a continuation covers one
-// tab and settles that tab alone; a full scan says which tabs it left partial.
-function partialTabsAfter(record) {
+// Records which tabs are only part read after this record. A scan from the top
+// says which tabs it left partial (`partialTabs`) and starts the count again. A
+// continuation reads one tab from wherever the user had scrolled it, so it can
+// add a mark but never clears one an earlier pass set: it cannot know it covered
+// the gap between where that pass stopped and where it began. The one mark it can
+// settle is "all", which an earlier record that did not say which tab was partial
+// leaves: once both tabs have been read to their end since, it goes.
+function applyPartialTabs(record) {
   if (record.continuation && record.tab) {
     const tabs = new Set(state.partialTabs);
     if (record.partial) {
       tabs.add(record.tab);
+      state.readTabs.delete(record.tab);
     } else {
-      tabs.delete(record.tab);
+      state.readTabs.add(record.tab);
     }
-    return tabs;
+    if (state.readTabs.has("posts") && state.readTabs.has("media")) {
+      tabs.delete("all");
+    }
+    state.partialTabs = tabs;
+    return;
   }
+
+  state.readTabs = new Set();
   if (Array.isArray(record.partialTabs)) {
-    return new Set(record.partialTabs);
+    state.partialTabs = new Set(record.partialTabs);
+  } else {
+    state.partialTabs = record.partial ? new Set(["all"]) : new Set();
   }
-  return record.partial ? new Set(["all"]) : new Set();
 }
 
 function releaseScanRecord() {
@@ -444,7 +459,7 @@ function applyScanRecord(record) {
   state.priorUrls = [];
   state.profileUrls = urls;
   state.profileName = record.profileName || "";
-  state.partialTabs = partialTabsAfter(record);
+  applyPartialTabs(record);
   state.scanPartial = state.partialTabs.size > 0 && urls.length > 0;
   state.partialAcknowledged = false;
 

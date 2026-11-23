@@ -449,15 +449,70 @@ test("a complete pass over one tab does not clear the other tab's partial warnin
   assert.deepEqual(startedWith(page), [link(1001), link(1002)]);
   await settle();
 
-  // Reading Media to the end clears it, and nothing is asked any more.
+  // Reading Media to the end by a continuation does not clear Media's mark either:
+  // only a scan from the top can say a tab is whole.
   page.rescan().click();
   await settle();
   page.deliver(done({ continuation: true, tab: "media", urls: [link(1003)], partial: false }));
+  assert.equal(page.message().className.includes("warning"), true);
+  assert.equal(page.rescan().classList.contains("hidden"), false);
+
+  // A scan from the top that read both tabs through does.
+  page.rescan().click();
+  await settle();
+  page.deliver(done({ urls: [link(1001), link(1002), link(1003)], partialTabs: [] }));
   assert.equal(page.message().className.includes("success"), true);
   assert.equal(page.rescan().classList.contains("hidden"), true);
   page.start();
   await waitFor(() => page.sent("download").length === 2, "the second download");
   assert.equal(confirms, 1, "no confirmation once nothing is partial");
+});
+
+test("an empty complete retry of a partial tab leaves it partial", async () => {
+  const { page } = await scanned();
+  let confirms = 0;
+  page.window.confirm = () => {
+    confirms += 1;
+    return true;
+  };
+  page.deliver(done({ urls: [link(1001)], partial: true, partialTabs: ["media"] }));
+
+  page.rescan().click();
+  await settle();
+  page.deliver(done({ continuation: true, tab: "media", urls: [], partial: false }));
+
+  assert.equal(page.message().className.includes("warning"), true, "still the partial warning");
+  assert.equal(page.rescan().classList.contains("hidden"), false, "Scan Again is still offered");
+  page.start();
+  await waitFor(() => page.sent("download").length === 1, "the download");
+  assert.equal(confirms, 1, "the confirmation was asked");
+  assert.deepEqual(startedWith(page), [link(1001)]);
+});
+
+// --- A scan record that does not say which tab was partial --------------------
+
+test("a record that does not name the partial tab is cleared by both tabs being read, or by a scan from the top", async () => {
+  const first = await scanned();
+  first.page.deliver(done({ urls: [link(1001)], partial: true })); // no partialTabs
+  assert.equal(first.page.rescan().classList.contains("hidden"), false);
+
+  first.page.rescan().click();
+  await settle();
+  first.page.deliver(done({ continuation: true, tab: "posts", urls: [link(1002)], partial: false }));
+  assert.equal(first.page.message().className.includes("warning"), true, "Media is not read yet");
+
+  first.page.rescan().click();
+  await settle();
+  first.page.deliver(done({ continuation: true, tab: "media", urls: [link(1003)], partial: false }));
+  assert.equal(first.page.message().className.includes("success"), true, "both tabs read: the warning is gone");
+  assert.equal(first.page.rescan().classList.contains("hidden"), true);
+
+  const second = await scanned();
+  second.page.deliver(done({ urls: [link(1001)], partial: true }));
+  second.page.rescan().click();
+  await settle();
+  second.page.deliver(done({ urls: [link(1001), link(1002)], partial: false }));
+  assert.equal(second.page.message().className.includes("success"), true, "a complete scan from the top clears it");
 });
 
 test("a pass over a tab that is still partial leaves it partial", async () => {

@@ -76,9 +76,9 @@ is loaded.
   tab is left where you took it. Clicking the button again on a tab that is
   still being scanned starts a new scan there, and the older one stops without
   moving the tab or settling anything; the newer one puts the tab back where
-  the user had it, unless that tab has since been taken to another creator's
-  profile or another page, in which case it goes back to the page it was on
-  when the newer scan started. The host queues those videos one by one and downloads them into a `username/`
+  the user had it, however many scans replace one another, unless that tab
+  has since been taken to another creator's profile or another page, in which
+  case it goes back to the page it was on when the newer scan started. The host queues those videos one by one and downloads them into a `username/`
   folder inside the selected target folder.
 - Right-clicking a link to a profile and choosing `Download with yt-dlp` opens
   the picker for that profile but does not scan: the link is not the tab you
@@ -179,8 +179,9 @@ is loaded.
   video removed from Favorites or Library Check, which has no post link of its
   own, is refused by the post id in its file name, so another form of the
   link cannot bring it back either. That holds for an X video (or one with no
-  recorded link, which is taken for one); a removed Facebook reel only refuses
-  its own link.
+  recorded link, which is taken for one), whatever form the link had
+  (`twitter.com/i/videos/tweet/<id>` included); a removed Facebook reel only
+  refuses its own link.
 - Favorites are shared with `vtag`, the Haruna helper that lives in this
   repository (`native-host/vtag.py`, linked as `~/.local/bin/vtag` by the
   installer): Haruna's custom command `vtag fav`, bound to a mouse button,
@@ -244,9 +245,13 @@ is loaded.
   carries on from where you scrolled, reads only that tab and adds what it finds
   to the videos already found. From any other tab of the profile `Scan Again`
   runs the whole two-tab scan again, from the top of each, and puts the tab back
-  afterwards. Each tab is partial or not on its own: a complete pass over Posts
-  does not clear a Videos tab that is still partial, so the warning, `Scan
-  Again` and the confirmation stay until both are read. A `Scan Again` that
+  afterwards. Each tab is partial or not on its own, and a `Scan Again` that
+  carries on from where you scrolled never clears a partial mark an earlier
+  pass set (it starts mid-page, so it cannot tell that it covered what that
+  pass left): the warning, `Scan Again` and the confirmation stay until a
+  scan from the top, with the toolbar button again, reads both tabs through.
+  The one mark `Scan Again` can settle is the one left by a scan that did not
+  say which tab was partial, once it has read both tabs to their end. A `Scan Again` that
   fails, or finds nothing new, leaves the videos found so far where they are,
   still queueable, and the next one adds to them. On Facebook `Scan Again` is a
   fresh scan of the reels page from where it is scrolled, and replaces the
