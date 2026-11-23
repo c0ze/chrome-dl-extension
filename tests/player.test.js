@@ -92,11 +92,38 @@ test("next and prev step through and stop at the ends", () => {
   assert.ok(header().includes("2 of 3"), header());
 });
 
-test("every step starts the next video muted again", () => {
-  const { button, video } = setup();
-  video.muted = false; // the viewer turned the sound on
+// The viewer turning the sound on or off with the video's own control.
+function setSound(window, video, on) {
+  video.muted = !on;
+  video.dispatchEvent(new window.Event("volumechange"));
+}
+
+test("sound turned on stays on for the next and previous videos", () => {
+  const { window, button, video } = setup();
+  setSound(window, video, true);
+
+  button("next").click();
+  assert.equal(video.muted, false);
+  button("prev").click();
+  assert.equal(video.muted, false);
+});
+
+test("sound turned off again keeps the next videos muted", () => {
+  const { window, button, video } = setup();
+  setSound(window, video, true);
+  setSound(window, video, false);
+
   button("next").click();
   assert.equal(video.muted, true);
+});
+
+test("the sound choice carries over to the next video opened from the list", () => {
+  const { window, button, video, player, list } = setup();
+  setSound(window, video, true);
+  button("close").click();
+
+  player.open(list, 2, { toggleFavorite: async () => true, remove: async () => true, external: () => {} });
+  assert.equal(video.muted, false);
 });
 
 test("removing a middle video shows the next one; removing the last closes", async () => {

@@ -292,8 +292,9 @@ is loaded.
   download folder is opened.
 - `Play` on a finished download, or a click on its tile's picture, plays the
   video in an overlay over the downloads column, in the same window. It starts
-  muted every time and uses Chrome's own video controls (seek, volume,
-  fullscreen, picture-in-picture). The header shows `@handle · 2 of 5`, and
+  muted; turning the sound on (or off again) carries over to `Prev`, `Next` and
+  the next video you open, until the page is reloaded. It uses Chrome's own
+  video controls (seek, volume, fullscreen, picture-in-picture). The header shows `@handle · 2 of 5`, and
   `Prev` and `Next` step through that handle's finished downloads in the order
   the dashboard lists them. `Favorite` and `Remove` do what they do on the
   dashboard, so `Remove` asks first and then moves on to the next video;

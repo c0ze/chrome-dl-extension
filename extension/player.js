@@ -72,7 +72,14 @@ export function createPlayer({ root, playerName }) {
   const video = element("video", "player-video");
   video.controls = true;
   video.autoplay = true;
-  video.muted = true;
+  // Videos start muted. Turning the sound on or off with the video's own
+  // control is kept for the videos after it (Prev, Next, another one opened
+  // from the list) until the page is reloaded.
+  let muted = true;
+  video.muted = muted;
+  video.addEventListener("volumechange", () => {
+    muted = video.muted;
+  });
 
   const prev = actionButton("prev", "‹ Prev", "Previous video", "button-muted-small", () => step(-1));
   const favorite = actionButton("favorite", "", "", "favorite-button", () => toggleFavorite());
@@ -156,8 +163,7 @@ export function createPlayer({ root, playerName }) {
       return;
     }
     clearNotice();
-    // Chrome keeps the viewer's unmute across videos; every one starts muted.
-    video.muted = true;
+    video.muted = muted;
     video.src = fileUrl(current().path);
   }
 
